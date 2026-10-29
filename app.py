@@ -2274,6 +2274,8 @@ def init_state() -> None:
         "editor_key": 0,              # 用于强制刷新 data_editor
         "editor_hash": "",            # 编辑内容指纹，避免重复同步
         "confirm_clear": False,       # 「清空全部日程」的二次确认状态
+        "clear_origin": "",           # 确认条归属：ingest / table / sidebar
+        "uploader_nonce": 0,          # 换 key 用：清空时把已选图片一并丢弃
         "use_ai": True,               # 是否优先调用大模型
         "default_remind": 15,         # 全局提醒（分钟）
         "calendar_name": "我的 AI 日程",
@@ -2295,6 +2297,92 @@ def init_state() -> None:
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+
+# ---------------------------------------------------------------------------
+# 11b. 统一的「清空」入口
+# ---------------------------------------------------------------------------
+# 说明：本应用的设计是「多次输入追加、不覆盖」，所以新的一批日程会接在旧日程后面。
+# 想从头开始必须先清空。之前只有「清空输入」一个按钮，它只清文本框、不动已解析的
+# 日程，很容易被当成「清空这一次的全部内容」而误用，于是出现「新日程和旧日程叠在
+# 一起」的现象。这里把清空拆成两条明确的路：
+#   · 清空输入 —— 只擦掉文本框和已选图片，已录入的日程保持不变
+#   · 清空全部日程 —— 日程、解析报告、输入框、已选图片全部归零，回到初始状态
+# 所有清空动作都走 on_click 回调：回调在脚本重跑前执行，此时改写 text_area 绑定的
+# session_state 不会触发 StreamlitAPIException。
+
+def _reset_all() -> None:
+    """彻底重置，回到「刚打开页面」的状态。只能作为按钮回调调用。"""
+    st.session_state.events = []
+    st.session_state.last_report = None
+    st.session_state.last_error = ""
+    st.session_state.last_ocr = []
+    st.session_state.total_parsed = 0
+    # 输入区一并清空：否则用户清完日程、直接再点解析，旧文本又被解析一遍
+    st.session_state.raw_text_input = ""
+    # 换掉 uploader 的 key，已选图片随之丢弃（否则旧截图会被重复 OCR）
+    st.session_state.uploader_nonce += 1
+    # 重复设置面板指向的日程已不存在，复位避免面板停在空气上
+    st.session_state.recur_target_uid = ""
+    st.session_state.recur_enabled = False
+    st.session_state.recur_count = RECUR_COUNT_DEFAULT
+    # 表格按新的 key 重建，旧的下拉框选项一并丢掉
+    st.session_state.editor_key += 1
+    st.session_state.editor_hash = ""
+    for stale in ("del_pick", "recur_pick"):
+        st.session_state.pop(stale, None)
+    st.session_state.confirm_clear = False
+    st.session_state.clear_origin = ""
+    st.session_state.pending_toast = "已清空全部日程，可以重新录入了"
+
+
+def _cb_request_clear(origin: str) -> None:
+    """第一次点击：只亮出确认条，不动数据。"""
+    st.session_state.confirm_clear = True
+    st.session_state.clear_origin = origin
+
+
+def _cb_cancel_clear() -> None:
+    st.session_state.confirm_clear = False
+    st.session_state.clear_origin = ""
+
+
+def render_clear_all_button(origin: str, label: str = "🗑️ 清空全部日程") -> None:
+    """「清空全部日程」的触发按钮，可放进任意列。确认条由 render_clear_all_confirm 渲染。"""
+    st.button(
+        label,
+        key=f"clear_all_{origin}",
+        width="stretch",
+        on_click=_cb_request_clear,
+        args=(origin,),
+        help="把已录入的日程、解析报告、输入框内容和已选图片全部清空，回到空白状态。",
+    )
+
+
+def render_clear_all_confirm(origin: str) -> None:
+    """两段式确认条：放在按钮下方（建议整行，别塞进窄列）。"""
+    if not (st.session_state.get("confirm_clear")
+            and st.session_state.get("clear_origin") == origin):
+        return
+    count = len(st.session_state.events)
+    _html(
+        f'<div class="notice notice-warn" style="margin:8px 0 10px 0;font-size:12.5px;">'
+        f'⚠️ 将清空 <b>{count}</b> 条日程，并清空输入框与已选图片。'
+        f'此操作不可撤销。</div>'
+    )
+    c_yes, c_no = st.columns(2)
+    with c_yes:
+        st.button("确定清空", key=f"clear_yes_{origin}", type="primary",
+                  width="stretch", on_click=_reset_all)
+    with c_no:
+        st.button("取消", key=f"clear_no_{origin}", width="stretch",
+                  on_click=_cb_cancel_clear)
+
+
+def render_clear_all_control(origin: str, label: str = "🗑️ 清空全部日程") -> None:
+    """按钮 + 确认条的组合，用于整行放置（日程表 / 侧边栏）。"""
+    render_clear_all_button(origin, label)
+    render_clear_all_confirm(origin)
 
 
 def _push_events(new_events: list[Event], source_label: str) -> dict[str, Any]:
@@ -2546,13 +2634,10 @@ def render_sidebar() -> None:
             f'</div>',
             unsafe_allow_html=True,
         )
-        if total and st.button("🗑️ 清空全部日程", width="stretch"):
-            st.session_state.events = []
-            st.session_state.last_report = None
-            st.session_state.last_error = ""
-            st.session_state.editor_key += 1
-            st.session_state.editor_hash = ""
-            st.rerun()
+        if total:
+            render_clear_all_control("sidebar")
+        else:
+            st.caption("还没有日程。")
 
         st.markdown("---")
         st.caption("🔒 所有日程与图片仅在本机内存中处理，关闭页面即销毁，不写入任何数据库或文件。")
@@ -2570,11 +2655,14 @@ def _cb_load_sample() -> None:
 
 
 def _cb_clear_input() -> None:
-    """「清空输入」按钮回调：只清输入区，不动已录入的日程。"""
+    """「清空文本框」回调：只擦掉输入区，不动已录入的日程。"""
     st.session_state.raw_text_input = ""
     st.session_state.last_report = None
     st.session_state.last_error = ""
     st.session_state.last_ocr = []
+    # 换掉 uploader 的 key，让已选图片一起消失，
+    # 否则下次解析会把上次那张截图再 OCR 一遍，日程就重复了
+    st.session_state.uploader_nonce += 1
 
 
 def render_ingest_tab() -> None:
@@ -2582,7 +2670,7 @@ def render_ingest_tab() -> None:
     _html(
         '<div class="notice notice-info">'
         '支持<b>纯文本粘贴</b>与<b>截图上传</b>，程序会自动识别标题、时间、地点、优先级与循环规则。'
-        '已录入的日程<b>不会被覆盖</b>，可反复追加。'
+        '已录入的日程<b>不会被覆盖</b>，可反复追加；想从空白开始，点下方「🗑️ 清空全部日程」。'
         '</div>'
     )
 
@@ -2611,6 +2699,9 @@ def render_ingest_tab() -> None:
             type=list(ALLOWED_IMAGE_TYPES),
             accept_multiple_files=True,
             label_visibility="collapsed",
+            # key 里带 nonce：清空时 n+1，等于换一个全新的上传控件，
+            # 已选的旧图片会一起消失，不会被下一次解析重复 OCR
+            key=f"upload_{st.session_state.uploader_nonce}",
             help="单张不超过 10MB，最多 3 张。图片仅在本机内存中做 OCR。",
         )
         if images:
@@ -2622,11 +2713,20 @@ def render_ingest_tab() -> None:
                 except Exception:  # noqa: BLE001
                     st.caption("（该图片无法预览，但仍会尝试识别）")
 
-    st.markdown("")
-    btn_cols = st.columns([1, 1, 1, 2])
+    # --- 已有日程提示：说明「追加」语义，并给出清空入口 ---
+    existing = len(st.session_state.events)
+    if existing:
+        _html(
+            f'<div class="notice notice-info" style="margin:14px 0 6px 0;font-size:12.5px;">'
+            f'当前已有 <b>{existing}</b> 条日程。再次解析会<b>追加</b>在这 {existing} 条后面，'
+            f'不会覆盖。想从空白重新开始，就点下面的「🗑️ 清空全部日程」。</div>'
+        )
 
-    # 「加载示例」「清空输入」必须通过 on_click 回调修改 session_state：
-    # 回调在 rerun 开始时、text_area 实例化之前执行，否则会触发
+    st.markdown("")
+    btn_cols = st.columns([1.15, 1, 1, 1.15])
+
+    # 「加载示例」「清空文本框」「清空全部日程」必须通过 on_click 回调修改
+    # session_state：回调在 rerun 开始时、text_area 实例化之前执行，否则会触发
     # StreamlitAPIException: cannot be modified after the widget is instantiated。
     with btn_cols[0]:
         do_parse = st.button("✨ 开始解析", type="primary", width="stretch")
@@ -2635,7 +2735,13 @@ def render_ingest_tab() -> None:
                   on_click=_cb_load_sample,
                   help="一键填入示例日程，适合比赛现场演示。")
     with btn_cols[2]:
-        st.button("🧹 清空输入", width="stretch", on_click=_cb_clear_input)
+        st.button("🧹 清空文本框", width="stretch", on_click=_cb_clear_input,
+                  help="只清空左侧文字和已上传的截图，已录入的日程不受影响。")
+    with btn_cols[3]:
+        render_clear_all_button("ingest", label="🗑️ 清空全部日程")
+
+    # 确认条整行渲染，避免挤在窄列里换行
+    render_clear_all_confirm("ingest")
 
     # --- 解析 ---
     if do_parse:
@@ -3241,11 +3347,6 @@ def _render_calendar() -> None:
 def render_schedule_tab() -> None:
     events: list[Event] = st.session_state.events
 
-    # 上一步操作留下的提示（st.toast 无法跨 rerun 存活，需中转）
-    if st.session_state.get("pending_toast"):
-        st.toast(st.session_state.pending_toast)
-        st.session_state.pending_toast = ""
-
     if not events:
         _html(
             '<div class="notice notice-info" style="margin-top:16px;">'
@@ -3393,29 +3494,10 @@ def render_schedule_tab() -> None:
                     st.session_state.pending_toast = "已删除 1 条日程"
                     st.rerun()
             with c2:
-                if st.button("清空全部日程", key="clear_all_btn"):
-                    st.session_state.confirm_clear = True
+                render_clear_all_button("table", label="清空全部日程")
 
-            # 二次确认，避免误点把现场演示数据全清空
-            if st.session_state.get("confirm_clear"):
-                _html(
-                    f'<div class="notice notice-warn" style="margin-top:8px;">'
-                    f'⚠️ 将清空全部 <b>{len(st.session_state.events)}</b> 条日程，'
-                    f'此操作不可撤销。确认继续？</div>'
-                )
-                c3, c4 = st.columns(2)
-                with c3:
-                    if st.button("确定清空", key="clear_yes", type="primary"):
-                        st.session_state.events = []
-                        st.session_state.confirm_clear = False
-                        st.session_state.editor_key += 1
-                        st.session_state.editor_hash = ""
-                        st.session_state.pending_toast = "已清空全部日程"
-                        st.rerun()
-                with c4:
-                    if st.button("取消", key="clear_no"):
-                        st.session_state.confirm_clear = False
-                        st.rerun()
+            # 二次确认（与录入页共用同一套逻辑），避免误点把现场演示数据全清空
+            render_clear_all_confirm("table")
         else:
             st.caption("暂无可删除的日程。")
 
@@ -3647,6 +3729,16 @@ def render_help_tab() -> None:
             "图片 OCR 在本机完成，原图不会离开你的电脑。"
             "如果你配置了大模型，只有**识别出的文字**会发送给该模型服务用于解析。"
         )
+    with st.expander("为什么新录入的日程会和上一次的叠在一起？"):
+        st.markdown(
+            "这是**刻意设计**的：录入页每次解析都是**追加**，不会覆盖已录入的内容，"
+            "方便你把微信记录、课表、备忘录分几次丢进来。\n\n"
+            "想从空白开始，用录入页右侧的 **🗑️ 清空全部日程**（日程表页、侧边栏也有同一个入口）："
+            "它会一次性清掉所有日程、解析报告、输入框里的文字和已上传的截图，"
+            "点一次只是亮出确认条，再点 **确定清空** 才真正生效。\n\n"
+            "注意区分两个按钮：**🧹 清空文本框** 只擦掉文字和截图，"
+            "已录入的日程**不会**被动；**🗑️ 清空全部日程** 才是全清。"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3702,6 +3794,12 @@ def main() -> None:
     )
 
     render_sidebar()
+
+    # 上一步操作留下的提示（st.toast 无法跨 rerun 存活，需中转）。
+    # 放在 tabs 之前，这样无论在哪个页签操作都能立刻看到。
+    if st.session_state.get("pending_toast"):
+        st.toast(st.session_state.pending_toast)
+        st.session_state.pending_toast = ""
 
     tab1, tab2, tab3, tab4 = st.tabs(
         ["📥 录入解析", "📅 日程表", "📤 导出日历", "❓ 使用说明"]
