@@ -24,6 +24,7 @@ AI 智能日程收纳 & 日历导入工具
 
 from __future__ import annotations
 
+import calendar
 import csv
 import hashlib
 import io
@@ -62,7 +63,10 @@ ALLOWED_IMAGE_TYPES = {"png", "jpg", "jpeg", "webp", "bmp"}
 # 时间推断常量
 DEFAULT_EVENT_MINUTES = 60       # 未识别到结束时间时的默认时长
 DEFAULT_DAY_START_HOUR = 9       # 只有日期没有时间时的默认开始
-DEFAULT_RECUR_WEEKS = 16         # 循环日程默认展开/重复周数
+# 循环日程默认重复次数（一学期约 16 周）。界面上不再提供全局「兜底周数」，
+# 次数统一由「日程表 → 重复设置」面板逐条控制；解析出的循环日程会自动带上
+# 该默认次数，保证导出的 .ics 一定有结束条件，不会变成永久重复。
+DEFAULT_RECUR_WEEKS = 16         # 仅在 build_ics 内部兜底，已不再暴露到界面
 VAGUE_DATE_WINDOW_DAYS = 180     # 超过该天数的"过去日期"判定为明年
 
 # 大学作息：把"第X节"映射为具体时间（可在 README 中说明如何按校调整）
@@ -482,7 +486,11 @@ def parse_date_in_text(text: str, anchor: date) -> tuple[date | None, int, int, 
 # 刻意不允许字符之间出现空格，否则「每周三 4点开会」会把 4 误读成星期四。
 _RECUR_WEEKLY_RE = re.compile(
     r"每(?:周|星期|礼拜)\s*(?P<wds>"
-    r"[一二三四五六日天](?:[、,，和及与/]?[一二三四五六日天])*"   # 一三五 / 一、三、五
+    # 每个星期几前面都允许再带一次「周 / 星期 / 礼拜」：
+    # 「每周二、周四」「每周一和周三」「每周五」都能整段吃掉，
+    # 否则「每周二、周四」只会识别出周二。
+    r"(?:周|星期|礼拜)?\s*[一二三四五六日天]"
+    r"(?:\s*[、,，和及与/]?\s*(?:周|星期|礼拜)?\s*[一二三四五六日天])*"
     r"|[1-7](?:[、,，][1-7])*"                                    # 135 / 1,3,5
     r")"
 )
@@ -610,7 +618,8 @@ def describe_recurrence(rrule: str) -> str:
         desc = "每天" if interval in ("", "1") else f"每 {interval} 天"
     elif freq == "WEEKLY":
         if interval in ("", "1"):
-            desc = f"每周{days_cn}" if days_cn else "每周"
+            # 单天写「每周三」，多天写「周二、周四」（再叠「每周」会显得啰嗦）
+            desc = f"每周{days_cn}" if len(days_list) <= 1 else days_full
         elif interval == "2":
             desc = f"每两周的{days_full}" if days_full else "每两周"
         else:
@@ -684,7 +693,11 @@ _LOCATION_KEYWORD_RE = re.compile(
     # 「创新创业中心 2 号厅」「校医院」「大学生活动中心」
     r"[\u4e00-\u9fa5]{1,8}(?:中心|大厦|医院|宾馆|咖啡厅)\s*\d{0,2}\s*号?\s*(?:楼|厅|室|馆)?|"
     # 楼/馆/厅/堂/场/室 + 可选楼层 + 可选字母座号 + 可选编号，覆盖「计算机楼C401」「食堂二楼」「图书馆三楼」
+    # 「京江2号楼2205」这类「X+数字+号楼」的写法在高校很常见，必须单独列一条，
+    # 否则「京江」与「楼」之间夹了数字，通用分支匹配不上。
+    r"[\u4e00-\u9fa5]{1,4}\d{1,2}号楼\s*[A-Za-z]?[一二三四五六七八九十\d]{0,4}|"
     r"[\u4e00-\u9fa5]{2,6}[一二三四五六七八九十]?(?:楼|馆|厅|堂|场|室)\s*[A-Za-z]?[一二三四五六七八九十\d]{0,4}|"
+    r"讲堂群\s*\d{0,4}|"
     r"图书馆|体育馆|报告厅|会议室|实验室|教学楼|实验楼|食堂|操场|礼堂)"
 )
 
@@ -1599,6 +1612,17 @@ def normalize_events(events: list[Event], now: datetime | None = None) -> tuple[
     now = now or datetime.now()
     report = {"expired": 0, "duplicated": 0, "conflicts": 0}
 
+    # --- 7.0 循环日程补齐结束条件 -------------------------------------
+    # 界面上已取消全局「兜底周数」，改由这一处统一给「没有结束条件」的循环
+    # 日程写入默认次数（COUNT）。这样导出的 .ics 一定能在第 N 次后自动停止，
+    # 既不会变成永久重复，用户也能在日程表里逐条改成自己想要的数量。
+    for ev in events:
+        if not ev.is_recurring:
+            continue
+        if get_recur_count(ev.rrule) or "UNTIL" in ev.rrule.upper():
+            continue
+        ev.rrule = set_recur_count(ev.rrule, RECUR_COUNT_DEFAULT)
+
     # --- 7.1 过滤过期（循环日程保留，因为未来仍会发生） ---------------
     fresh: list[Event] = []
     for ev in events:
@@ -1944,30 +1968,37 @@ def dataframe_to_events(df: pd.DataFrame, previous: list[Event]) -> tuple[list[E
 # ---------------------------------------------------------------------------
 
 def build_sample_text() -> str:
-    """构造一段刻意"脏乱"的示例文本：课表 + DDL + 会议 + 聊天记录混排。"""
+    """
+    构造一段刻意「脏乱」的示例文本：江苏大学课表 + 群聊通知 + 备忘混排。
+
+    内容取自江苏大学能源与动力工程学院的真实场景（教学楼、作息、课程名），
+    日期全部相对"今天"生成，保证现场演示永不过期。
+    其中带「每周X」的条目会被自动识别为循环日程。
+    """
     today = datetime.now()
     monday = today - timedelta(days=today.weekday())
     d = lambda n: (monday + timedelta(days=n)).strftime("%m月%d日")  # noqa: E731
-    return f"""【课程表 截图里的内容】
-{d(0)} 周一 第1-2节 高等数学 教学楼A302 张老师
-{d(0)} 第3-4节 大学英语 外语楼B105
-{d(1)} 周二 第5-6节 数据结构与算法 计算机楼C401
-{d(2)} 周三 第7-8节 人工智能导论 实验楼D203
-每周四 第9-10节 创新创业实践 报告厅
-每周五下午3点到5点 项目组例会 腾讯会议
+    return f"""【2026-2027 学年第一学期课表 · 能源与动力工程学院】
+每周一 第1-2节 高等数学A(I) 三江楼0802 刘海龙
+每周一 第3-4节 大学英语(I) 三山楼402
+每周二 第5-6节 工程制图基础 京江2号楼2205 刘顺
+每周二、周四 第7-8节 大学物理A(II) 三山楼406
+每周三 第3-4节 工程热力学A 能动楼301 刘璐
+每周三 第9-11节 大学物理实验A(II) 三江楼附楼301
+每周五 第5-6节 工程力学C 三山楼615
 
-【微信群聊记录】
-班长：下周三下午2点 在图书馆三楼研讨间开班会，务必到场，别迟到
-学委：提醒一下，{d(3)} 晚上23:59 前提交《机器学习》课程设计报告，DDL 不能拖
-室友：周六上午10点 体育馆 羽毛球，来不来都行
+【能动学院 2026 级班级群】
+辅导员：{d(2)} 下午2点 三江楼305 开年级大会，带学生证，迟到要记考勤
+班长：{d(3)} 晚上19:00 讲堂群110 听「能动大讲堂」学术报告，可以盖第二课堂章
+学委：{d(4)} 23:59 提交《工程热力学》课程设计报告 DDL 不能补交
 
-【备忘录】
-{d(5)} 09:00-17:30 大学生 AI 创新大赛决赛答辩 创新创业中心 2 号厅 要带电脑和 U 盘
-11月30日 晚上8点半 和导师讨论论文选题 线上
-明天中午12点 食堂二楼 和组员碰一下分工
-本周五 下午4点 提交竞赛报名表给辅导员
-下周一 上午9点 体检 校医院 空腹
-12月5日 全天 参加志愿者活动（跨校区，早出晚归）
+【个人备忘】
+{d(1)} 09:00-11:00 图书馆五楼研讨间 小组讨论节能减排大赛方案
+{d(5)} 08:00-09:30 校医院 入学体检复查 空腹
+{d(6)} 全天 京江报告厅 江苏大学大学生 AI 创新大赛决赛答辩 要带电脑和 U 盘
+本周五 下午4点 研究生楼106 找导师确认课题方向
+明天中午12点 一食堂二楼 和队友碰一下分工
+11月30日 晚上8点半 腾讯会议 和学长请教保研经验
 """
 
 
@@ -1977,8 +2008,16 @@ def build_sample_text() -> str:
 
 _CSS = """
 <style>
-/* ---------- 全局 ---------- */
-.block-container { padding-top: 1.4rem; padding-bottom: 1rem; max-width: 1180px; }
+/* ---------- 全局：奶油底 + ins 三段柔光 ---------- */
+.stApp {
+    background:
+        radial-gradient(920px 540px at 6% -10%, rgba(255,178,196,.55), transparent 62%),
+        radial-gradient(780px 500px at 98% 2%,  rgba(178,162,255,.50), transparent 60%),
+        radial-gradient(760px 540px at 52% 112%, rgba(150,206,255,.42), transparent 62%),
+        linear-gradient(158deg, #FFFAFC 0%, #F8F5FF 46%, #F3F8FF 100%);
+    background-attachment: fixed;
+}
+.block-container { padding-top: 1.2rem; padding-bottom: 1rem; max-width: 1180px; }
 /* 只隐藏主菜单与页脚；保留 header 以免侧边栏折叠按钮失效 */
 #MainMenu { visibility: hidden; }
 footer { visibility: hidden; }
@@ -1986,95 +2025,219 @@ header[data-testid="stHeader"] { background: transparent; }
 html, body, [class*="css"] { font-family: -apple-system, "Segoe UI", "PingFang SC",
     "Microsoft YaHei", sans-serif; }
 
-/* ---------- 顶部 hero ---------- */
+/* ---------- 毛玻璃基底（按钮 / 卡片共用） ---------- */
+.metric-card, .notice, .disclaimer, .cal-shell, .cal-side, .chip {
+    backdrop-filter: blur(22px) saturate(175%);
+    -webkit-backdrop-filter: blur(22px) saturate(175%);
+}
+
+/* ---------- 顶部 hero：ins 渐变色带 ---------- */
 .hero {
-    background: linear-gradient(120deg, #4F46E5 0%, #7C3AED 48%, #DB2777 100%);
-    border-radius: 18px; padding: 26px 30px 24px 30px; margin-bottom: 18px;
-    box-shadow: 0 10px 30px rgba(79, 70, 229, .22); position: relative; overflow: hidden;
+    background: linear-gradient(118deg, #FF9A63 0%, #F0568C 34%, #A45BEC 68%, #6C7BF5 100%);
+    border-radius: 24px; padding: 28px 32px 26px 32px; margin-bottom: 18px;
+    box-shadow: 0 18px 44px rgba(196,86,180,.26); position: relative; overflow: hidden;
 }
 .hero::after {
-    content: ""; position: absolute; right: -60px; top: -60px; width: 220px; height: 220px;
-    background: rgba(255,255,255,.12); border-radius: 50%;
+    content: ""; position: absolute; right: -70px; top: -80px; width: 240px; height: 240px;
+    background: rgba(255,255,255,.16); border-radius: 50%;
+}
+.hero::before {
+    content: ""; position: absolute; left: 32%; bottom: -120px; width: 260px; height: 260px;
+    background: rgba(255,255,255,.10); border-radius: 50%;
 }
 .hero-badge {
-    display: inline-block; font-size: 11px; letter-spacing: 2px; font-weight: 700;
-    color: #EDE9FE; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.3);
-    border-radius: 999px; padding: 4px 12px; margin-bottom: 12px;
+    display: inline-block; font-size: 11px; letter-spacing: 2.4px; font-weight: 700;
+    color: #FFF3FA; background: rgba(255,255,255,.20); border: 1px solid rgba(255,255,255,.42);
+    border-radius: 999px; padding: 5px 14px; margin-bottom: 13px;
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
 }
-.hero h1 { color: #FFFFFF; font-size: 30px; font-weight: 800; margin: 0 0 8px 0;
-    letter-spacing: -.4px; }
-.hero p { color: rgba(255,255,255,.9); font-size: 14px; margin: 0; line-height: 1.6; }
+.hero h1 { color: #FFFFFF; font-size: 31px; font-weight: 800; margin: 0 0 8px 0;
+    letter-spacing: -.5px; }
+.hero p { color: rgba(255,255,255,.94); font-size: 14px; margin: 0; line-height: 1.6; }
 
-/* ---------- 指标卡 ---------- */
+/* ---------- 指标卡（毛玻璃） ---------- */
 .metric-row { display: flex; gap: 12px; margin: 6px 0 16px 0; flex-wrap: wrap; }
 .metric-card {
-    flex: 1 1 150px; background: #FFFFFF; border: 1px solid #E9E7F5; border-radius: 14px;
-    padding: 14px 16px; box-shadow: 0 2px 8px rgba(31, 24, 71, .05);
+    flex: 1 1 150px; background: rgba(255,255,255,.58);
+    border: 1px solid rgba(255,255,255,.9); border-radius: 18px;
+    padding: 15px 18px; box-shadow: 0 10px 30px rgba(126,87,194,.09);
 }
-.metric-card .label { font-size: 12px; color: #6B7280; font-weight: 600; margin-bottom: 4px; }
-.metric-card .value { font-size: 24px; font-weight: 800; color: #1F2937; line-height: 1.2; }
-.metric-card .value.warn { color: #D97706; }
-.metric-card .value.danger { color: #DC2626; }
-.metric-card .value.ok { color: #059669; }
+.metric-card .label { font-size: 12px; color: #7A728C; font-weight: 600; margin-bottom: 4px; }
+.metric-card .value { font-size: 25px; font-weight: 800; color: #2E2A3B; line-height: 1.2; }
+.metric-card .value.warn { color: #C2761A; }
+.metric-card .value.danger { color: #D23B5E; }
+.metric-card .value.ok { color: #0E9F7E; }
 
 /* ---------- 小标签 ---------- */
 .chip {
     display: inline-block; font-size: 12px; font-weight: 600; border-radius: 999px;
     padding: 3px 10px; margin-right: 6px; margin-bottom: 4px;
 }
-.chip-ok { background: #ECFDF5; color: #047857; border: 1px solid #A7F3D0; }
-.chip-warn { background: #FFFBEB; color: #B45309; border: 1px solid #FDE68A; }
-.chip-bad { background: #FEF2F2; color: #B91C1C; border: 1px solid #FECACA; }
-.chip-info { background: #EEF2FF; color: #4338CA; border: 1px solid #C7D2FE; }
+.chip-ok { background: rgba(224,250,240,.85); color: #0B7A60; border: 1px solid rgba(150,225,203,.9); }
+.chip-warn { background: rgba(255,247,226,.9); color: #A26510; border: 1px solid rgba(245,205,130,.9); }
+.chip-bad { background: rgba(255,235,238,.9); color: #B02A44; border: 1px solid rgba(250,180,190,.9); }
+.chip-info { background: rgba(240,238,255,.9); color: #5B43C0; border: 1px solid rgba(200,192,250,.9); }
 
-/* ---------- 按钮 ---------- */
+/* ---------- 按钮：毛玻璃 ---------- */
 .stButton > button, .stDownloadButton > button {
-    border-radius: 10px; font-weight: 600; border: 1px solid #DDD6FE; transition: all .18s ease;
+    border-radius: 14px; font-weight: 600;
+    border: 1px solid rgba(255,255,255,.92);
+    background: rgba(255,255,255,.50);
+    backdrop-filter: blur(16px) saturate(180%);
+    -webkit-backdrop-filter: blur(16px) saturate(180%);
+    color: #453D57;
+    box-shadow: 0 6px 20px rgba(126,87,194,.10), inset 0 1px 0 rgba(255,255,255,.95);
+    transition: transform .18s ease, box-shadow .18s ease,
+                background .18s ease, border-color .18s ease;
 }
-.stButton > button[kind="primary"] {
-    background: linear-gradient(120deg, #4F46E5, #7C3AED); border: none;
-    box-shadow: 0 4px 14px rgba(79, 70, 229, .25);
+.stButton > button:hover, .stDownloadButton > button:hover {
+    transform: translateY(-1px);
+    background: rgba(255,255,255,.74);
+    border-color: rgba(233,150,201,.8);
+    color: #7A3E8E;
+    box-shadow: 0 10px 28px rgba(200,90,170,.16), inset 0 1px 0 rgba(255,255,255,1);
 }
-.stButton > button[kind="primary"]:hover { transform: translateY(-1px);
-    box-shadow: 0 6px 18px rgba(79, 70, 229, .32); }
-.stDownloadButton > button:hover { border-color: #A78BFA; color: #6D28D9; }
+.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
+    background: linear-gradient(118deg, #FF8F6B 0%, #EE5A92 48%, #A05BE8 100%);
+    border: 1px solid rgba(255,255,255,.55);
+    color: #FFFFFF;
+    box-shadow: 0 10px 26px rgba(226,88,158,.30), inset 0 1px 0 rgba(255,255,255,.45);
+}
+.stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {
+    color: #FFFFFF; transform: translateY(-1px);
+    box-shadow: 0 14px 32px rgba(226,88,158,.38), inset 0 1px 0 rgba(255,255,255,.55);
+}
+
+/* ---------- 输入框（毛玻璃） ---------- */
+.stTextArea textarea, .stTextInput input, .stNumberInput input, .stDateInput input {
+    background: rgba(255,255,255,.62) !important;
+    border: 1px solid rgba(255,255,255,.95) !important;
+    border-radius: 16px !important;
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    color: #342E44 !important;
+    box-shadow: 0 4px 16px rgba(126,87,194,.07);
+}
+.stTextArea textarea:focus, .stTextInput input:focus, .stDateInput input:focus {
+    border-color: rgba(226,120,180,.85) !important;
+    box-shadow: 0 0 0 4px rgba(240,86,140,.12) !important;
+}
+
+/* ---------- 下拉 / 单选 / 开关 ---------- */
+[data-baseweb="select"] > div {
+    background: rgba(255,255,255,.62) !important;
+    border-radius: 14px !important;
+    border-color: rgba(255,255,255,.95) !important;
+}
+[data-testid="stExpander"] details {
+    background: rgba(255,255,255,.52);
+    border: 1px solid rgba(255,255,255,.9) !important;
+    border-radius: 18px !important;
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    box-shadow: 0 8px 26px rgba(126,87,194,.08);
+}
+
+/* ---------- bordered 容器（日历 / 重复面板） ---------- */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background: rgba(255,255,255,.52);
+    border: 1px solid rgba(255,255,255,.9) !important;
+    border-radius: 20px !important;
+    backdrop-filter: blur(22px) saturate(175%);
+    -webkit-backdrop-filter: blur(22px) saturate(175%);
+    box-shadow: 0 12px 34px rgba(126,87,194,.09);
+    padding: 4px 2px;
+}
 
 /* ---------- Tab ---------- */
-.stTabs [data-baseweb="tab-list"] { gap: 6px; border-bottom: 1px solid #EEF0F4; }
+.stTabs [data-baseweb="tab-list"] { gap: 8px; border-bottom: none; padding-bottom: 6px; }
 .stTabs [data-baseweb="tab"] {
-    height: 42px; border-radius: 10px 10px 0 0; padding: 0 18px;
-    font-weight: 600; font-size: 14px; color: #6B7280;
+    height: 42px; border-radius: 999px; padding: 0 20px;
+    font-weight: 600; font-size: 14px; color: #7A728C;
+    background: rgba(255,255,255,.42);
+    border: 1px solid rgba(255,255,255,.85);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
 }
-.stTabs [aria-selected="true"] { color: #4F46E5; background: #F5F3FF; }
+.stTabs [aria-selected="true"] {
+    color: #FFFFFF;
+    background: linear-gradient(118deg, #FF8F6B 0%, #EE5A92 50%, #A05BE8 100%);
+    border-color: transparent;
+    box-shadow: 0 8px 22px rgba(226,88,158,.26);
+}
 
 /* ---------- 侧边栏 ---------- */
-[data-testid="stSidebar"] { background: #FAFAFE; border-right: 1px solid #EFECFB; }
-[data-testid="stSidebar"] .stMarkdown h3 { font-size: 15px; color: #4B5563; }
+[data-testid="stSidebar"] {
+    background: rgba(255,255,255,.46);
+    border-right: 1px solid rgba(255,255,255,.85);
+    backdrop-filter: blur(26px) saturate(170%);
+    -webkit-backdrop-filter: blur(26px) saturate(170%);
+}
+[data-testid="stSidebar"] .stMarkdown h3 { font-size: 15px; color: #4E4761; }
 
 /* ---------- 区块标题 ---------- */
 .section-title {
-    font-size: 16px; font-weight: 700; color: #1F2937; margin: 14px 0 8px 0;
-    padding-left: 10px; border-left: 4px solid #7C3AED; line-height: 1.3;
+    font-size: 16px; font-weight: 700; color: #2E2A3B; margin: 16px 0 8px 0;
+    padding-left: 11px; border-left: 4px solid transparent; line-height: 1.3;
+    border-image: linear-gradient(180deg,#FF9A63,#EE5A92,#A05BE8) 1;
 }
 
-/* ---------- 提示条 ---------- */
+/* ---------- 提示条（毛玻璃） ---------- */
 .notice {
-    border-radius: 12px; padding: 12px 16px; font-size: 13px; line-height: 1.65;
+    border-radius: 16px; padding: 13px 17px; font-size: 13px; line-height: 1.68;
     margin: 8px 0 14px 0;
+    border: 1px solid rgba(255,255,255,.9);
+    box-shadow: 0 8px 26px rgba(126,87,194,.08);
 }
-.notice-info { background: #F5F3FF; border-left: 4px solid #7C3AED; color: #4C1D95; }
-.notice-warn { background: #FFFBEB; border-left: 4px solid #F59E0B; color: #92400E; }
-.notice-ok { background: #ECFDF5; border-left: 4px solid #10B981; color: #065F46; }
-.notice-bad { background: #FEF2F2; border-left: 4px solid #EF4444; color: #991B1B; }
+.notice-info { background: rgba(244,240,255,.72); border-left: 4px solid #A05BE8; color: #4B3A8E; }
+.notice-warn { background: rgba(255,248,232,.78); border-left: 4px solid #F0A83C; color: #8A5B12; }
+.notice-ok   { background: rgba(233,251,244,.78); border-left: 4px solid #35C08F; color: #0A6A50; }
+.notice-bad  { background: rgba(255,238,240,.78); border-left: 4px solid #EE5A6E; color: #98203A; }
+
+/* ---------- 日历 ---------- */
+.cal-shell {
+    background: rgba(255,255,255,.56);
+    border: 1px solid rgba(255,255,255,.92);
+    border-radius: 22px; padding: 14px 16px 10px 16px;
+    box-shadow: 0 12px 34px rgba(126,87,194,.10);
+}
+.cal-title {
+    text-align: center; font-size: 16px; font-weight: 800; color: #2E2A3B;
+    letter-spacing: .2px; line-height: 2.2;
+}
+.cal-title span { font-size: 11px; font-weight: 600; color: #9A93AB; margin-left: 6px; }
+.cal-wd { text-align: center; font-size: 11px; font-weight: 700; color: #9A93AB;
+    letter-spacing: .5px; padding: 2px 0 4px 0; }
+.cal-side {
+    background: rgba(255,255,255,.56);
+    border: 1px solid rgba(255,255,255,.92);
+    border-radius: 22px; padding: 16px 18px;
+    box-shadow: 0 12px 34px rgba(126,87,194,.10);
+    min-height: 100%;
+}
+.cal-side h4 { margin: 0 0 10px 0; font-size: 15px; font-weight: 800; color: #2E2A3B; }
+.cal-ev {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 9px 11px; margin-bottom: 8px; border-radius: 14px;
+    background: rgba(255,255,255,.62);
+    border: 1px solid rgba(255,255,255,.95);
+    box-shadow: 0 4px 14px rgba(126,87,194,.07);
+}
+.cal-ev .t { font-size: 11px; font-weight: 800; color: #A05BE8; min-width: 42px; }
+.cal-ev .m { font-size: 13px; color: #342E44; font-weight: 600; line-height: 1.45; }
+.cal-ev .s { font-size: 11px; color: #8B8398; margin-top: 2px; }
+.cal-ev.bad { background: rgba(255,238,240,.8); border-color: rgba(250,190,200,.95); }
+.cal-ev.bad .t { color: #D23B5E; }
+.cal-ev.vague { background: rgba(255,249,232,.8); border-color: rgba(248,220,160,.95); }
+.cal-ev.vague .t { color: #B8791A; }
+.cal-empty { font-size: 12px; color: #A8A1B8; padding: 12px 2px; }
 
 /* ---------- 页脚免责声明 ---------- */
 .disclaimer {
-    margin-top: 26px; padding: 18px 20px; border-radius: 14px;
-    background: #F9FAFB; border: 1px dashed #D1D5DB; color: #6B7280; font-size: 12px;
-    line-height: 1.8;
+    margin-top: 26px; padding: 18px 20px; border-radius: 18px;
+    background: rgba(255,255,255,.52); border: 1px dashed rgba(180,168,210,.6);
+    color: #7A728C; font-size: 12px; line-height: 1.8;
+    backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
 }
-.disclaimer strong { color: #374151; }
-.disclaimer .title { font-size: 13px; font-weight: 700; color: #374151; margin-bottom: 6px; }
+.disclaimer strong { color: #453D57; }
+.disclaimer .title { font-size: 13px; font-weight: 700; color: #453D57; margin-bottom: 6px; }
 </style>
 """
 
@@ -2113,16 +2276,20 @@ def init_state() -> None:
         "confirm_clear": False,       # 「清空全部日程」的二次确认状态
         "use_ai": True,               # 是否优先调用大模型
         "default_remind": 15,         # 全局提醒（分钟）
-        "recur_weeks": DEFAULT_RECUR_WEEKS,
         "calendar_name": "我的 AI 日程",
         "raw_text_input": "",
         "total_parsed": 0,
         "pending_toast": "",          # 跨 rerun 传递的操作提示
+        # --- 日历 ---
+        "cal_year": datetime.now().year,
+        "cal_month": datetime.now().month,
+        "cal_selected": datetime.now().date(),
         # --- 重复设置面板的状态 ---
         "recur_target_uid": "",       # 当前正在设置的日程
         "recur_enabled": False,       # 「是否重复」开关
         "recur_freq": RECUR_FREQ_WEEKLY,
         "recur_count": RECUR_COUNT_DEFAULT,
+        "recur_start_date": datetime.now().date(),  # 循环开始日期
         "recur_advanced_open": False,  # 高级：手写 RRULE 展开状态
     }
     for key, value in defaults.items():
@@ -2314,7 +2481,7 @@ def render_sidebar() -> None:
     with st.sidebar:
         _html(
             '<div style="padding:2px 0 10px 0;">'
-            '<div style="font-size:19px;font-weight:800;color:#4C1D95;letter-spacing:-.3px;">'
+            '<div style="font-size:19px;font-weight:800;color:#8E3D6B;letter-spacing:-.3px;">'
             '🗂️ 日程收纳台</div>'
             '<div style="font-size:12px;color:#9CA3AF;margin-top:2px;">'
             f'v{APP_VERSION} · 内存计算 · 不存数据</div></div>'
@@ -2326,7 +2493,7 @@ def render_sidebar() -> None:
         if ai_config["available"]:
             _html(
                 _chip("已连接", "ok")
-                + f'<span style="font-size:12px;color:#6B7280;">'
+                + f'<span style="font-size:12px;color:#9A93AB;">'
                   f'{_escape(ai_config["model"])}</span>'
             )
             st.checkbox("优先使用 AI 解析", key="use_ai",
@@ -2361,11 +2528,9 @@ def render_sidebar() -> None:
                               help="导出日历时写入 VALARM；单条日程可在表格中单独覆盖。")
         st.session_state.default_remind = REMIND_OPTIONS[chosen]
 
-        st.session_state.recur_weeks = st.slider(
-            "循环日程兜底周数", 4, 52, st.session_state.recur_weeks, 1,
-            help="仅对「没有单独设置次数」的循环日程生效：从开始日往后推这么多周。"
-                 "在日程表页用重复设置面板指定了次数的日程，以该次数为准。"
-        )
+        st.caption("🔁 循环日程的**开始日期与重复次数**统一在「日程表 → 重复设置」"
+                   "里逐条调整。默认**不循环**；只有当输入里出现「每周一」「每天」"
+                   "这类字眼时，才会自动识别为循环日程。")
 
         st.markdown("---")
         # --- 数据 ---
@@ -2484,6 +2649,9 @@ def render_ingest_tab() -> None:
                 "请检查输入内容后重试，或改用「粘贴文字」方式。"
             )
             st.session_state.last_report = None
+        # 侧边栏与统计卡在同一次 run 中更早渲染，不重跑一次会停留在解析前的数字。
+        # 报告已写入 session_state，rerun 后照常展示。
+        st.rerun()
 
     # --- 错误提示 ---
     if st.session_state.last_error:
@@ -2584,9 +2752,9 @@ def _style_events(df: pd.DataFrame, events: list[Event]) -> Any:
     def _row_css(row: pd.Series) -> list[str]:
         status = status_map.get(str(row.get("uid")), "")
         if status.startswith("🔴"):
-            return ["background-color: #FEE2E2; color: #7F1D1D"] * len(row)
+            return ["background-color: #FFEEF1; color: #B02A44"] * len(row)
         if status.startswith("⚠️"):
-            return ["background-color: #FEF9E7; color: #78350F"] * len(row)
+            return ["background-color: #FFF9E8; color: #A26510"] * len(row)
         return [""] * len(row)
 
     return df.style.apply(_row_css, axis=1)
@@ -2611,6 +2779,7 @@ def _fill_recur_controls(ev: "Event | None") -> None:
     st.session_state.recur_enabled = ev.is_recurring
     st.session_state.recur_freq = recur_freq_key(ev.rrule) or RECUR_FREQ_WEEKLY
     st.session_state.recur_count = get_recur_count(ev.rrule) or RECUR_COUNT_DEFAULT
+    st.session_state.recur_start_date = ev.start.date()
 
 
 def _on_recur_pick_change() -> None:
@@ -2648,13 +2817,14 @@ def _nth_occurrence(rrule: str, start: datetime, n: int) -> datetime | None:
     return None
 
 
-def _apply_recur_setting(uid: str, enabled: bool, freq_key: str, count: int) -> None:
+def _apply_recur_setting(uid: str, enabled: bool, freq_key: str, count: int,
+                         start_date: date | None = None) -> None:
     """
     把面板上的设置写回目标日程。
 
     注意：本函数只能作为按钮的 on_click 回调执行。Streamlit 不允许在 widget
     渲染之后直接改它自己绑定的 session_state key，而回调在 widget 实例化之前运行，
-    因此在这里同步开关/频率/次数的状态是安全的。
+    因此在这里同步开关/频率/次数/开始日期的状态是安全的。
     """
     target = next((e for e in st.session_state.events if e.uid == uid), None)
     if target is None:
@@ -2662,6 +2832,21 @@ def _apply_recur_setting(uid: str, enabled: bool, freq_key: str, count: int) -> 
         return
 
     if enabled:
+        # 循环开始日期就是这条日程的第一次发生时间：改日期时整条日程一起平移，
+        # 时分与时长保持不变，避免用户还要再去表格里改一遍。
+        if start_date and start_date != target.start.date():
+            delta = start_date - target.start.date()
+            target.start = target.start + delta
+            target.end = target.end + delta
+            # 开始日期的星期几变了，循环基准日要跟着走，
+            # 否则会出现「开始日是周二、却每周一重复」的矛盾规则。
+            old_days = [d for d in _rrule_field(target.rrule, "BYDAY").split(",") if d]
+            new_wd = _WEEKDAY_ICS[target.start.weekday()]
+            if old_days and new_wd not in old_days:
+                target.rrule = re.sub(
+                    r";?\s*BYDAY=[^;]*", "", target.rrule, flags=re.IGNORECASE
+                ).strip("; ")
+
         rrule = build_recur_rrule(freq_key, target.start, target.rrule)
         target.rrule = set_recur_count(
             rrule, max(RECUR_COUNT_MIN, min(RECUR_COUNT_MAX, count))
@@ -2669,6 +2854,7 @@ def _apply_recur_setting(uid: str, enabled: bool, freq_key: str, count: int) -> 
         st.session_state.pending_toast = f"已设为「{describe_recurrence(target.rrule)}」"
         st.session_state.recur_freq = freq_key
         st.session_state.recur_count = max(RECUR_COUNT_MIN, min(RECUR_COUNT_MAX, count))
+        st.session_state.recur_start_date = target.start.date()
     else:
         target.rrule = ""
         st.session_state.pending_toast = "已取消重复，改为单次日程"
@@ -2680,6 +2866,93 @@ def _apply_recur_setting(uid: str, enabled: bool, freq_key: str, count: int) -> 
     # 表格里的「重复」列内容变了，必须重建编辑器，否则旧缓存会盖掉本次修改
     st.session_state.editor_key += 1
     st.session_state.editor_hash = ""
+
+
+def _cal_shift(delta: int) -> None:
+    """日历翻月回调：跨年时自动进位 / 退位。"""
+    year = int(st.session_state.cal_year)
+    month = int(st.session_state.cal_month) + delta
+    while month < 1:
+        month += 12
+        year -= 1
+    while month > 12:
+        month -= 12
+        year += 1
+    st.session_state.cal_year = year
+    st.session_state.cal_month = month
+
+
+def _cal_goto_today() -> None:
+    """日历「回到今天」回调。"""
+    today = datetime.now().date()
+    st.session_state.cal_year = today.year
+    st.session_state.cal_month = today.month
+    st.session_state.cal_selected = today
+
+
+def _cal_pick(day: date) -> None:
+    """点击日历格子：选中该日，并把它同步为「循环开始日期」的默认值。"""
+    st.session_state.cal_selected = day
+
+
+def _occurs_on(ev: Event, day: date) -> bool:
+    """
+    判断某条日程（含循环日程）是否会在指定日期发生。
+
+    只用于日历上的圆点标记与右侧当日清单，属于展示用途：
+    周/日重复精确计算，月/年重复按自然月近似，足够满足"这一天有没有事"的判断。
+    """
+    start_day = ev.start.date()
+    if day < start_day:
+        return False
+    if not ev.is_recurring:
+        return day == start_day
+
+    freq = _rrule_field(ev.rrule, "FREQ")
+    interval_raw = _rrule_field(ev.rrule, "INTERVAL")
+    interval = int(interval_raw) if interval_raw.isdigit() and int(interval_raw) > 0 else 1
+    count = get_recur_count(ev.rrule)
+
+    if freq == "DAILY":
+        diff = (day - start_day).days
+        if diff % interval:
+            return False
+        return not count or (diff // interval + 1) <= count
+
+    if freq == "WEEKLY":
+        byday = [d for d in _rrule_field(ev.rrule, "BYDAY").split(",") if d]
+        if byday and _WEEKDAY_ICS[day.weekday()] not in byday:
+            return False
+        weeks = (day - start_day).days // 7
+        if weeks % interval:
+            return False
+        if not count:
+            return True
+        days_per_cycle = len(byday) or 1
+        order = sorted(byday, key=lambda d: _WEEKDAY_ICS.index(d)) if byday else []
+        pos = order.index(_WEEKDAY_ICS[day.weekday()]) + 1 if order else 1
+        return (weeks // interval) * days_per_cycle + pos <= count
+
+    if freq == "MONTHLY":
+        months = (day.year - start_day.year) * 12 + (day.month - start_day.month)
+        if months % interval or day.day != min(start_day.day, 28):
+            return False
+        return not count or (months // interval + 1) <= count
+
+    if freq == "YEARLY":
+        years = day.year - start_day.year
+        if years % interval or (day.month, day.day) != (start_day.month, start_day.day):
+            return False
+        return not count or (years // interval + 1) <= count
+
+    # 无法归类的规则退回「只在首次发生日出现」，避免日历上凭空多出事项
+    return day == start_day
+
+
+def events_on_day(day: date) -> list[Event]:
+    """返回指定日期会发生的全部日程，按开始时间排序。"""
+    hits = [ev for ev in st.session_state.events if _occurs_on(ev, day)]
+    return sorted(hits, key=lambda e: e.start)
 
 
 def _render_recur_panel() -> None:
@@ -2731,11 +3004,37 @@ def _render_recur_panel() -> None:
             key="recur_freq",
             horizontal=True,
         )
+
+        # ---- 循环开始日期 -------------------------------------------------
+        st.markdown(
+            '<div style="font-size:13px;font-weight:600;color:#4E4761;'
+            'margin:12px 0 4px;">循环开始日期</div>',
+            unsafe_allow_html=True,
+        )
+        d_col, w_col = st.columns([2.6, 1], gap="small")
+        with d_col:
+            start_pick = st.date_input(
+                "循环开始日期",
+                key="recur_start_date",
+                format="YYYY-MM-DD",
+                label_visibility="collapsed",
+                help="这一天是循环的第 1 次。改它会连同日程本身的开始/结束时间"
+                     "一起平移，时分与时长保持不变。",
+            )
+        with w_col:
+            _html(
+                '<div style="height:38px;display:flex;align-items:center;'
+                'justify-content:center;background:rgba(255,240,247,.85);'
+                'border:1px solid rgba(255,255,255,.95);border-radius:14px;'
+                'font-size:13px;font-weight:700;color:#B8305F;">'
+                f'周{"一二三四五六日"[start_pick.weekday()]}</div>'
+            )
+
         count = int(st.session_state.recur_count)
 
         # ---- 次数步进器：➖ ｜ 中间数字 ｜ ➕ ----
         st.markdown(
-            '<div style="font-size:13px;font-weight:600;color:#374151;'
+            '<div style="font-size:13px;font-weight:600;color:#4E4761;'
             'margin:8px 0 2px;">重复次数</div>',
             unsafe_allow_html=True,
         )
@@ -2753,10 +3052,11 @@ def _render_recur_panel() -> None:
                 _html(
                     # 与左右按钮等高（40px）并用 flex 居中，避免数字上下错位
                     '<div style="height:40px;display:flex;align-items:center;'
-                    'justify-content:center;background:#F5F3FF;border:1px solid #DDD6FE;'
-                    'border-radius:10px;">'
-                    f'<span style="font-size:24px;font-weight:800;color:#4F46E5;">{count}</span>'
-                    '<span style="font-size:13px;font-weight:600;color:#6B7280;'
+                    'justify-content:center;background:rgba(255,242,248,.92);'
+                    'border:1px solid rgba(250,205,228,.95);'
+                    'border-radius:14px;">'
+                    f'<span style="font-size:24px;font-weight:800;color:#D8377A;">{count}</span>'
+                    '<span style="font-size:13px;font-weight:600;color:#9A8FA6;'
                     'margin-left:4px;">次</span></div>'
                 )
             with c_plus:
@@ -2767,7 +3067,8 @@ def _render_recur_panel() -> None:
                 )
 
         # 实时预览：点「应用」前就能看到最终规则与结束日期
-        start_for_preview = target_ev.start if target_ev else datetime.now()
+        base_dt = target_ev.start if target_ev else datetime.now()
+        start_for_preview = datetime.combine(start_pick, base_dt.time())
         preview = set_recur_count(
             build_recur_rrule(freq, start_for_preview,
                               target_ev.rrule if target_ev else ""),
@@ -2775,12 +3076,15 @@ def _render_recur_panel() -> None:
         )
         last_dt = _nth_occurrence(preview, start_for_preview, count)
         st.caption(
-            f"将生成：**{describe_recurrence(preview)}**"
+            f"第 1 次：**{start_for_preview:%Y-%m-%d %H:%M}**"
+            f"（周{'一二三四五六日'[start_pick.weekday()]}）"
+            f"　·　规则：**{describe_recurrence(preview)}**"
             + (f"　·　预计最后一次 {last_dt:%Y-%m-%d}" if last_dt else "")
         )
     else:
         freq = st.session_state.recur_freq
         count = int(st.session_state.recur_count)
+        start_pick = st.session_state.recur_start_date
         st.caption("当前为单次日程，不会在日历中重复。")
 
     # 高级入口：保留手写 RRULE 的能力
@@ -2796,14 +3100,142 @@ def _render_recur_panel() -> None:
     with b1:
         st.button(
             "✅ 应用重复设置", key="apply_recur", type="primary", width="stretch",
-            on_click=_apply_recur_setting, args=(picked_uid, enabled, freq, count),
+            on_click=_apply_recur_setting,
+            args=(picked_uid, enabled, freq, count, start_pick),
         )
     with b2:
         st.button(
             "🚫 取消这条的重复", key="remove_recur", width="stretch",
             help="改回单次日程，不会删除这条日程本身。",
-            on_click=_apply_recur_setting, args=(picked_uid, False, freq, count),
+            on_click=_apply_recur_setting,
+            args=(picked_uid, False, freq, count, start_pick),
         )
+
+
+def _calendar_matrix(year: int, month: int) -> list[list[date | None]]:
+    """
+    生成一个「周一开头」的月历矩阵，用于渲染日历网格。
+
+    calendar.monthrange 返回 (1 号是周几, 本月天数)，其中周一 = 0，
+    与国内日历习惯一致，无需再做偏移。
+    """
+    first_weekday, days_in_month = calendar.monthrange(year, month)
+    cells: list[date | None] = [None] * first_weekday
+    cells += [date(year, month, d) for d in range(1, days_in_month + 1)]
+    while len(cells) % 7:
+        cells.append(None)
+    return [cells[i:i + 7] for i in range(0, len(cells), 7)]
+
+
+def _render_calendar() -> None:
+    """
+    月历视图：可翻月、可点日期，右侧联动显示当天全部安排。
+
+    交互全部由 st.button 承担（HTML 里的 JS 在 Streamlit 中不会执行），
+    这样点击才真正能改状态；外观靠 CSS 把它压成日历格子。
+    """
+    year = int(st.session_state.cal_year)
+    month = int(st.session_state.cal_month)
+    selected: date = st.session_state.cal_selected
+
+    left, right = st.columns([1, 1.05], gap="medium")
+
+    with left:
+        with st.container(border=True):
+            head_prev, head_title, head_next = st.columns([1, 3.4, 1], gap="small")
+            with head_prev:
+                st.button("‹", key="cal_prev", on_click=_cal_shift, args=(-1,),
+                          width="stretch", help="上一个月")
+            with head_title:
+                _html(
+                    '<div class="cal-title">'
+                    f'{year} 年 {month} 月'
+                    '<span>点日期看当天安排</span></div>'
+                )
+            with head_next:
+                st.button("›", key="cal_next", on_click=_cal_shift, args=(1,),
+                          width="stretch", help="下一个月")
+
+            wd_cols = st.columns(7, gap="small")
+            for idx, col in enumerate(wd_cols):
+                with col:
+                    _html(f'<div class="cal-wd">{"一二三四五六日"[idx]}</div>')
+
+            today = datetime.now().date()
+            for week in _calendar_matrix(year, month):
+                row_cols = st.columns(7, gap="small")
+                for col, day in zip(row_cols, week):
+                    with col:
+                        if day is None:
+                            _html('<div style="height:38px;"></div>')
+                            continue
+                        day_events = events_on_day(day)
+                        has = len(day_events)
+                        # 有安排的日期在日号后加一个中点，作为"有日程"的视觉提示
+                        label = str(day.day) if not has else f"{day.day}·"
+                        tip = (f"{day:%m月%d日} 有 {has} 项安排" if has
+                               else f"{day:%m月%d日} 无安排")
+                        if day == today:
+                            tip += "（今天）"
+                        st.button(
+                            label,
+                            key=f"cal_day_{day:%Y%m%d}",
+                            on_click=_cal_pick,
+                            args=(day,),
+                            width="stretch",
+                            type="primary" if day == selected else "secondary",
+                            help=tip,
+                        )
+
+    with right:
+        with st.container(border=True):
+            st.button("↩ 回到今天", key="cal_today",
+                      on_click=_cal_goto_today, width="stretch",
+                      help="跳到当前月份并选中今天")
+
+            sel_events = events_on_day(selected)
+            weekday_cn = "一二三四五六日"[selected.weekday()]
+            iso_week = selected.isocalendar().week
+            head = (
+                f'<div class="cal-side">'
+                f'<h4>{selected:%Y 年 %m 月 %d 日} · 周{weekday_cn}'
+                f'<span style="font-size:11px;font-weight:600;color:#9A93AB;'
+                f'margin-left:8px;">第 {iso_week} 周</span></h4>'
+            )
+            if not sel_events:
+                body = ('<div class="cal-empty">这一天没有安排。'
+                        '可以到「录入解析」页追加日程，或在下方表格里新增一行。</div>')
+            else:
+                chunks: list[str] = []
+                for ev in sel_events:
+                    cls = "bad" if ev.conflict else ("vague" if ev.vague else "")
+                    flag = "🔴 " if ev.conflict else ("⚠️ " if ev.vague else "")
+                    extra = ""
+                    if ev.location:
+                        extra += f'<div class="s">📍 {_escape(ev.location)}</div>'
+                    if ev.is_recurring:
+                        extra += (f'<div class="s">🔁 '
+                                  f'{_escape(describe_recurrence(ev.rrule))}</div>')
+                    chunks.append(
+                        f'<div class="cal-ev {cls}">'
+                        f'<div class="t">{ev.start:%H:%M}</div>'
+                        f'<div><div class="m">{flag}{_escape(ev.title)}</div>{extra}</div>'
+                        f'</div>'
+                    )
+                body = "".join(chunks)
+
+            month_total = sum(
+                len(events_on_day(d))
+                for w in _calendar_matrix(year, month) for d in w if d
+            )
+            tail = (
+                '<div style="font-size:12px;color:#8B8398;margin-top:12px;'
+                'padding-top:10px;border-top:1px dashed rgba(160,91,232,.22);">'
+                f'本月共 <b>{month_total}</b> 项安排　·　'
+                f'循环日程 {sum(1 for e in st.session_state.events if e.is_recurring)} 条'
+                '</div>'
+            )
+            _html(head + body + tail + "</div>")
 
 
 def render_schedule_tab() -> None:
@@ -2845,6 +3277,10 @@ def render_schedule_tab() -> None:
         '</div>'
     )
 
+    # --- 月历视图 ---
+    _html('<div class="section-title">月历视图</div>')
+    _render_calendar()
+
     # --- 冲突明细 ---
     if conflict:
         pairs = find_conflict_pairs(events)
@@ -2874,7 +3310,7 @@ def render_schedule_tab() -> None:
         "优先级": st.column_config.SelectboxColumn("优先级", options=PRIORITY_LEVELS, width="small"),
         "备注": st.column_config.TextColumn("备注", width="medium"),
         "循环": st.column_config.TextColumn(
-            "重复", width="small", disabled=True,
+            "重复", width="medium", disabled=True,
             help="只读展示。要改动请用下方「重复设置」面板——在那里用开关 + 次数步进器调整。",
         ),
         "rrule_raw": None,          # 隐藏列：真正的 RRULE，表格不展示
@@ -2997,7 +3433,7 @@ def _render_week_view(events: list[Event]) -> None:
     for i, (col, day) in enumerate(zip(cols, days)):
         with col:
             is_today = day.date() == datetime.now().date()
-            color = "#7C3AED" if is_today else "#6B7280"
+            color = "#D8377A" if is_today else "#9A93AB"
             st.markdown(
                 f'<div style="text-align:center;font-size:11px;font-weight:700;color:{color};">'
                 f'{day:%m/%d}<br>周{weekday_cn[day.weekday()]}</div>',
@@ -3012,8 +3448,9 @@ def _render_week_view(events: list[Event]) -> None:
                 )
                 continue
             for ev in sorted(day_events, key=lambda e: e.start)[:6]:
-                bg = "#FEE2E2" if ev.conflict else ("#FEF9E7" if ev.vague else "#EEF2FF")
-                fg = "#7F1D1D" if ev.conflict else ("#78350F" if ev.vague else "#3730A3")
+                bg = ("rgba(255,238,240,.9)" if ev.conflict
+                      else ("rgba(255,249,232,.9)" if ev.vague else "rgba(240,238,255,.9)"))
+                fg = "#B02A44" if ev.conflict else ("#A26510" if ev.vague else "#4B3A8E")
                 st.markdown(
                     f'<div style="background:{bg};color:{fg};border-radius:8px;'
                     f'padding:6px 7px;margin-bottom:5px;font-size:11px;line-height:1.35;">'
@@ -3056,7 +3493,8 @@ def render_export_tab() -> None:
         '<div class="notice notice-info">'
         f'当前全局提醒：<b>{_remind_label(default_remind)}</b>；'
         f'循环日程 <b>{recurring_total}</b> 条，其中 <b>{fixed_count}</b> 条已指定重复次数。'
-        '未指定次数的按侧边栏「兜底周数」推算结束日期。<br>'
+        f'其余按默认 <b>{RECUR_COUNT_DEFAULT}</b> 次（约一学期）兜底，'
+        '可在「日程表 → 重复设置」里逐条修改开始日期与次数。<br>'
         '.ics 为通用日历标准格式，可直接导入 iOS 日历、Android、Outlook、Google 日历。'
         '</div>'
     )
@@ -3069,7 +3507,6 @@ def render_export_tab() -> None:
             events,
             calendar_name=st.session_state.calendar_name or "我的 AI 日程",
             default_remind=default_remind,
-            recur_weeks=st.session_state.recur_weeks,
         )
     except Exception:  # noqa: BLE001
         log(f"ICS 生成失败: {traceback.format_exc()}")
