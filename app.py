@@ -631,6 +631,116 @@ def _looks_like_date_only(line: str) -> bool:
     return len(stripped) == 0
 
 
+# --- 行程（车票 / 登机牌）识别 ----------------------------------------------
+# 购票截图经 OCR 后，时间、车次、站名常被拆成十几行短碎片，
+# 逐行解析会产出一堆「未命名日程」。这里先用整体视角识别一段行程，
+# 合成一条事件，并把用掉的行标记出来，避免重复入库。
+_TRIP_TRAIN_RE = re.compile(r"(?<![A-Za-z0-9])([GDCKZT]\d{1,4})(?!\d)")
+_BARE_CLOCK_RE = re.compile(r"^\s*(\d{1,2})\s*[:：]\s*(\d{2})\s*$")
+_CITY_LINE_RE = re.compile(r"^[\u4e00-\u9fa5]{2,6}$")
+# 车票界面上大量非日程文案，识别站名时要排除
+_TRIP_NOISE_WORDS = {
+    "改签", "退票", "复制", "成人票", "学生票", "儿童票", "订酒店", "租车",
+    "约车", "积分支付", "线上购买", "二维码检票", "变更到站", "改签票",
+    "当日有效", "餐饮", "特产", "车票", "订单号", "乘车日期", "检票", "支付",
+    "周一", "周二", "周三", "周四", "周五", "周六", "周日", "周六日",
+    "当天", "当日", "次日", "出发", "到达", "电子票", "纸质票", "报销凭证",
+}
+
+
+def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[str]]:
+    """
+    识别「车次 + 出发时间 + 到达时间 + 出发站 + 到达站」构成的一段行程。
+
+    只在文本里出现车次（G/D/C/K/Z/T + 数字）时才介入，普通日程完全不受影响。
+    返回 (行程事件列表, 已被消费的行文本集合)。
+    """
+    lines = [ln.strip() for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    flat = "\n".join(lines)
+
+    train_m = _TRIP_TRAIN_RE.search(flat)
+    if not train_m:
+        return [], set()
+
+    # 车次前后的时刻。不锚定行首，因此「09:56 镇江 G7045 10:27 常州」这类
+    # 单行布局与「每行一个碎片」的分行布局都能命中。
+    clocks = [
+        (m.start(), m.end(), int(m.group(1)), int(m.group(2)))
+        for m in re.finditer(r"(?<!\d)(\d{1,2})\s*[:：]\s*(\d{2})(?!\d)", flat)
+    ]
+    before = [c for c in clocks if c[1] <= train_m.start()]
+    after = [c for c in clocks if c[0] >= train_m.end()]
+    if not before or not after:
+        return [], set()
+
+    s1, e1, h1, m1 = before[-1]
+    s2, e2, h2, m2 = after[0]
+
+    # --- 出发站 / 到达站 ------------------------------------------------
+    from_city = ""
+    to_city = ""
+    mid = flat[e1:train_m.start()].strip()
+    if re.fullmatch(r"[\u4e00-\u9fa5]{2,6}", mid):
+        # 单行布局：出发站夹在出发时间与车次之间，到达站紧跟到达时间
+        from_city = mid
+        same_line_tail = flat[e2:].split("\n")[0]
+        hit = re.match(r"\s*([\u4e00-\u9fa5]{2,6})", same_line_tail)
+        to_city = hit.group(1) if hit else ""
+    else:
+        # 分行布局（12306）：站名跟在到达时间之后，先出发站后到达站
+        t2_line_idx = flat.count("\n", 0, s2)
+        tail_lines = lines[t2_line_idx + 1:]
+        cities = [
+            ln for ln in tail_lines
+            if _CITY_LINE_RE.match(ln) and ln not in _TRIP_NOISE_WORDS
+        ][:2]
+        from_city = cities[0] if cities else ""
+        to_city = cities[1] if len(cities) > 1 else ""
+
+    # 日期：优先用全文里带年份的完整日期
+    day, _, _, _ = parse_date_in_text(flat, anchor_day)
+    day = day or anchor_day
+
+    start_dt = datetime.combine(day, datetime.min.time()).replace(hour=h1 % 24, minute=m1)
+    end_dt = datetime.combine(day, datetime.min.time()).replace(hour=h2 % 24, minute=m2)
+    if end_dt <= start_dt:                     # 跨天车次，如 23:30 → 06:00
+        end_dt += timedelta(days=1)
+
+    # 从原文补齐座位 / 订单号 / 票价，放进备注
+    extras: list[str] = []
+    seat = re.search(r"([一二三]等座\s*\d{1,3}\s*车\s*\d{1,3}\s*[A-F]?\s*号?)", flat)
+    if seat:
+        extras.append(seat.group(1).replace(" ", ""))
+    order = re.search(r"订单号\s*[:：]\s*([A-Za-z0-9]{6,})", flat)
+    if order:
+        extras.append(f"订单号 {order.group(1)}")
+    price = re.search(r"[¥￥]\s*(\d+(?:\.\d+)?)", flat)
+    if price:
+        extras.append(f"¥{price.group(1)}")
+
+    title = " → ".join(p for p in (from_city, to_city) if p)
+    title = f"{title} {train_m.group(1)}".strip() if title else f"乘坐 {train_m.group(1)}"
+
+    ev = Event(
+        title=title,
+        start=start_dt,
+        end=end_dt,
+        location=" → ".join(p for p in (from_city, to_city) if p),
+        note="｜".join(extras)[:120],
+        priority="高",
+        vague=False,
+        source="text",
+        raw=f"{train_m.group(1)} {h1:02d}:{m1:02d}-{h2:02d}:{m2:02d}",
+    )
+
+    # 已消费的行：出发时刻、到达时刻、车次所在行，以及被用作站名的行
+    consumed: set[str] = set()
+    for offset in (s1, s2, train_m.start()):
+        consumed.add(lines[flat.count("\n", 0, offset)])
+    consumed.update(c for c in (from_city, to_city) if c)
+    return [ev], consumed
+
+
 def parse_with_rules(text: str, anchor: datetime | None = None,
                      default_remind: int = -1) -> list[Event]:
     """
@@ -643,8 +753,21 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
     events: list[Event] = []
     inherit_date: date | None = None   # 上一行日期小标题，供后续行继承
 
+    # 整体级日期：整段文字里若出现「2026年10月31日」这类带年份的完整日期，
+    # 就作为无日期行的兜底，避免「09:56」这类碎片被错挂到今天。
+    doc_day: date | None = None
+    if re.search(r"20\d{2}\s*[年./-]", text) or re.search(r"日期\s*[:：]", text):
+        cand, _, _, _ = parse_date_in_text(text, anchor_day)
+        doc_day = cand
+
+    # 行程（车票/登机牌）优先整体识别，避免碎片逐行入库
+    trip_events, trip_consumed = _extract_trip_events(text, doc_day or anchor_day)
+    events.extend(trip_events)
+
     for line in _split_candidates(text):
         line = line[:400]
+        if line.strip() in trip_consumed:
+            continue
 
         # 过滤「【课程表 截图里的内容】」「## 备忘」这类分段标题行：
         # 它们本身不含任何时间信息，不应被当成日程
@@ -660,6 +783,13 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
                 inherit_date = d
             continue
 
+        # 「乘车日期：2026年10月31日」这类元信息行只提供日期上下文，本身不是日程
+        if re.match(r"^(?:乘车|出发|到达|返程|出行|会议|活动)?日期\s*[:：]", line):
+            d, _, _, _v = parse_date_in_text(line, anchor_day)
+            if d:
+                inherit_date = d
+            continue
+
         day, d_start, d_end, date_vague = parse_date_in_text(line, anchor_day)
         date_explicit = day is not None
         vague_reasons: list[str] = []
@@ -668,6 +798,9 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
             if inherit_date is not None:
                 day = inherit_date
                 vague_reasons.append("日期继承自上文小标题")
+            elif doc_day is not None:
+                day = doc_day
+                vague_reasons.append("日期取自全文中的完整日期")
             else:
                 day = anchor_day
                 vague_reasons.append("未识别到日期，按今天处理")
@@ -680,6 +813,22 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
         if d_start >= 0:
             clock_text = line[:d_start] + " " * (d_end - d_start) + line[d_end:]
         tokens = _parse_clock_tokens(clock_text)
+
+        # --- 噪声过滤 -------------------------------------------------
+        # 车票 / 账单 / 通知类截图会 OCR 出一大堆纯 UI 文案（「退票」「¥36」
+        # 「9折」「复制」），它们既无时间也无日期。若不拦掉，逐行入库会产出
+        # 十几条「未命名日程」，把真正的那一条淹没。
+        if not (
+            tokens or rrule or date_explicit
+            or _ALL_DAY_RE.search(line)
+            or "节" in line                                          # 课表「第3-4节」
+            or re.search(r"ddl|deadline|截止|到期|最后期限", line, re.IGNORECASE)
+        ):
+            continue
+
+        # 整行只有一个时刻（如「09:56」）的碎片，单独成条没有意义
+        if _BARE_CLOCK_RE.match(line) and not date_explicit:
+            continue
 
         start_dt: datetime | None = None
         end_dt: datetime | None = None
@@ -1800,6 +1949,7 @@ def init_state() -> None:
         "last_ocr": [],               # 最近一次 OCR 的过程信息
         "editor_key": 0,              # 用于强制刷新 data_editor
         "editor_hash": "",            # 编辑内容指纹，避免重复同步
+        "confirm_clear": False,       # 「清空全部日程」的二次确认状态
         "use_ai": True,               # 是否优先调用大模型
         "default_remind": 15,         # 全局提醒（分钟）
         "recur_weeks": DEFAULT_RECUR_WEEKS,
@@ -2326,7 +2476,8 @@ def render_schedule_tab() -> None:
 
     # --- 可编辑表格 ---
     _html('<div class="section-title">日程表（可直接编辑 / 增删行）</div>')
-    st.caption("修改单元格后自动保存到会话；点击行首删除按钮或右键可删除整行。"
+    st.caption("改单元格后自动保存。删整行：选中行后按 Delete 键，或点表格右上角工具栏里的删除图标；"
+               "也可以展开下方「删除日程」逐条删或一键清空。"
                "🔴 红色=时间冲突　🟡 黄色=时间待核对")
 
     df = events_to_dataframe(events)
@@ -2392,24 +2543,51 @@ def render_schedule_tab() -> None:
             st.session_state.pending_toast = "日程已更新"
         st.rerun()
 
-    # --- 单条删除 ---
+    # --- 删除日程（单条 / 全部）---
     st.markdown("")
-    with st.expander("🗑️ 删除单条日程"):
+    with st.expander("🗑️ 删除日程（单条 / 全部清空）", expanded=True):
         options = {
             f"{ev.start:%m-%d %H:%M} | {ev.title}": ev.uid
             for ev in sorted(st.session_state.events, key=lambda e: e.start)
         }
         if options:
             picked = st.selectbox("选择要删除的日程", list(options.keys()), key="del_pick")
-            if st.button("确认删除", key="del_btn"):
-                target = options[picked]
-                st.session_state.events = [
-                    ev for ev in st.session_state.events if ev.uid != target
-                ]
-                st.session_state.editor_key += 1
-                st.session_state.editor_hash = ""
-                st.session_state.pending_toast = "已删除 1 条日程"
-                st.rerun()
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("删除选中这一条", key="del_btn"):
+                    target = options[picked]
+                    st.session_state.events = [
+                        ev for ev in st.session_state.events if ev.uid != target
+                    ]
+                    _recompute_conflicts()
+                    st.session_state.editor_key += 1
+                    st.session_state.editor_hash = ""
+                    st.session_state.pending_toast = "已删除 1 条日程"
+                    st.rerun()
+            with c2:
+                if st.button("清空全部日程", key="clear_all_btn"):
+                    st.session_state.confirm_clear = True
+
+            # 二次确认，避免误点把现场演示数据全清空
+            if st.session_state.get("confirm_clear"):
+                _html(
+                    f'<div class="notice notice-warn" style="margin-top:8px;">'
+                    f'⚠️ 将清空全部 <b>{len(st.session_state.events)}</b> 条日程，'
+                    f'此操作不可撤销。确认继续？</div>'
+                )
+                c3, c4 = st.columns(2)
+                with c3:
+                    if st.button("确定清空", key="clear_yes", type="primary"):
+                        st.session_state.events = []
+                        st.session_state.confirm_clear = False
+                        st.session_state.editor_key += 1
+                        st.session_state.editor_hash = ""
+                        st.session_state.pending_toast = "已清空全部日程"
+                        st.rerun()
+                with c4:
+                    if st.button("取消", key="clear_no"):
+                        st.session_state.confirm_clear = False
+                        st.rerun()
         else:
             st.caption("暂无可删除的日程。")
 
