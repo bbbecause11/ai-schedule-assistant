@@ -3,7 +3,7 @@
 AI 智能日程收纳 & 日历导入工具
 =====================================
 
-大学生 AI 创新比赛参赛作品（Streamlit 单文件应用）。
+由 DeepSeek-V4.1-Flash 模型在 WorkBuddy 工作台构建的 Streamlit 单文件应用。
 
 设计原则
 --------
@@ -12,14 +12,14 @@ AI 智能日程收纳 & 日历导入工具
 2. **能力可降级**：OCR 引擎（rapidocr / pytesseract）与大模型（任意 OpenAI 兼容
    接口）均为可选依赖。缺少任一能力时应用仍可运行，并给出明确提示。
 3. **规则引擎兜底**：即使没有网络 / 没有 API Key，内置的中文时间规则解析器
-   也能把文本整理成结构化的日程，保证比赛现场演示不会"空场"。
+   也能把文本整理成结构化的日程，保证离线环境下演示不会"空场"。
 
 运行方式
 --------
     pip install -r requirements.txt
     streamlit run app.py
 
-作者声明：本项目为比赛演示用途，日程数据不构成任何正式记录。
+作者声明：本项目为个人学习与演示用途，日程数据不构成任何正式记录。
 """
 
 from __future__ import annotations
@@ -47,7 +47,16 @@ import streamlit as st
 
 APP_TITLE = "AI 智能日程收纳"
 APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / Outlook 日历"
-APP_VERSION = "1.0.0"
+
+# 版本号：1.0.0 为首版；此后每完成一轮用户可见的功能迭代升一个小版本。
+#   1.1.0  重复日程面板（每天 / 每周 / 每两周 + 次数步进器）
+#   1.2.0  月历视图、循环开始日期、移除全局兜底周数、ins 风毛玻璃 UI、江大示例
+#   1.3.0  设置与外观面板、全站悬停说明、明暗双主题、四档界面字号
+APP_VERSION = "1.3.0"
+
+# 页脚署名
+APP_MODEL = "DeepSeek-V4.1-Flash"
+APP_BUILDER = "WorkBuddy 工作台"
 
 # 中国标准时间（UTC+8）。使用固定偏移而非 zoneinfo，避免 Windows 缺少 tzdata
 # 时抛出 ZoneInfoNotFoundError；中国自 1991 年起不实行夏令时，固定偏移精确无误。
@@ -2323,6 +2332,22 @@ html, body { background: var(--body-bg); }
 }
 .disclaimer strong { color: var(--ink-2); }
 .disclaimer .title { font-size: .8125rem; font-weight: 700; color: var(--ink-2); margin-bottom: 6px; }
+
+/* ---------- 页脚署名 ---------- */
+.app-footer {
+    margin: 1.1rem 0 1.4rem 0; padding-top: .9rem;
+    border-top: 1px solid var(--line);
+    text-align: center; color: var(--muted-2); font-size: .6875rem; line-height: 2;
+}
+.app-footer .fv { font-weight: 700; color: var(--ink-3); letter-spacing: .2px; }
+.app-footer .fsep { color: var(--muted-3); margin: 0 .45rem; }
+.app-footer .fcredit { color: var(--muted-2); }
+.app-footer .fcredit b { font-weight: 700; color: var(--ink-3); }
+.app-footer .fmodel {
+    display: inline-block; padding: .1rem .5rem; border-radius: 999px;
+    background: var(--chip-info-bg); color: var(--chip-info-fg);
+    border: 1px solid var(--chip-info-bd); font-weight: 700;
+}
 </style>
 """
 
@@ -3158,7 +3183,7 @@ def render_ingest_tab() -> None:
             on_click=_cb_load_sample,
             help=_tip("📚 加载示例",
                       "把一段混排的江苏大学课表 / 班群通知 / DDL 示例填进文本框，"
-                      "适合比赛现场一键演示。填完再点「开始解析」。"),
+                      "适合快速体验功能。填完再点「开始解析」。"),
         )
     with btn_cols[2]:
         st.button(
@@ -4235,15 +4260,25 @@ def render_footer() -> None:
         '特别是日期、时间与循环规则。请在导出前务必人工核对，'
         '标有 ⚠️ 的条目为程序推测结果。<br>'
         '5. <strong>使用风险自负</strong>：因日程解析错误导致的错过会议、DDL 等后果，'
-        '开发者不承担责任。本应用为比赛演示作品，不提供任何形式的服务保证。<br>'
+        '开发者不承担责任。本应用为个人学习与演示作品，不提供任何形式的服务保证。<br>'
         '6. <strong>第三方日历</strong>：导出的 .ics 文件由你自行导入第三方日历软件，'
         '其数据处理遵循对应软件的隐私政策。'
         '</div>'
     )
     _html(
-        '<div style="text-align:center;color:var(--muted-2);font-size:.6875rem;padding:14px 0 6px 0;">'
-        f'{APP_TITLE} · v{APP_VERSION}　|　Streamlit + OCR + LLM　|　'
-        '为大学生 AI 创新比赛而作</div>'
+        '<div class="app-footer">'
+        '<div>'
+        f'<span class="fv">{APP_TITLE} · v{APP_VERSION}</span>'
+        '<span class="fsep">|</span>'
+        '<span>Streamlit + OCR + LLM</span>'
+        '</div>'
+        '<div class="fcredit">'
+        '由 <span class="fmodel">'
+        f'{APP_MODEL}'
+        '</span> 模型在 <b>'
+        f'{APP_BUILDER}'
+        '</b> 构建</div>'
+        '</div>'
     )
 
 
