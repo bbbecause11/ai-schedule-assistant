@@ -2739,29 +2739,32 @@ def _render_recur_panel() -> None:
             'margin:8px 0 2px;">重复次数</div>',
             unsafe_allow_html=True,
         )
-        c_minus, c_num, c_plus = st.columns([1, 1.6, 1], gap="small")
-        with c_minus:
-            st.button(
-                "➖", key="recur_minus", on_click=_bump_recur_count, args=(-1,),
-                width="stretch", disabled=count <= RECUR_COUNT_MIN,
-                help=f"减少一次（最少 {RECUR_COUNT_MIN} 次）",
-            )
-        with c_num:
-            _html(
-                # 与左右按钮等高（40px）并用 flex 居中，避免数字上下错位
-                '<div style="height:40px;display:flex;align-items:center;'
-                'justify-content:center;background:#F5F3FF;border:1px solid #DDD6FE;'
-                'border-radius:10px;">'
-                f'<span style="font-size:24px;font-weight:800;color:#4F46E5;">{count}</span>'
-                '<span style="font-size:13px;font-weight:600;color:#6B7280;'
-                'margin-left:4px;">次</span></div>'
-            )
-        with c_plus:
-            st.button(
-                "➕", key="recur_plus", on_click=_bump_recur_count, args=(1,),
-                width="stretch", disabled=count >= RECUR_COUNT_MAX,
-                help=f"增加一次（最多 {RECUR_COUNT_MAX} 次）",
-            )
+        with st.container(key="recur_stepper"):
+            c_minus, c_num, c_plus = st.columns([1, 1.4, 1], gap="small")
+            with c_minus:
+                # 用全角单色字符而不是 ➖/➕：emoji 会被系统渲染成彩色（左右颜色不一致），
+                # 半角 −/+ 在默认字号下又偏细小，全角字符视觉最饱满。
+                st.button(
+                    "－", key="recur_minus", on_click=_bump_recur_count, args=(-1,),
+                    width="stretch", disabled=count <= RECUR_COUNT_MIN,
+                    help=f"减少一次（最少 {RECUR_COUNT_MIN} 次）",
+                )
+            with c_num:
+                _html(
+                    # 与左右按钮等高（40px）并用 flex 居中，避免数字上下错位
+                    '<div style="height:40px;display:flex;align-items:center;'
+                    'justify-content:center;background:#F5F3FF;border:1px solid #DDD6FE;'
+                    'border-radius:10px;">'
+                    f'<span style="font-size:24px;font-weight:800;color:#4F46E5;">{count}</span>'
+                    '<span style="font-size:13px;font-weight:600;color:#6B7280;'
+                    'margin-left:4px;">次</span></div>'
+                )
+            with c_plus:
+                st.button(
+                    "＋", key="recur_plus", on_click=_bump_recur_count, args=(1,),
+                    width="stretch", disabled=count >= RECUR_COUNT_MAX,
+                    help=f"增加一次（最多 {RECUR_COUNT_MAX} 次）",
+                )
 
         # 实时预览：点「应用」前就能看到最终规则与结束日期
         start_for_preview = target_ev.start if target_ev else datetime.now()
