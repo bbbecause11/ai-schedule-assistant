@@ -22,6 +22,9 @@ import traceback
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import numpy as np
+import pandas as pd
+
 import app
 
 VERBOSE = "-v" in sys.argv
@@ -207,6 +210,89 @@ def test_export() -> None:
     check("Markdown 标题正确", md.startswith("# 📅 我的日程表"))
 
 
+def test_recurrence() -> None:
+    section("E2. 重复设置（开关 / 频率 / 次数）")
+    start = datetime(2026, 11, 4, 14, 0)      # 2026-11-04 是周三
+
+    # --- 频率构造 ---
+    weekly = app.build_recur_rrule(app.RECUR_FREQ_WEEKLY, start)
+    biweek = app.build_recur_rrule(app.RECUR_FREQ_BIWEEKLY, start)
+    daily = app.build_recur_rrule(app.RECUR_FREQ_DAILY, start)
+    check("每周重复 → FREQ=WEEKLY;BYDAY=WE", weekly == "FREQ=WEEKLY;BYDAY=WE", weekly)
+    check("每两周重复 → INTERVAL=2",
+          biweek == "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE", biweek)
+    check("每天重复 → FREQ=DAILY", daily == "FREQ=DAILY", daily)
+
+    # 已有 BYDAY 时应保留（每周一三五 改成每两周，不能只剩一个日子）
+    kept = app.build_recur_rrule(app.RECUR_FREQ_BIWEEKLY, start,
+                                 "FREQ=WEEKLY;BYDAY=MO,WE,FR")
+    check("切换频率时保留原 BYDAY", kept == "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE,FR", kept)
+
+    # --- 次数（COUNT）---
+    with_count = app.set_recur_count(weekly, 10)
+    check("写入 COUNT", with_count == "FREQ=WEEKLY;BYDAY=WE;COUNT=10", with_count)
+    check("读取 COUNT", app.get_recur_count(with_count) == 10)
+    check("替换已有 COUNT",
+          app.set_recur_count("FREQ=WEEKLY;BYDAY=WE;COUNT=5", 8).endswith("COUNT=8"))
+    check("写 COUNT 时清除 UNTIL（RFC 互斥）",
+          "UNTIL" not in app.set_recur_count(
+              "FREQ=WEEKLY;BYDAY=WE;UNTIL=20261231T000000Z", 3))
+    check("次数归零时移除 COUNT",
+          app.set_recur_count("FREQ=WEEKLY;BYDAY=WE;COUNT=5", 0) == "FREQ=WEEKLY;BYDAY=WE")
+
+    # --- 可读文案与反解 ---
+    check("文案：每周三 · 共 10 次",
+          app.describe_recurrence(with_count) == "每周三 · 共 10 次",
+          app.describe_recurrence(with_count))
+    check("文案：每两周的周三",
+          app.describe_recurrence(biweek) == "每两周的周三",
+          app.describe_recurrence(biweek))
+    check("文案：每天", app.describe_recurrence(daily) == "每天")
+    check("文案：空规则 → 空串", app.describe_recurrence("") == "")
+    check("反解：每周", app.recur_freq_key(weekly) == app.RECUR_FREQ_WEEKLY)
+    check("反解：每两周", app.recur_freq_key(biweek) == app.RECUR_FREQ_BIWEEKLY)
+    check("反解：每天", app.recur_freq_key(daily) == app.RECUR_FREQ_DAILY)
+    check("反解：无法归类返回空", app.recur_freq_key("FREQ=MONTHLY") == "")
+
+    # --- 导出：COUNT 与 UNTIL 互斥 ---
+    ev_count = app.Event("带次数", start, start + timedelta(hours=1),
+                         rrule=with_count)
+    ev_until = app.Event("按周数兜底", start, start + timedelta(hours=1),
+                         rrule=weekly)
+    ics = app.build_ics([ev_count, ev_until], "recur", 0, 16)
+    lines = [l for l in ics.split("\r\n") if l.startswith("RRULE:")]
+    check("带次数的日程导出 COUNT", any("COUNT=10" in l for l in lines), str(lines))
+    check("带次数的日程不再追加 UNTIL",
+          not any("COUNT=" in l and "UNTIL=" in l for l in lines),
+          str(lines))
+    check("未指定次数的日程仍按周数补 UNTIL",
+          any("UNTIL=" in l and "COUNT=" not in l for l in lines), str(lines))
+
+    # --- 表格展示与往返保真 ---
+    rows = [ev_count.to_row(), ev_until.to_row()]
+    check("表格「重复」列是可读文案而非 RRULE",
+          "FREQ=" not in str(rows[0]["循环"]), str(rows[0]["循环"]))
+    check("隐藏列 rrule_raw 保存原始规则",
+          rows[0]["rrule_raw"] == with_count and rows[1]["rrule_raw"] == weekly)
+
+    df = app.events_to_dataframe([ev_count, ev_until])
+    check("DataFrame 含隐藏列 rrule_raw", "rrule_raw" in df.columns)
+    back, _, _ = app.dataframe_to_events(df, [ev_count, ev_until])
+    check("表格往返后 RRULE 不变",
+          [e.rrule for e in back] == [with_count, weekly],
+          str([e.rrule for e in back]))
+
+    # 空单元格（NaN / pd.NA）不得被当成规则写回
+    for blank in (None, np.nan, pd.NA):
+        row = {"标题": "x", "rrule_raw": blank, "循环": "每周三"}
+        ev = app.Event.from_row(row, app.Event("t", start, start + timedelta(hours=1)))
+        check(f"空单元格 {type(blank).__name__} 不写入 RRULE", ev.rrule == "", ev.rrule)
+
+    # 次数步进器的夹取
+    check("次数下限夹在 1", max(app.RECUR_COUNT_MIN, min(app.RECUR_COUNT_MAX, 0)) == 1)
+    check("次数上限夹在 60", max(app.RECUR_COUNT_MIN, min(app.RECUR_COUNT_MAX, 999)) == 60)
+
+
 def test_ocr() -> None:
     section("F. OCR 分支（mock 引擎，无需安装 OCR 依赖）")
     data = make_image()
@@ -379,8 +465,8 @@ def main() -> int:
     print("=" * 68)
 
     for fn in (test_text_only, test_time_parsing, test_structure_fields,
-               test_dedup_conflict, test_export, test_ocr, test_ai_layer,
-               test_merge, test_security):
+               test_dedup_conflict, test_export, test_recurrence, test_ocr,
+               test_ai_layer, test_merge, test_security):
         try:
             fn()
         except Exception:  # noqa: BLE001

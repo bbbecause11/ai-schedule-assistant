@@ -81,6 +81,17 @@ REMIND_OPTIONS = {
     "提前 1 天": 1440,
 }
 
+# 重复频率选项（界面文案）。对应 RRULE 的构造方式见 build_recur_rrule。
+RECUR_FREQ_WEEKLY = "每周重复"
+RECUR_FREQ_BIWEEKLY = "每两周重复"
+RECUR_FREQ_DAILY = "每天重复"
+RECUR_FREQ_OPTIONS = [RECUR_FREQ_WEEKLY, RECUR_FREQ_BIWEEKLY, RECUR_FREQ_DAILY]
+
+# 重复次数的取值范围（含首条），用于「➖ 数字 ➕」步进器
+RECUR_COUNT_MIN = 1
+RECUR_COUNT_MAX = 60
+RECUR_COUNT_DEFAULT = 16         # 与 DEFAULT_RECUR_WEEKS 对齐：一学期 16 周
+
 
 # ---------------------------------------------------------------------------
 # 1. 轻量日志（仅在页面上展示，绝不写入磁盘）
@@ -148,7 +159,10 @@ class Event:
             "地点": self.location,
             "优先级": self.priority,
             "备注": self.note,
-            "循环": self.rrule or "",
+            # 「循环」列只做人类可读展示（表格中禁止直接编辑），
+            # 真正的 RRULE 存在隐藏列 rrule_raw 里，避免展示文案覆盖原始规则。
+            "循环": _rrule_summary_short(self.rrule),
+            "rrule_raw": self.rrule or "",
             "提醒": _remind_label(self.remind_minutes),
             "状态": self.status,
         }
@@ -164,9 +178,33 @@ class Event:
         base.note = str(row.get("备注") or "")
         pri = str(row.get("优先级") or "中")
         base.priority = pri if pri in PRIORITY_LEVELS else "中"
-        base.rrule = str(row.get("循环") or "").strip()
+        # 循环规则只认隐藏的原始列；兼容旧数据里「循环」列直接存 RRULE 的情况
+        raw = _cell_text(row, "rrule_raw")
+        if not raw:
+            legacy = _cell_text(row, "循环")
+            raw = legacy if "FREQ=" in legacy.upper() else ""
+        base.rrule = raw
         base.remind_minutes = _parse_remind_label(str(row.get("提醒") or ""))
         return base
+
+
+def _cell_text(row: dict[str, Any], key: str) -> str:
+    """
+    安全读取 data_editor 单元格的文本值。
+
+    空单元格可能是 None / NaN / pd.NA，直接 `or ""` 在 pd.NA 上会抛
+    「boolean value of NA is ambiguous」，因此统一走 pd.isna 判断。
+    """
+    value = row.get(key)
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none", "<na>"} else text
 
 
 def _remind_label(minutes: int) -> str:
@@ -478,6 +516,122 @@ def parse_recurrence(text: str) -> tuple[str, str]:
     if m:
         return "FREQ=MONTHLY", m.group(0)
     return "", ""
+
+
+# ---------------------------- 循环规则工具 --------------------------------
+# RRULE 统一存成不含 "RRULE:" 前缀的字符串，例如：
+#   FREQ=WEEKLY;BYDAY=MO,WE           每周一、三
+#   FREQ=WEEKLY;INTERVAL=2;BYDAY=MO   每两周周一
+#   FREQ=WEEKLY;BYDAY=MO;COUNT=10     每周一，共 10 次
+# 次数用标准的 COUNT 属性表达，Calendar 客户端（iOS / Outlook / Google）都能识别。
+
+_BYDAY_ICS_TO_CN = {"MO": "一", "TU": "二", "WE": "三", "TH": "四",
+                    "FR": "五", "SA": "六", "SU": "日"}
+
+
+def _rrule_field(rrule: str, key: str) -> str:
+    """取出 RRULE 中某个属性的值（找不到返回空串）。"""
+    m = re.search(rf"(?:^|;){key}=([^;]+)", (rrule or "").upper())
+    return m.group(1).strip() if m else ""
+
+
+def get_recur_count(rrule: str) -> int:
+    """读取 RRULE 中的 COUNT，没有则返回 0（表示未指定次数）。"""
+    raw = _rrule_field(rrule, "COUNT")
+    return int(raw) if raw.isdigit() else 0
+
+
+def set_recur_count(rrule: str, count: int) -> str:
+    """
+    写入 / 替换 RRULE 中的 COUNT。
+
+    COUNT 与 UNTIL 在 RFC 5545 中互斥，因此写入 COUNT 时一并清除 UNTIL，
+    否则部分日历客户端会直接丢弃整条 RRULE。
+    """
+    if not rrule:
+        return ""
+    cleaned = re.sub(r";?\s*(?:COUNT|UNTIL)=[^;]+", "", rrule, flags=re.IGNORECASE)
+    cleaned = cleaned.strip("; ")
+    if count and count > 0:
+        return f"{cleaned};COUNT={int(count)}"
+    return cleaned
+
+
+def recur_freq_key(rrule: str) -> str:
+    """把 RRULE 归类回界面上的三个频率选项，无法归类时返回空串。"""
+    if not rrule:
+        return ""
+    freq = _rrule_field(rrule, "FREQ")
+    interval = _rrule_field(rrule, "INTERVAL")
+    if freq == "DAILY":
+        return RECUR_FREQ_DAILY
+    if freq == "WEEKLY":
+        return RECUR_FREQ_BIWEEKLY if interval == "2" else RECUR_FREQ_WEEKLY
+    return ""
+
+
+def build_recur_rrule(freq_key: str, start: datetime, base_rrule: str = "") -> str:
+    """
+    按界面选择的频率构造 RRULE。
+
+    星期几的取法：
+      - 原规则里已写死 BYDAY（如「每周一三五」解析出的 MO,WE,FR）→ 尊重原文
+      - 否则用日程开始日期对应的星期几
+    这样「每周三的课」改成「每两周重复」仍是周三，不会漂移到别的日子。
+    """
+    existing_days = [d for d in _rrule_field(base_rrule, "BYDAY").split(",") if d]
+    days = existing_days or [_WEEKDAY_ICS[start.weekday()]]
+    byday = ",".join(days)
+
+    if freq_key == RECUR_FREQ_DAILY:
+        return "FREQ=DAILY"
+    if freq_key == RECUR_FREQ_BIWEEKLY:
+        return f"FREQ=WEEKLY;INTERVAL=2;BYDAY={byday}"
+    return f"FREQ=WEEKLY;BYDAY={byday}"
+
+
+def describe_recurrence(rrule: str) -> str:
+    """
+    把 RRULE 转成一句中文，用于表格展示与导出文件的可读列。
+
+    例：FREQ=WEEKLY;BYDAY=MO;COUNT=10 → 「每周一 · 共 10 次」
+    """
+    if not rrule:
+        return ""
+    freq = _rrule_field(rrule, "FREQ")
+    interval = _rrule_field(rrule, "INTERVAL")
+    byday = [d for d in _rrule_field(rrule, "BYDAY").split(",") if d]
+    days_list = [_BYDAY_ICS_TO_CN.get(d, d) for d in byday]
+    days_cn = "、".join(days_list)                          # 一、三
+    days_full = "、".join(f"周{d}" for d in days_list)      # 周一、周三
+    count = get_recur_count(rrule)
+
+    if freq == "DAILY":
+        desc = "每天" if interval in ("", "1") else f"每 {interval} 天"
+    elif freq == "WEEKLY":
+        if interval in ("", "1"):
+            desc = f"每周{days_cn}" if days_cn else "每周"
+        elif interval == "2":
+            desc = f"每两周的{days_full}" if days_full else "每两周"
+        else:
+            desc = f"每 {interval} 周的{days_full}" if days_full else f"每 {interval} 周"
+    elif freq == "MONTHLY":
+        desc = "每月" if interval in ("", "1") else f"每 {interval} 个月"
+    elif freq == "YEARLY":
+        desc = "每年"
+    else:
+        desc = rrule          # 无法归类时原样展示，避免信息丢失
+
+    if count:
+        desc += f" · 共 {count} 次"
+    elif _rrule_field(rrule, "UNTIL"):
+        desc += " · 到期自动结束"
+    return desc
+
+
+def _rrule_summary_short(rrule: str) -> str:
+    """表格里用的短标签（不带次数说明以外的前后缀）。"""
+    return describe_recurrence(rrule) or "单次"
 
 
 _SECTION_RE = re.compile(
@@ -1576,12 +1730,16 @@ def _ics_duration(minutes: int) -> str:
 
 def _rrule_with_until(rrule: str, start: datetime, weeks: int) -> str:
     """
-    给循环规则补上 UNTIL，避免无限重复污染用户日历。
+    给循环规则补上结束条件，避免无限重复污染用户日历。
 
-    优先用「学期」概念：从开始日往后推 N 周。
+    优先级：COUNT（用户显式指定次数） > UNTIL（按学期周数兜底）。
+    RFC 5545 规定 COUNT 与 UNTIL 互斥，同时出现时部分客户端会丢弃整条规则，
+    所以这里一旦检测到 COUNT 就原样返回，绝不追加 UNTIL。
     """
     if not rrule:
         return ""
+    if get_recur_count(rrule):
+        return rrule
     if "UNTIL" in rrule.upper():
         return rrule
     until = start + timedelta(weeks=weeks)
@@ -1660,7 +1818,7 @@ def build_csv(events: list[Event], default_remind: int = 15) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\r\n")
     writer.writerow(["标题", "开始时间", "结束时间", "时长(分钟)", "地点",
-                     "优先级", "备注", "循环规则", "提醒", "状态", "来源"])
+                     "优先级", "备注", "重复", "重复规则(RRULE)", "提醒", "状态", "来源"])
     for ev in events:
         remind = default_remind if ev.remind_minutes < 0 else ev.remind_minutes
         writer.writerow([
@@ -1671,7 +1829,8 @@ def build_csv(events: list[Event], default_remind: int = 15) -> bytes:
             ev.location,
             ev.priority,
             ev.note,
-            ev.rrule,
+            describe_recurrence(ev.rrule) or "不重复",
+            ev.rrule or "",
             _remind_label(remind),
             ev.status.replace("🔴 ", "").replace("⚠️ ", "").replace("✅ ", ""),
             ev.source,
@@ -1709,7 +1868,7 @@ def build_markdown(events: list[Event], default_remind: int = 15) -> str:
             else:
                 span = f"{ev.start:%H:%M} - {ev.end:%H:%M}"
             if ev.rrule:
-                span += " 🔁"
+                span += f" 🔁 {describe_recurrence(ev.rrule)}"
             loc = ev.location.replace("|", "\\|") or "—"
             note = ev.note.replace("|", "\\|").replace("\n", " ") or "—"
             out.append(f"| {span} | {ev.title} | {loc} | {ev.priority} | {note} | {ev.status} |")
@@ -1721,7 +1880,8 @@ def build_markdown(events: list[Event], default_remind: int = 15) -> str:
 
 def events_to_dataframe(events: list[Event]) -> pd.DataFrame:
     """把 Event 列表转成 data_editor 可用的 DataFrame。"""
-    columns = ["uid", "标题", "开始", "结束", "地点", "优先级", "备注", "循环", "提醒", "状态"]
+    columns = ["uid", "标题", "开始", "结束", "地点", "优先级", "备注",
+               "循环", "rrule_raw", "提醒", "状态"]
     if not events:
         # 空表也要指定 dtype，否则 DatetimeColumn 渲染会异常
         empty = pd.DataFrame({c: pd.Series(dtype="object") for c in columns})
@@ -1738,7 +1898,8 @@ def _df_signature(df: pd.DataFrame) -> str:
     刻意不使用 pandas 的哈希工具：datetime 列在 fillna 后 dtype 会退化，
     可能导致指纹不稳定，从而触发无限 rerun。
     """
-    cols = ["uid", "标题", "开始", "结束", "地点", "优先级", "备注", "循环", "提醒"]
+    cols = ["uid", "标题", "开始", "结束", "地点", "优先级", "备注",
+            "循环", "rrule_raw", "提醒"]
     parts: list[str] = []
     try:
         for _, row in df.iterrows():
@@ -1957,6 +2118,12 @@ def init_state() -> None:
         "raw_text_input": "",
         "total_parsed": 0,
         "pending_toast": "",          # 跨 rerun 传递的操作提示
+        # --- 重复设置面板的状态 ---
+        "recur_target_uid": "",       # 当前正在设置的日程
+        "recur_enabled": False,       # 「是否重复」开关
+        "recur_freq": RECUR_FREQ_WEEKLY,
+        "recur_count": RECUR_COUNT_DEFAULT,
+        "recur_advanced_open": False,  # 高级：手写 RRULE 展开状态
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -2195,8 +2362,9 @@ def render_sidebar() -> None:
         st.session_state.default_remind = REMIND_OPTIONS[chosen]
 
         st.session_state.recur_weeks = st.slider(
-            "循环日程重复周数", 4, 52, st.session_state.recur_weeks, 1,
-            help="每周课表在日历中重复到第几周（相当于学期长度）。"
+            "循环日程兜底周数", 4, 52, st.session_state.recur_weeks, 1,
+            help="仅对「没有单独设置次数」的循环日程生效：从开始日往后推这么多周。"
+                 "在日程表页用重复设置面板指定了次数的日程，以该次数为准。"
         )
 
         st.markdown("---")
@@ -2424,6 +2592,217 @@ def _style_events(df: pd.DataFrame, events: list[Event]) -> Any:
     return df.style.apply(_row_css, axis=1)
 
 
+# ---------------------------------------------------------------------------
+# 15. 重复设置面板（开关 + 频率 + 次数步进器）
+# ---------------------------------------------------------------------------
+
+def _recur_options() -> dict[str, str]:
+    """重复设置下拉的选项：可读标签 → 日程 uid。"""
+    return {
+        f"{ev.start:%m-%d %H:%M} | {ev.title}": ev.uid
+        for ev in sorted(st.session_state.events, key=lambda e: e.start)
+    }
+
+
+def _fill_recur_controls(ev: "Event | None") -> None:
+    """把某条日程的重复状态回填到面板控件（仅在控件渲染前调用才合法）。"""
+    if ev is None:
+        return
+    st.session_state.recur_enabled = ev.is_recurring
+    st.session_state.recur_freq = recur_freq_key(ev.rrule) or RECUR_FREQ_WEEKLY
+    st.session_state.recur_count = get_recur_count(ev.rrule) or RECUR_COUNT_DEFAULT
+
+
+def _on_recur_pick_change() -> None:
+    """下拉切换日程时，同步目标 uid 并回填该日程的重复设置。"""
+    mapping = _recur_options()
+    uid = mapping.get(str(st.session_state.get("recur_pick_label") or ""), "")
+    if not uid:
+        return
+    st.session_state.recur_target_uid = uid
+    _fill_recur_controls(
+        next((e for e in st.session_state.events if e.uid == uid), None)
+    )
+
+
+def _bump_recur_count(delta: int) -> None:
+    """步进器回调：在当前值基础上加/减，并夹在合法区间内。"""
+    cur = int(st.session_state.get("recur_count") or RECUR_COUNT_DEFAULT)
+    st.session_state.recur_count = max(RECUR_COUNT_MIN, min(RECUR_COUNT_MAX, cur + delta))
+
+
+def _nth_occurrence(rrule: str, start: datetime, n: int) -> datetime | None:
+    """估算第 n 次发生的日期，仅用于面板上的「预计最后一次」提示。"""
+    if not rrule or n <= 0:
+        return None
+    freq = _rrule_field(rrule, "FREQ")
+    interval = _rrule_field(rrule, "INTERVAL")
+    step = int(interval) if interval.isdigit() else 1
+    if freq == "DAILY":
+        return start + timedelta(days=step * (n - 1))
+    if freq == "WEEKLY":
+        per_week = max(1, len([d for d in _rrule_field(rrule, "BYDAY").split(",") if d]))
+        return start + timedelta(weeks=(n - 1) // per_week * step)
+    if freq == "MONTHLY":
+        return start + timedelta(days=30 * step * (n - 1))
+    return None
+
+
+def _apply_recur_setting(uid: str, enabled: bool, freq_key: str, count: int) -> None:
+    """
+    把面板上的设置写回目标日程。
+
+    注意：本函数只能作为按钮的 on_click 回调执行。Streamlit 不允许在 widget
+    渲染之后直接改它自己绑定的 session_state key，而回调在 widget 实例化之前运行，
+    因此在这里同步开关/频率/次数的状态是安全的。
+    """
+    target = next((e for e in st.session_state.events if e.uid == uid), None)
+    if target is None:
+        st.session_state.pending_toast = "目标日程已不存在，请重新选择"
+        return
+
+    if enabled:
+        rrule = build_recur_rrule(freq_key, target.start, target.rrule)
+        target.rrule = set_recur_count(
+            rrule, max(RECUR_COUNT_MIN, min(RECUR_COUNT_MAX, count))
+        )
+        st.session_state.pending_toast = f"已设为「{describe_recurrence(target.rrule)}」"
+        st.session_state.recur_freq = freq_key
+        st.session_state.recur_count = max(RECUR_COUNT_MIN, min(RECUR_COUNT_MAX, count))
+    else:
+        target.rrule = ""
+        st.session_state.pending_toast = "已取消重复，改为单次日程"
+
+    st.session_state.recur_enabled = bool(enabled)
+    st.session_state.recur_target_uid = uid
+
+    _recompute_conflicts()
+    # 表格里的「重复」列内容变了，必须重建编辑器，否则旧缓存会盖掉本次修改
+    st.session_state.editor_key += 1
+    st.session_state.editor_hash = ""
+
+
+def _render_recur_panel() -> None:
+    """
+    重复设置面板：是否重复 → 重复频率 → 重复次数（➖ 数字 ➕）→ 应用。
+
+    次数写入标准 RRULE 的 COUNT 属性，导出的 .ics 会在第 N 次之后自动停止，
+    不会被日历客户端当作「永久重复」。
+    """
+    if not st.session_state.events:
+        return
+
+    options = _recur_options()
+    labels, uids = list(options.keys()), list(options.values())
+
+    # 目标失效（被删除 / 时间改动）时回退到第一条
+    if st.session_state.recur_target_uid not in uids:
+        st.session_state.recur_target_uid = uids[0]
+        _fill_recur_controls(
+            next((e for e in st.session_state.events
+                  if e.uid == st.session_state.recur_target_uid), None)
+        )
+
+    # 旧标签已不在选项里时清掉，否则 selectbox 会抛「值不在选项中」
+    if st.session_state.get("recur_pick_label") not in options:
+        st.session_state.pop("recur_pick_label", None)
+
+    picked_label = st.selectbox(
+        "选择要设置重复的日程",
+        labels,
+        index=uids.index(st.session_state.recur_target_uid),
+        key="recur_pick_label",
+        on_change=_on_recur_pick_change,
+        help="先选一条日程，再决定它是否重复、多久重复一次、总共重复几次。",
+    )
+    target_ev = next((e for e in st.session_state.events
+                      if e.uid == st.session_state.recur_target_uid), None)
+
+    enabled = st.toggle(
+        "是否重复",
+        key="recur_enabled",
+        help="关闭表示只发生一次；开启后可设置重复频率与次数。",
+    )
+
+    if enabled:
+        freq = st.radio(
+            "重复频率",
+            RECUR_FREQ_OPTIONS,
+            key="recur_freq",
+            horizontal=True,
+        )
+        count = int(st.session_state.recur_count)
+
+        # ---- 次数步进器：➖ ｜ 中间数字 ｜ ➕ ----
+        st.markdown(
+            '<div style="font-size:13px;font-weight:600;color:#374151;'
+            'margin:8px 0 2px;">重复次数</div>',
+            unsafe_allow_html=True,
+        )
+        c_minus, c_num, c_plus = st.columns([1, 1.6, 1], gap="small")
+        with c_minus:
+            st.button(
+                "➖", key="recur_minus", on_click=_bump_recur_count, args=(-1,),
+                width="stretch", disabled=count <= RECUR_COUNT_MIN,
+                help=f"减少一次（最少 {RECUR_COUNT_MIN} 次）",
+            )
+        with c_num:
+            _html(
+                # 与左右按钮等高（40px）并用 flex 居中，避免数字上下错位
+                '<div style="height:40px;display:flex;align-items:center;'
+                'justify-content:center;background:#F5F3FF;border:1px solid #DDD6FE;'
+                'border-radius:10px;">'
+                f'<span style="font-size:24px;font-weight:800;color:#4F46E5;">{count}</span>'
+                '<span style="font-size:13px;font-weight:600;color:#6B7280;'
+                'margin-left:4px;">次</span></div>'
+            )
+        with c_plus:
+            st.button(
+                "➕", key="recur_plus", on_click=_bump_recur_count, args=(1,),
+                width="stretch", disabled=count >= RECUR_COUNT_MAX,
+                help=f"增加一次（最多 {RECUR_COUNT_MAX} 次）",
+            )
+
+        # 实时预览：点「应用」前就能看到最终规则与结束日期
+        start_for_preview = target_ev.start if target_ev else datetime.now()
+        preview = set_recur_count(
+            build_recur_rrule(freq, start_for_preview,
+                              target_ev.rrule if target_ev else ""),
+            count,
+        )
+        last_dt = _nth_occurrence(preview, start_for_preview, count)
+        st.caption(
+            f"将生成：**{describe_recurrence(preview)}**"
+            + (f"　·　预计最后一次 {last_dt:%Y-%m-%d}" if last_dt else "")
+        )
+    else:
+        freq = st.session_state.recur_freq
+        count = int(st.session_state.recur_count)
+        st.caption("当前为单次日程，不会在日历中重复。")
+
+    # 高级入口：保留手写 RRULE 的能力
+    with st.expander("⚙️ 高级：直接编辑重复规则（RRULE）"):
+        st.caption("例如 `FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10`；留空表示不重复。"
+                   "修改后需点下方「应用重复设置」才会生效。")
+        st.code(target_ev.rrule if target_ev and target_ev.rrule else "（当前不重复）",
+                language="text")
+
+    st.markdown("")
+    b1, b2 = st.columns(2)
+    picked_uid = options.get(picked_label, st.session_state.recur_target_uid)
+    with b1:
+        st.button(
+            "✅ 应用重复设置", key="apply_recur", type="primary", width="stretch",
+            on_click=_apply_recur_setting, args=(picked_uid, enabled, freq, count),
+        )
+    with b2:
+        st.button(
+            "🚫 取消这条的重复", key="remove_recur", width="stretch",
+            help="改回单次日程，不会删除这条日程本身。",
+            on_click=_apply_recur_setting, args=(picked_uid, False, freq, count),
+        )
+
+
 def render_schedule_tab() -> None:
     events: list[Event] = st.session_state.events
 
@@ -2478,6 +2857,7 @@ def render_schedule_tab() -> None:
     _html('<div class="section-title">日程表（可直接编辑 / 增删行）</div>')
     st.caption("改单元格后自动保存。删整行：选中行后按 Delete 键，或点表格右上角工具栏里的删除图标；"
                "也可以展开下方「删除日程」逐条删或一键清空。"
+               "「重复」列为只读展示，要调整请用下方「重复设置」面板。"
                "🔴 红色=时间冲突　🟡 黄色=时间待核对")
 
     df = events_to_dataframe(events)
@@ -2491,9 +2871,10 @@ def render_schedule_tab() -> None:
         "优先级": st.column_config.SelectboxColumn("优先级", options=PRIORITY_LEVELS, width="small"),
         "备注": st.column_config.TextColumn("备注", width="medium"),
         "循环": st.column_config.TextColumn(
-            "循环规则", width="small",
-            help="如 FREQ=WEEKLY;BYDAY=MO,WE；留空表示单次日程",
+            "重复", width="small", disabled=True,
+            help="只读展示。要改动请用下方「重复设置」面板——在那里用开关 + 次数步进器调整。",
         ),
+        "rrule_raw": None,          # 隐藏列：真正的 RRULE，表格不展示
         "提醒": st.column_config.SelectboxColumn(
             "提醒", options=["跟随全局"] + list(REMIND_OPTIONS.keys()), width="small"
         ),
@@ -2542,6 +2923,14 @@ def render_schedule_tab() -> None:
         else:
             st.session_state.pending_toast = "日程已更新"
         st.rerun()
+
+    # --- 重复设置 ---
+    st.markdown("")
+    _html('<div class="section-title">重复设置</div>')
+    st.caption("给选中的日程设置重复频率与次数。重复次数会写入日历文件，到达次数后自动停止，"
+               "不会变成永久重复。")
+    with st.container(border=True):
+        _render_recur_panel()
 
     # --- 删除日程（单条 / 全部）---
     st.markdown("")
@@ -2658,11 +3047,13 @@ def render_export_tab() -> None:
         st.metric("导出条目", len(events))
 
     default_remind = st.session_state.default_remind
+    fixed_count = sum(1 for e in events if get_recur_count(e.rrule))
+    recurring_total = sum(1 for e in events if e.is_recurring)
     _html(
         '<div class="notice notice-info">'
         f'当前全局提醒：<b>{_remind_label(default_remind)}</b>；'
-        f'循环日程重复 <b>{st.session_state.recur_weeks}</b> 周。'
-        '这两项可在左侧边栏调整。<br>'
+        f'循环日程 <b>{recurring_total}</b> 条，其中 <b>{fixed_count}</b> 条已指定重复次数。'
+        '未指定次数的按侧边栏「兜底周数」推算结束日期。<br>'
         '.ics 为通用日历标准格式，可直接导入 iOS 日历、Android、Outlook、Google 日历。'
         '</div>'
     )
