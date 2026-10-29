@@ -313,7 +313,9 @@ app.py  (单文件，约 2600 行，分 19 个逻辑区块)
 
 > **几个云端专属注意点**
 >
-> - `packages.txt` 已声明 `libgl1`、`libglib2.0-0`，解决云端 OpenCV 缺少系统库报错，无需改动。
+> - `packages.txt` 只声明 `libgl1`。**不要加 `libglib2.0-0`** —— Streamlit Cloud 基础镜像是 Debian Bullseye，
+>   该包依赖已被移除的 `libffi7` / `libpcre3`，apt 必然失败，会导致整个「安装依赖项」阶段报错。
+>   本项目用的是 `opencv-python-headless`（由 rapidocr 自动引入），本身不依赖 GLib，无需该包。
 > - 免费实例内存约 1GB，且**闲置会休眠**，休眠后首次唤醒要 30 秒左右。比赛演示前先访问一次唤醒它。
 > - 免费实例首次加载 OCR 模型需 20~40 秒，属正常现象。
 > - 云端是**公共实例**，页面内存中的数据不跨用户共享，符合本项目「不落库」的设计。
