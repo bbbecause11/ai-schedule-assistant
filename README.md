@@ -5,7 +5,7 @@
 
 面向**大学生 AI 创新比赛**的参赛作品，基于 Streamlit 构建，单文件应用，可本地一键运行。
 
-**仓库地址**：<https://github.com/bbbecause11/ai-schedule-assistant>（私有）
+**仓库地址**：<https://github.com/bbbecause11/ai-schedule-assistant>（公开，可直接访问）
 
 | 访问方式 | 地址 | 说明 |
 | --- | --- | --- |
@@ -280,13 +280,13 @@ app.py  (单文件，约 2600 行，分 19 个逻辑区块)
 
 ### 方案 B：Streamlit Community Cloud（免费，可分享链接）
 
-**代码已托管在**：<https://github.com/bbbecause11/ai-schedule-assistant>（私有仓库）
+**代码已托管在**：<https://github.com/bbbecause11/ai-schedule-assistant>（公开仓库）
 
 部署步骤：
 
 1. 打开 <https://share.streamlit.io>，用 GitHub 账号 `bbbecause11` 登录。
 2. 首次使用需点 **Authorize Streamlit**，授予它读取你仓库的权限
-   （私有仓库必须授权，否则列表里看不到）。
+   （仓库已公开，授权后可直接在列表中选到；不授权仍然看不到仓库列表）。
 3. 点 `Create app` → 选择 `Deploy a public app from GitHub`，
    然后按下表填写：
 
