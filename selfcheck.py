@@ -520,6 +520,95 @@ def test_merge() -> None:
           any(e.vague and "规则引擎" in e.vague_reason for e in merged2))
 
 
+def test_timetable() -> None:
+    section("J. 课表版面重建（网格 / 单元格解析）")
+    from app import OcrBlock
+
+    # --- 1. 网格识别：5 个以上星期表头 + 左侧节次编号才算课表 -----------
+    def block(text, x, y, w=40, h=14):
+        return OcrBlock(text, 0.95, x, y, x + w, y + h)
+
+    blocks = []
+    for i, wd in enumerate("一二三四五六日"):
+        blocks.append(block(f"星期{wd}", 120 + i * 150, 10))
+    for p in range(1, 13):
+        blocks.append(block(str(p), 20, 40 + (p - 1) * 60))
+    blocks.append(block("高等数学 王老师 W9阶 2-6,9-18", 130, 60, 120, 20))
+    grid = app._detect_timetable_grid(blocks)
+    check("认出 7 列 × 12 节的课表网格",
+          grid is not None and grid.weekday_count == 7 and grid.period_count == 12,
+          f"{grid.weekday_count if grid else '-'} × {grid.period_count if grid else '-'}")
+
+    # 普通聊天截图（没有星期表头）不应被误判成课表
+    plain = [block(f"第{i}行随便写的字", 20, i * 30) for i in range(20)]
+    check("普通截图不会被误判为课表", app._detect_timetable_grid(plain) is None)
+
+    # --- 2. 单元格解析：各种真实书写形态 --------------------------------
+    cases = [
+        # 输入、期望 title / teacher / location / weeks / 单双周
+        ("高等数学(一)(上)卜 庆刚 W9阶 2-6,9-18, /",
+         "高等数学(一)(上)", "卜庆刚", "9阶", "2-6、9-18", ""),
+        ("创新创业理论与实践(1) 李宁 W文约209 双 12-18, /",
+         "创新创业理论与实践(1)", "李宁", "文约209", "12-18", "双周"),
+        ("问题求解与程序设计( 上)官威 W文约101 2- 6,9-15 , /",
+         "问题求解与程序设计(上)", "官威", "文约101", "2-6、9-15", ""),
+        ("体育(1) 体育部 W科教 城体育场 2-17，/",
+         "体育(1)", "体育部", "科教城体育场", "2-17", ""),
+        ("新生研讨课 官威 W14 06 2-6,9-11, /",
+         "新生研讨课", "官威", "1406", "2-6、9-11", ""),
+        ("统计学 吴敏 W经济楼10 81-12,/",          # 房间号被挪了一位
+         "统计学", "吴敏", "经济楼108", "1-12", ""),
+        ("俄罗斯历史 Okhotnik ov Egor W9阶 9-12, 1",
+         "俄罗斯历史", "Okhotnikov Egor", "9阶", "9-12", ""),
+        ("综合英语| 刘畅 W文约 101 2-6,9-18,/",     # 罗马数字 I 被读成竖线
+         "综合英语I", "刘畅", "文约101", "2-6、9-18", ""),
+        ("马克思主义基本原理 陈静 WB105 2-6,9-16 .1",
+         "马克思主义基本原理", "陈静", "B105", "2-6、9-16", ""),
+    ]
+    for text, title, teacher, loc, weeks, oe in cases:
+        info = app._split_course_cell(text)
+        got = (info["title"], info["teacher"], info["location"],
+               app._weeks_label(info["weeks"]), info["odd_even"])
+        check(f"解析「{text[:12]}…」",
+              got == (title, teacher, loc, weeks, oe),
+              f"得 {got}")
+
+    # --- 3. 一格两门课 + 跨节重复 ---------------------------------------
+    two = app._split_cell_courses(
+        "形势与政策(1) 冯慧 W1111 17-18, / 俄罗斯历史 Okhotnikov Egor W9阶 9-12, /")
+    check("一格两门课被拆开", len(two) == 2, str([t["title"] for t in two]))
+    dup = app._split_cell_courses("体育(1) 体育部 W9阶 2-17, / 体育(1) 体育部 W9阶 2-17, /")
+    check("一格内重复的同一门课去重", len(dup) == 1, str(len(dup)))
+
+    # --- 4. 课表 → 日程：节次时刻、周次、单双周 -------------------------
+    cells = [{
+        "weekday": 0, "period": 1, "periods": (1, 2),
+        "text": "高等数学(一)(上) 卜庆刚 W9阶 2-6,9-18, /",
+    }]
+    anchor = date(2026, 9, 7)          # 一个周一
+    events = app.timetable_to_events(cells, anchor)
+    check("课表转成 1 条日程", len(events) == 1, str(len(events)))
+    if events:
+        ev = events[0]
+        check("上课日期落在第 2 周的周一",
+              ev.start.date() == date(2026, 9, 14), str(ev.start))
+        check("第 1-2 节对应 08:00-09:35",
+              (ev.start.strftime("%H:%M"), ev.end.strftime("%H:%M")) == ("08:00", "09:35"),
+              f"{ev.start:%H:%M}-{ev.end:%H:%M}")
+        check("周次写进备注", "第 2-6、9-18 周" in ev.note, ev.note)
+        check("循环规则按总周数生成", "COUNT=15" in ev.rrule, ev.rrule)
+        check("课表日程标记为待核对", ev.vague)
+
+    double = app.timetable_to_events([{
+        "weekday": 2, "period": 1, "periods": (1, 2),
+        "text": "创新创业理论与实践(1) 李宁 W文约209 双 12-18, /",
+    }], anchor)
+    check("双周课用 INTERVAL=2 且从第 12 周开始",
+          bool(double) and "INTERVAL=2" in double[0].rrule
+          and double[0].start.isocalendar()[1] >= 1,
+          double[0].rrule if double else "")
+
+
 def test_security() -> None:
     section("I. 安全与合规静态检查")
     src = open("app.py", encoding="utf-8").read()
@@ -550,7 +639,7 @@ def main() -> int:
     for fn in (test_text_only, test_time_parsing, test_structure_fields,
                test_dedup_conflict, test_export, test_recurrence,
                test_calendar_and_sample, test_ocr,
-               test_ai_layer, test_merge, test_security):
+               test_ai_layer, test_merge, test_timetable, test_security):
         try:
             fn()
         except Exception:  # noqa: BLE001

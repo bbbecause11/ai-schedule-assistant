@@ -36,6 +36,7 @@ import traceback
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime, timedelta, timezone
+from datetime import time as dt_time
 from typing import Any, Iterable
 
 import pandas as pd
@@ -52,7 +53,8 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   1.1.0  重复日程面板（每天 / 每周 / 每两周 + 次数步进器）
 #   1.2.0  月历视图、循环开始日期、移除全局兜底周数、ins 风毛玻璃 UI、江大示例
 #   1.3.0  设置与外观面板、全站悬停说明、明暗双主题、四档界面字号
-APP_VERSION = "1.3.0"
+#   1.4.0  课表版面重建（识别课表截图并还原成逐节日程）、图片自动放大与增强
+APP_VERSION = "1.4.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -67,6 +69,8 @@ CN_TZ_LABEL = "Asia/Shanghai"
 MAX_TEXT_CHARS = 20_000          # 单次粘贴文本上限，防止超长文本拖垮解析
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 单张图片上限 10MB
 MAX_IMAGE_EDGE = 2_400           # OCR 前把最长边压到该值，兼顾速度与精度
+OCR_UPSCALE_BELOW = 1_100        # 短边小于该值的图会先放大再识别
+OCR_UPSCALE_MAX = 2.5            # 放大倍率上限，避免糊成一片反而更差
 ALLOWED_IMAGE_TYPES = {"png", "jpg", "jpeg", "webp", "bmp"}
 
 # 时间推断常量
@@ -1167,6 +1171,48 @@ def _load_ocr_engine() -> tuple[str, Any]:
     return "none", None
 
 
+def _ocr_quality(blocks: list[OcrBlock]) -> float:
+    """
+    给一次识别结果打分，用于在「原图」和「增强图」之间择优。
+
+    只累加长度大于 1 的文字块：单字块多半是表格线、页码、水印噪声，
+    计进去反而会让「识别出一堆碎片」的差结果得分更高。
+    """
+    score = 0.0
+    for b in blocks:
+        n = len(b.text.strip())
+        if n >= 2:
+            score += n * max(0.3, b.score)
+    return score
+
+
+def _ocr_looks_poor(blocks: list[OcrBlock]) -> bool:
+    """判断是否需要再试一次增强图：文字块太少，或整体置信度偏低。"""
+    solid = [b for b in blocks if len(b.text.strip()) >= 2]
+    if len(solid) < 8:
+        return True
+    avg = sum(b.score for b in solid) / len(solid)
+    return avg < 0.80
+
+
+def _enhance_for_ocr(img: Any) -> Any:
+    """
+    为低对比度 / 浅色水印背景的截图准备一张增强图。
+
+    只做三件不改变字形的事：灰度 → 自动拉伸色阶 → 轻微锐化。
+    不做二值化：截图里的浅灰表格线一旦被二值化会变成黑线，反而干扰检测。
+    """
+    try:
+        from PIL import ImageFilter, ImageOps
+
+        gray = ImageOps.autocontrast(img.convert("L"), cutoff=1)
+        sharp = gray.filter(ImageFilter.UnsharpMask(radius=1.2, percent=140, threshold=3))
+        return sharp.convert("RGB")
+    except Exception:  # noqa: BLE001
+        log(f"图像增强失败（跳过）: {traceback.format_exc()}")
+        return None
+
+
 def _prepare_image(data: bytes) -> tuple[Any, list[str]]:
     """
     校验并规范化上传图片。
@@ -1206,6 +1252,15 @@ def _prepare_image(data: bytes) -> tuple[Any, list[str]]:
         new_size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
         img = img.resize(new_size)
         warnings.append(f"图片较大，已等比缩放至 {new_size[0]}×{new_size[1]} 以提升识别速度。")
+    elif min(img.size) < OCR_UPSCALE_BELOW:
+        # 小图放大：课表 / 聊天记录截图经常只有几百像素宽，
+        # 文字笔画不到 8px，检测模型会直接漏掉整行。放大到能认出笔画为止。
+        ratio = min(OCR_UPSCALE_MAX, OCR_UPSCALE_BELOW / max(1, min(img.size)))
+        if ratio > 1.05:
+            new_size = (int(img.width * ratio), int(img.height * ratio))
+            if max(new_size) <= MAX_IMAGE_EDGE:
+                img = img.resize(new_size, Image.LANCZOS)
+                warnings.append(f"图片偏小，已放大至 {new_size[0]}×{new_size[1]} 以提升识别率。")
 
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
@@ -1222,6 +1277,8 @@ def ocr_image(data: bytes) -> dict[str, Any]:
     result: dict[str, Any] = {
         "ok": False, "text": "", "engine": "none",
         "warnings": [], "error": "", "confidence": None,
+        # 版面重建结果（仅课表截图会填充）
+        "cells": [], "layout": None, "raw_text": "",
     }
     try:
         img, warns = _prepare_image(data)
@@ -1244,35 +1301,30 @@ def ocr_image(data: bytes) -> dict[str, Any]:
         )
         return result
 
+    blocks: list[OcrBlock] = []
+    last_output: Any = None
     try:
         if engine_name == "rapidocr":
             import numpy as np
-            arr = np.array(img)
-            output = engine(arr)
-            # rapidocr 不同版本返回 (result, elapse) 或 带 .txts 的对象
-            lines: list[str] = []
-            scores: list[float] = []
-            if isinstance(output, tuple):
-                payload = output[0]
-                if payload:
-                    for item in payload:
-                        if isinstance(item, (list, tuple)) and len(item) >= 3:
-                            lines.append(str(item[1]))
-                            try:
-                                scores.append(float(item[2]))
-                            except (TypeError, ValueError):
-                                pass
-            else:
-                txts = getattr(output, "txts", None) or []
-                scs = getattr(output, "scores", None) or []
-                lines = [str(t) for t in txts]
-                scores = [float(s) for s in scs if s is not None]
-            text = "\n".join(ln.strip() for ln in lines if ln and ln.strip())
-            result["confidence"] = round(sum(scores) / len(scores), 3) if scores else None
+            last_output = engine(np.array(img))
+            blocks = _blocks_from_rapidocr(last_output)
+            # 识别效果差时（文字块少或均分低），用增强图再跑一遍，取更好的那次
+            if _ocr_looks_poor(blocks):
+                alt = _enhance_for_ocr(img)
+                if alt is not None:
+                    alt_output = engine(np.array(alt))
+                    alt_blocks = _blocks_from_rapidocr(alt_output)
+                    if _ocr_quality(alt_blocks) > _ocr_quality(blocks):
+                        blocks, last_output = alt_blocks, alt_output
+                        result["warnings"].append("原图对比度偏低，已自动增强后重新识别。")
         else:  # pytesseract
-            import pytesseract
-            text = pytesseract.image_to_string(img, lang="chi_sim+eng")
-            text = "\n".join(ln.strip() for ln in text.splitlines() if ln.strip())
+            blocks = _blocks_from_pytesseract(img)
+        # 引擎只给文字、不给坐标框时（个别版本 / 自封装），退化成纯文本拼接，
+        # 版面重建自然做不了，但文字解析照旧可用。
+        text = ("\n".join(b.text for b in blocks if b.text.strip())
+                or _plain_text_from_ocr(last_output))
+        scores = [b.score for b in blocks if b.score > 0]
+        result["confidence"] = round(sum(scores) / len(scores), 3) if scores else None
     except Exception as exc:  # noqa: BLE001
         log(f"OCR 执行异常: {traceback.format_exc()}")
         result["error"] = (
@@ -1292,8 +1344,836 @@ def ocr_image(data: bytes) -> dict[str, Any]:
         result["warnings"].append(
             f"识别置信度偏低（{result['confidence']:.0%}），解析结果可能需要人工核对。"
         )
+
+    # --- 版面重建：能认出课表网格就顺带把单元格拆出来 ------------------
+    try:
+        grid = _detect_timetable_grid(blocks)
+        if grid:
+            cells = _grid_cells(blocks, grid)
+            if cells:
+                result["layout"] = {
+                    "kind": "timetable",
+                    "weekdays": grid.weekday_count,
+                    "periods": grid.period_count,
+                    "cells": len(cells),
+                }
+                result["cells"] = cells
+                result["text"] = _timetable_lines(cells)
+                result["raw_text"] = text
+    except Exception:  # noqa: BLE001
+        log(f"课表版面重建失败（不影响普通识别）: {traceback.format_exc()}")
+
     result["ok"] = True
     return result
+
+
+# ---------------------------------------------------------------------------
+# 5b. 课表版面重建
+#
+# 把 OCR 的 121 个文字块直接 join 成文本，等于把表格压成一维：
+# 「高等数学」「星期一」「第1-2节」变成三行互不相干的字，解析器只能瞎猜，
+# 于是出现「（ 节）周校区 回龙校」这种垃圾标题。
+#
+# 这一层保留每个文字块的坐标，把表头「星期几」还原成列、
+# 左侧「节次编号」还原成行，再把每个单元格里的文字拼回去，
+# 最后按「星期 + 节次」直接生成日程。识别准不准，取决于结构而不是运气。
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OcrBlock:
+    """一条 OCR 文字及其外接框（像素坐标，原点在左上角）。"""
+
+    text: str
+    score: float
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+    @property
+    def cx(self) -> float:
+        return (self.x0 + self.x1) / 2
+
+    @property
+    def cy(self) -> float:
+        return (self.y0 + self.y1) / 2
+
+    @property
+    def w(self) -> float:
+        return max(1.0, self.x1 - self.x0)
+
+    @property
+    def h(self) -> float:
+        return max(1.0, self.y1 - self.y0)
+
+
+def _blocks_from_rapidocr(output: Any) -> list[OcrBlock]:
+    """兼容 rapidocr 3.x（RapidOCROutput 对象）与 1.x（(payload, elapse) 元组）。"""
+    blocks: list[OcrBlock] = []
+    if isinstance(output, tuple):
+        for item in (output[0] if output else None) or []:
+            if not (isinstance(item, (list, tuple)) and len(item) >= 3):
+                continue
+            try:
+                xs = [float(p[0]) for p in item[0]]
+                ys = [float(p[1]) for p in item[0]]
+                blocks.append(OcrBlock(str(item[1]).strip(), float(item[2]),
+                                       min(xs), min(ys), max(xs), max(ys)))
+            except (TypeError, ValueError, IndexError):
+                continue
+        return blocks
+
+    txts = list(getattr(output, "txts", None) or [])
+    scores = list(getattr(output, "scores", None) or [])
+    boxes = getattr(output, "boxes", None)
+    if boxes is None:
+        return blocks
+    for idx, text in enumerate(txts):
+        try:
+            xs = [float(p[0]) for p in boxes[idx]]
+            ys = [float(p[1]) for p in boxes[idx]]
+        except (TypeError, ValueError, IndexError):
+            continue
+        score = float(scores[idx]) if idx < len(scores) else 0.0
+        blocks.append(OcrBlock(str(text).strip(), score,
+                               min(xs), min(ys), max(xs), max(ys)))
+    return blocks
+
+
+def _plain_text_from_ocr(output: Any) -> str:
+    """引擎没给坐标框时的兜底：把识别到的文字按行拼起来。"""
+    if output is None:
+        return ""
+    if isinstance(output, tuple):
+        items = (output[0] if output else None) or []
+        return "\n".join(str(it[1]).strip() for it in items
+                         if isinstance(it, (list, tuple)) and len(it) >= 2)
+    return "\n".join(str(t).strip() for t in (getattr(output, "txts", None) or []))
+
+
+def _blocks_from_pytesseract(img: Any) -> list[OcrBlock]:
+    """pytesseract 走 image_to_data，按行聚合出带坐标的文字块。"""
+    import pytesseract
+    from pytesseract import Output
+
+    data = pytesseract.image_to_data(img, lang="chi_sim+eng", output_type=Output.DICT)
+    lines: dict[tuple[int, int, int], dict[str, Any]] = {}
+    for i, word in enumerate(data.get("text", [])):
+        word = (word or "").strip()
+        if not word:
+            continue
+        try:
+            conf = float(data["conf"][i])
+        except (KeyError, TypeError, ValueError):
+            conf = -1.0
+        if conf < 0:
+            continue
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        x, y = data["left"][i], data["top"][i]
+        w, h = data["width"][i], data["height"][i]
+        slot = lines.setdefault(key, {
+            "words": [], "conf": [],
+            "x0": x, "y0": y, "x1": x + w, "y1": y + h,
+        })
+        slot["words"].append(word)
+        slot["conf"].append(conf / 100.0)
+        slot["x0"] = min(slot["x0"], x)
+        slot["y0"] = min(slot["y0"], y)
+        slot["x1"] = max(slot["x1"], x + w)
+        slot["y1"] = max(slot["y1"], y + h)
+    return [
+        OcrBlock(" ".join(s["words"]),
+                 sum(s["conf"]) / max(1, len(s["conf"])),
+                 s["x0"], s["y0"], s["x1"], s["y1"])
+        for s in lines.values()
+    ]
+
+
+# 表头「星期一」～「星期日」。容忍 OCR 把「日」认成「天」，以及全/半角混排。
+_WEEKDAY_HEAD_RE = re.compile(r"^(?:星期|周|礼拜)\s*([一二三四五六日天])$")
+# 左侧节次编号。OCR 常把它和「上午」粘成「1上」「1止」，所以只看开头数字。
+_PERIOD_HEAD_RE = re.compile(r"^(?:第)?\s*(\d{1,2})\s*节?$")
+
+# 课表单元格里「地点」的写法五花八门：W9阶 / W文约209 / W2机房 / 科教城体育场。
+_LOC_TOKEN_RE = re.compile(r"[Ww]\s*([^\s,，。;；/]{1,14})")
+_LOC_HINT_RE = re.compile(r"(楼|场|馆|室|机房|中心|校区|阶|实验室|实验楼|教\d)")
+
+# 周次的写法：2-6,9-18 / 17~18 / 1-16单周。分隔符只认逗号——认空格的话
+# 「W文约101 2-6」里 101 的尾巴会被拆成一个假周次，房间号就丢了。
+_WEEK_RANGE_SEP = r"[-–—~～至]"
+_WEEK_UNIT = rf"\d{{1,2}}(?:{_WEEK_RANGE_SEP}\d{{1,2}})?"
+_WEEK_TOKEN = rf"{_WEEK_UNIT}(?:\s*[,，、]\s*{_WEEK_UNIT})*"
+_WEEK_TAIL_RE = re.compile(rf"({_WEEK_TOKEN})\s*(单周|双周|单|双)?\s*周?")
+
+# 单元格里单独出现的「上午/下午」标记（OCR 有时读成「下年」），不是课程。
+_SECTION_WORDS = {"上", "下", "中", "晚", "早", "上午", "下午", "晚上",
+                  "中午", "下年", "上年", "上中", "中下"}
+
+# 房间号被 OCR 挪了一位：「W经济楼10 81-12」其实是「W经济楼108 1-12」。
+# 触发条件很窄（前半段拼出来的数字 >30，不可能是教学周），不会误伤正常课表。
+_ROOM_SHIFT_RE = re.compile(
+    rf"(?P<loc>[楼室馆场阶]\s*\d{{1,2}})\s+(?P<lead>\d)(?P<rest>{_WEEK_TOKEN})\s*$"
+)
+
+
+@dataclass
+class TimetableGrid:
+    """课表的行列结构：cols 按星期先后排，rows 按节次从小到大排。"""
+
+    header_bottom: float
+    left_edge: float
+    cols: list[tuple[float, float, int]]    # (x0, x1, weekday, 0=周一)
+    rows: list[tuple[float, float, int]]    # (y0, y1, period)
+
+    @property
+    def weekday_count(self) -> int:
+        return len(self.cols)
+
+    @property
+    def period_count(self) -> int:
+        return len(self.rows)
+
+
+def _detect_timetable_grid(blocks: list[OcrBlock]) -> TimetableGrid | None:
+    """
+    从文字块里认出「星期 × 节次」的网格。
+
+    判断依据：同一水平行上出现 >= 5 个「星期X」，且它们左侧还有 >= 3 个
+    纯数字（节次编号）。两个条件都满足才当成课表，否则返回 None 走原有文本解析，
+    保证普通日程截图（会议通知、车票）行为完全不变。
+    """
+    if len(blocks) < 12:
+        return None
+
+    # --- 1. 找星期表头 --------------------------------------------------
+    heads: dict[int, OcrBlock] = {}
+    for b in blocks:
+        text = b.text.replace(" ", "")
+        # 无表格线时「节次」和「星期一」会被识别成同一块（"节次 星期一"），
+        # 所以用 finditer 在文本内部找「星期X」，并按字符位置比例折算它的横坐标。
+        for m in re.finditer(r"(?:星期|周|礼拜)([一二三四五六日天])", text):
+            wd = _WEEKDAY_CN.get(m.group(1))
+            if wd is None:
+                continue
+            left = b.x0 + b.w * (m.start() / max(1, len(text)))
+            right = b.x0 + b.w * (m.end() / max(1, len(text)))
+            cand = OcrBlock(m.group(0), b.score, left, b.y0, right, b.y1)
+            old = heads.get(wd)
+            if old is None or cand.score > old.score:
+                heads[wd] = cand
+    if len(heads) < 5:
+        return None
+
+    ys = [b.cy for b in heads.values()]
+    line_h = sorted(b.h for b in heads.values())[len(heads) // 2]
+    # 同一行才算正常课表；竖排（星期在左、节次在上）暂不支持
+    if max(ys) - min(ys) > line_h * 1.6:
+        return None
+    header_bottom = max(b.y1 for b in heads.values())
+
+    # --- 2. 由表头中心推出列边界（相邻中心取中点） ----------------------
+    ordered = sorted(heads.items(), key=lambda kv: kv[1].cx)
+    centers = [b.cx for _, b in ordered]
+    if len(centers) >= 2:
+        gaps = sorted(centers[i + 1] - centers[i] for i in range(len(centers) - 1))
+        gap = gaps[len(gaps) // 2]
+    else:
+        gap = ordered[0][1].w * 2
+    if gap <= 0:
+        return None
+
+    cols: list[tuple[float, float, int]] = []
+    for i, (wd, b) in enumerate(ordered):
+        left = centers[i] - gap / 2 if i > 0 else b.x0 - gap * 0.10
+        right = centers[i] + gap / 2 if i < len(centers) - 1 else b.x1 + gap * 0.10
+        cols.append((left, right, wd))
+    left_edge = cols[0][0]
+
+    # --- 3. 找左侧节次编号 ----------------------------------------------
+    # 用 cx 判断「在不在最左列」：OCR 常把「1」和「上午」粘成「1上」，
+    # 这个块的右边界会越过列线，用 x1 判断就会把第 1 节整行丢掉。
+    labels: list[tuple[float, float, int]] = []
+    for b in blocks:
+        if b.y0 <= header_bottom - 2 or b.cx > left_edge:
+            continue
+        compact = b.text.replace(" ", "")
+        m = _PERIOD_HEAD_RE.match(compact) or re.match(r"^(\d{1,2})[^\d]", compact)
+        if not m:
+            continue
+        num = int(m.group(1))
+        if 1 <= num <= 20:
+            labels.append((b.y0, b.y1, num))
+    if len(labels) < 3:
+        return None
+
+    labels.sort()
+    seen: set[int] = set()
+    uniq: list[tuple[float, float, int]] = []
+    for y0, y1, num in labels:
+        if num in seen:            # 同一节次被重复识别，只留第一次
+            continue
+        seen.add(num)
+        uniq.append((y0, y1, num))
+    if len(uniq) < 3:
+        return None
+    # 正常课表节次自上而下递增；若 OCR 顺序错乱，按编号重排
+    if [n for _, _, n in uniq] != sorted(n for _, _, n in uniq):
+        uniq.sort(key=lambda t: t[2])
+
+    # --- 4. 用相邻节次编号的中点切行 ------------------------------------
+    # 不能拿编号的顶边当行边界：编号有的贴顶、有的居中，一旦编号位置比内容低，
+    # 整列内容就会整体串到上一节。取相邻编号「中心点的中值」当边界才稳定，
+    # 也不受行高随内容变化的影响（一格塞两门课时那行会明显变高）。
+    centers = [(y0 + y1) / 2 for y0, y1, _ in uniq]
+    if len(centers) >= 2:
+        steps = sorted(centers[i + 1] - centers[i] for i in range(len(centers) - 1))
+        step = max(steps[len(steps) // 2], line_h * 1.5)
+    else:
+        step = max(line_h * 3, 1.0)
+    bounds = [(centers[i] + centers[i + 1]) / 2 for i in range(len(centers) - 1)]
+
+    rows: list[tuple[float, float, int]] = []
+    for i, (_, _, num) in enumerate(uniq):
+        top = min(centers[i] - step / 2, header_bottom) if i == 0 else bounds[i - 1]
+        bottom = bounds[i] if i < len(bounds) else centers[i] + step / 2
+        rows.append((top, bottom, num))
+
+    return TimetableGrid(header_bottom=header_bottom, left_edge=left_edge,
+                         cols=cols, rows=rows)
+
+
+def _split_cell_courses(text: str) -> list[dict[str, Any]]:
+    """
+    拆一个单元格里的全部课程。
+
+    教务系统的导出一格可能塞两门课，每条以「/」收尾：
+    「形势与政策(1) 冯慧 W1111 17~18, / 俄罗斯历史 Okhotnikov Egor W9 阶 9-12, /」
+    """
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    seen_titles: list[str] = []
+    for piece in re.split(r"[/／]", text or ""):
+        if not piece.strip(" ,，、;；"):
+            continue
+        info = _split_course_cell(piece)
+        title = info["title"].strip()
+        if len(title) < 2:
+            continue
+        if re.fullmatch(r"[\d\s()（）.．·、/\\-]+", title):
+            continue
+        # 跨节的格子会被合并成「课程 / 课程 /」，同一门课只保留一份，
+        # 否则一门课会变成好几条重复日程。
+        key = _course_key(info)
+        if key in seen:
+            continue
+        # 第二份常被 OCR 读残（「高等数学(一)(上) 卜庆刚 9阶1W9阶」），
+        # 指纹对不上，但它和已收录的那条同名前缀，按重复处理。
+        if any(len(t) >= 4 and (title.startswith(t) or t.startswith(title))
+               for t in seen_titles):
+            continue
+        seen.add(key)
+        seen_titles.append(title)
+        entries.append(info)
+    return entries
+
+
+def _course_key(info: dict[str, Any]) -> str:
+    """
+    课程指纹：课程名 + 周次 + 教师，用来判断相邻两节的格子是不是同一门课。
+
+    课程名和教师连起来去空格再比对——OCR 对同一门课有时输出「体育(1) 体育部」，
+    有时输出「体育(1)体育部」，不归一化就合并不了，会多出几条重复日程。
+    """
+    name = re.sub(r"\s+", "", f"{info['title']}{info['teacher']}")
+    return "|".join([name, _weeks_label(info["weeks"]), info["odd_even"]])
+
+
+def _grid_cells(blocks: list[OcrBlock], grid: TimetableGrid) -> list[dict[str, Any]]:
+    """
+    把文字块落到「星期 × 节次」的格子上。
+
+    按列（星期）分组后做纵向聚类，而不是「每块按中心点归一行」——教务系统里
+    一格课跨 1-3 节时文字是垂直居中的，逐块归行会把同一门课的几行字劈到相邻
+    两行去，于是「俄罗斯历史」被拆成半句飘到下一节。
+
+    相邻两块之间的空隙明显小于行高时，就算同一格；同一格覆盖的节次范围由它
+    最上面和最下面那块落在哪一行决定。
+    """
+    cols: dict[int, list[OcrBlock]] = {}
+    for b in blocks:
+        if b.y0 < grid.header_bottom - 2 or b.cx < grid.left_edge:
+            continue                    # 表头行、左侧节次 / 上午下午列
+        wd = None
+        for x0, x1, w in grid.cols:
+            if x0 - 8 <= b.cx <= x1 + 8:
+                wd = w
+                break
+        if wd is None:
+            continue
+        cols.setdefault(wd, []).append(b)
+
+    def band(y: float) -> int | None:
+        for r0, r1, p in grid.rows:
+            if r0 - 2 <= y < r1:
+                return p
+        return None
+
+    cells: list[dict[str, Any]] = []
+    for wd, items in cols.items():
+        items.sort(key=lambda b: (b.cy, b.x0))
+        heights = sorted(b.h for b in items)
+        line_h = heights[len(heights) // 2] if heights else 20.0
+        row_h = min((r1 - r0) for r0, r1, _ in grid.rows) if grid.rows else 60.0
+        # 同一格内相邻两行的文字框通常是紧贴甚至重叠的（间距 <= 0），
+        # 而隔开两门课的空隙至少也有小半个行高。阈值取 30% 行高：
+        # 实测同一格内的行间距全为负，最近的两门课相隔 10px，用 7px 能切开。
+        gap_thr = max(3.0, min(line_h * 0.30, row_h * 0.30))
+
+        runs: list[list[OcrBlock]] = []
+        for b in items:
+            if runs and b.y0 - max(x.y1 for x in runs[-1]) <= gap_thr:
+                runs[-1].append(b)
+            else:
+                runs.append([b])
+
+        for run in runs:
+            run.sort(key=lambda b: (b.y0, b.x0))
+            # 节次取这一格「中心」落在哪一行。用「上沿到上沿」的完整跨度会多算
+            # 一节：教务系统的课表把一格文字垂直居中，跨 2 节的一格，文字常常
+            # 顶进上一行、底探进下一行，实测每格都溢出 1 行。真正的跨度交给
+            # 相邻重复副本去合并（第 1、2 节各写一遍 → 合成 1-2 节）。
+            center = sum(b.cy for b in run) / len(run)
+            period = band(center) or band(min(b.y0 for b in run)) or band(
+                max(b.y1 for b in run))
+            if period is None:
+                continue
+            cells.append({
+                "weekday": wd,
+                "period": period,
+                "text": " ".join(x.text for x in run),
+            })
+
+    cells.sort(key=lambda c: (c["weekday"], c["period"]))
+    return _merge_same_course(cells)
+
+
+def _merge_same_course(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    把连续几节重复出现的同一门课合并成一条跨节日程。
+
+    这类课表每一节都是一行、内容重复一遍（第 1、2 节各写一次同一门课），
+    所以「节次相连 + 课程指纹相同」就说明它其实是一堂课。
+    """
+    merged: list[dict[str, Any]] = []
+    for cell in cells:
+        courses = _split_cell_courses(cell["text"])
+        key = "&".join(sorted(_course_key(c) for c in courses))
+        cell = dict(cell, courses=courses, key=key)
+        span = (cell["period"], cell.get("period_end", cell["period"]))
+        if merged and key:
+            prev = merged[-1]
+            # 允许重叠：跨节格子的上沿偶尔会探进下一行一点点
+            if (prev["weekday"] == cell["weekday"]
+                    and cell["period"] <= prev["periods"][1] + 1
+                    and key == prev["key"]):
+                prev["periods"] = (prev["periods"][0], max(prev["periods"][1], span[1]))
+                prev["text"] = f"{prev['text']} {cell['text']}"
+                continue
+        if not key:
+            continue                    # 空格子（只有噪声）
+        merged.append(dict(cell, periods=span))
+    return merged
+
+
+
+
+def _parse_week_ranges(spec: str) -> list[tuple[int, int]]:
+    """
+    把「2-6,9-18」解析成 [(2,6),(9,18)]。
+
+    顺手清掉一个高频 OCR 噪声：单元格末尾的「/」有时被读成「1」，
+    于是在周次后面多出一个「, 1」。真实课表的周次是按升序写的，
+    所以「9-18 之后又冒出一个 1」必然是分隔符误读，直接丢掉。
+    """
+    out: list[tuple[int, int]] = []
+    for part in re.split(r"[,，、]", spec):
+        nums = re.findall(r"\d{1,2}", part)
+        if not nums:
+            continue
+        a = int(nums[0])
+        b = int(nums[1]) if len(nums) > 1 else a
+        if a > b:
+            a, b = b, a
+        if 1 <= a <= 30 and a <= b <= 30:
+            out.append((a, b))
+    if len(out) >= 2 and out[-1] == (1, 1) and out[-2][0] > 1:
+        out.pop()
+    # 被上一段完全包含的重复项（「2-6,9-18,11」里的 11）一并去掉
+    if len(out) >= 2:
+        kept: list[tuple[int, int]] = []
+        for a, b in out:
+            if any(not (b < x or a > y) for x, y in kept):
+                continue
+            kept.append((a, b))
+        out = kept
+    return out
+
+
+# 常见中文姓氏。OCR 常把教师姓和课程名粘成一个词（「高等数学(一)(上)卜」+「庆刚」），
+# 靠这张表把粘在课程名末尾的那个字认回来。只收百名以内的高频姓，宁缺毋滥。
+_CN_SURNAMES = set(
+    "王李张刘陈杨黄赵周吴徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘"
+    "于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江"
+    "尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤卜"
+)
+# 单独成词的「地点后缀」，OCR 常把它们与前缀数字拆开（W9 + 阶 → 9 + 阶）
+_LOC_SUFFIX = {"阶", "楼", "室", "机房", "场", "馆", "中心", "校区", "阶梯", "教学楼"}
+
+
+def _week_boundary_ok(raw: str, i: int) -> bool:
+    """
+    周次片段前面是不是一个「干净」的边界。
+
+    「W文约101 2-6」里 2-6 前面是空格，干净；「W9阶2-6」前面是汉字，也干净。
+    而「W文约1012-6」里 2-6 前面是数字 1，说明房间号和周次被 OCR 粘在一起了。
+    """
+    if i <= 0:
+        return True
+    ch = raw[i - 1]
+    if ch.isspace():
+        return True
+    return "\u4e00" <= ch <= "\u9fff"
+
+
+def _week_is_continuation(raw: str, i: int) -> bool:
+    """逗号后面的片段只是前面周次的续写（「2-6,9-18」里的 9-18），不能单独当周次。"""
+    return i > 0 and raw[i - 1] in ",，、;；"
+
+
+def _take_week_suffix(raw: str) -> tuple[list[tuple[int, int]], str, str]:
+    """
+    从右端摘出周次，返回 (weeks, 单双周, 去掉周次后的前缀)。
+
+    做法是把「能单独解释成周次」的后缀全部列出来再挑，而不是让正则从左往右
+    贪心匹配——「W文约101 2-6,9-15」里 101 的末位也能拼出一个（错的）周次
+    「1 2-6,9-15」，贪心匹配会先撞上它，房间号的 101 就被吃掉了。
+    """
+    cands: list[tuple[int, list[tuple[int, int]], str, bool, bool, bool]] = []
+    for i in range(max(0, len(raw) - 36), len(raw)):
+        if _week_is_continuation(raw, i):
+            continue
+        m = _WEEK_TAIL_RE.fullmatch(raw[i:])
+        if not m:
+            continue
+        weeks = _parse_week_ranges(m.group(1))
+        if not weeks:
+            continue
+        spec = m.group(1)
+        head = re.split(r"[,，、]", spec)[0]
+        cands.append((i, weeks, m.group(2) or "",
+                      bool(re.search(_WEEK_RANGE_SEP, spec)),
+                      _week_boundary_ok(raw, i),
+                      bool(re.search(_WEEK_RANGE_SEP, head))))
+    if not cands:
+        return [], "", raw
+
+    clean = [c for c in cands if c[4]]
+    if clean:
+        # 边界干净时取最靠左的：「2-6,9-15」比它的尾巴「9-15」更完整
+        i, weeks, oe = max(clean, key=lambda c: (c[5], c[3], -c[0]))[:3]
+    else:
+        # 全是脏边界：房间号和周次粘在一起了（文约1012-6,9-15）。
+        # 首选「第一段就是区间」的候选，再取最靠右的，把多出的数字留给房间号。
+        i, weeks, oe = max(cands, key=lambda c: (c[5], c[3], c[0]))[:3]
+    if oe in ("单", "双"):
+        oe += "周"
+    return weeks, oe, raw[:i].strip()
+
+
+def _split_course_cell(text: str) -> dict[str, Any]:
+    """
+    拆一个课程条目：课程名 / 教师 / 地点 / 周次 / 单双周。
+
+    典型输入：「高等数学(一)(上)卜 庆刚 W9阶 2-6,9-18, /」
+    典型输出：title=高等数学(一)(上) teacher=卜庆刚 location=9阶 weeks=[(2,6),(9,18)]
+
+    解析顺序是踩坑踩出来的，别随手调换：
+    ① 清洗（括号里的空格、破折号、末尾分隔符、错位的房间号）
+    ② 周次——必须排在地点前面，否则「W文约101 2-6」的 101 会被当成周次
+    ③ 地点——先认 W 前缀标记，再把被折行切碎的碎片拼回去
+    ④ 剩下的切课程名 / 教师
+    """
+    info: dict[str, Any] = {"title": "", "teacher": "", "location": "",
+                            "weeks": [], "odd_even": ""}
+    raw = re.sub(r"\s+", " ", (text or "")).strip()
+    if not raw:
+        return info
+
+    # --- ① 清洗 ---------------------------------------------------------
+    # 折行会把括号和里面的字拆开：「( 上)」「(1 )」
+    raw = re.sub(r"([(（])\s+", r"\1", raw)
+    raw = re.sub(r"\s+([)）])", r"\1", raw)
+    # 破折号两侧的空格：「2- 6」「9 -15」先粘回「2-6」「9-15」
+    raw = re.sub(rf"\s*{_WEEK_RANGE_SEP}\s*", "-", raw)
+    # 左侧「上午/下午」的标记偶尔会和第一格内容被识别成同一块
+    raw = re.sub(r"(上午|下午|晚上|中午|下年|上年)\s*", " ", raw).strip()
+    # 末尾的分隔符（「/」被读成「1」时，尾巴上会多一个孤零零的数字）
+    raw = re.sub(r"[\s,，、;；/·•。.]+$", "", raw)
+    raw = re.sub(r"\s*[.·•]\s*\d{1,2}$", "", raw)
+    raw = re.sub(r"[\s,，、;；/·•。.]+$", "", raw)
+    m = re.match(r"^(.*\d\s*-\s*\d{1,2})\s+\d{1,2}$", raw)
+    if m and _parse_week_ranges(m.group(1)):
+        raw = m.group(1)
+    # 课程名末尾的罗马数字 I 常被读成竖线（综合英语I → 综合英语|）。
+    # 竖线可能落在行尾，也可能夹在课程名和教师之间，两种都改回来。
+    raw = re.sub(r"(?<=[\u4e00-\u9fff])\|(?=\s|$)", "I", raw)
+    if raw.endswith("|"):
+        raw = raw[:-1] + "I"
+    # 房间号被挪了一位：「W经济楼10 81-12」其实是「W经济楼108 1-12」。
+    # 只在「移位后拼出的数字不可能是教学周」时动手，避免误伤。
+    m = _ROOM_SHIFT_RE.search(raw)
+    if (m and re.search(_WEEK_RANGE_SEP, m.group("rest"))
+            and _parse_week_ranges(m.group("rest"))
+            and not _parse_week_ranges(m.group("lead") + m.group("rest"))):
+        raw = (raw[:m.start("loc")] + m.group("loc") + m.group("lead")
+               + " " + m.group("rest"))
+    if not raw or raw in _SECTION_WORDS:
+        return info
+
+    # --- ② 周次：通常写在末尾（2-6,9-18 / 17~18 / 1-16单周） -------------
+    weeks, odd_even, rest = _take_week_suffix(raw)
+    if weeks:
+        info["weeks"], info["odd_even"], raw = weeks, odd_even, rest
+        # 「W文约209 双1 2-18」：单双周标记把周次的首位数字挤到了自己后面
+        m = re.search(r"(单|双)\s*(\d{1,2})$", raw)
+        if m and not info["odd_even"]:
+            a, b = info["weeks"][0]
+            merged = int(f"{m.group(2)}{a}") if a < 10 else a
+            if 1 <= merged <= 30:
+                info["weeks"][0] = (merged, max(b, merged))
+                info["odd_even"] = m.group(1) + "周"
+                raw = raw[:m.start()].strip()
+    # 「W文约209 双 12-18」：单双周写在周次前面，单独摘出来
+    tail = raw.split(" ")[-1] if raw.split(" ") else ""
+    if tail in ("单", "双") and not info["odd_even"]:
+        info["odd_even"] = tail + "周"
+        raw = raw[: raw.rfind(tail)].strip()
+
+    # --- ③ 地点：先摘掉 W 前缀标记（W9阶 / W文约209 / W2机房） ------------
+    m = _LOC_TOKEN_RE.search(raw)
+    if m:
+        loc = m.group(1).strip().rstrip(",，、.")
+        if loc:
+            info["location"] = loc
+            raw = (raw[:m.start()] + " " + raw[m.end():]).strip()
+
+    tokens = [t for t in raw.split(" ") if t.strip()]
+    # 纯标点的碎块（「.」「·」）和「.1」这类分隔符误读，直接丢掉
+    tokens = [t for t in tokens
+              if not re.fullmatch(r"[.,·•。、;；:：_\-]+", t)
+              and not re.fullmatch(r"[.·•]\d{1,2}", t)]
+    # 开头单独成词的「上/下」（上午/下午被折行拆成两块）
+    while len(tokens) > 1 and tokens[0] in _SECTION_WORDS:
+        tokens.pop(0)
+
+    # 「W9」+「阶」、「W文」+「约101」这类被切碎的地点，拼回去
+    if info["location"]:
+        merged_tokens: list[str] = []
+        for tok in tokens:
+            # 折行会把「W科教城体育场」切成「W科教」+「城体育场」，
+            # 后面的碎片只要还带地点特征就并回去。
+            absorb = (tok in _LOC_SUFFIX
+                      or re.fullmatch(r"[约\d]{1,5}", tok)
+                      or (len(tok) <= 8 and _LOC_HINT_RE.search(tok)))
+            if absorb:
+                info["location"] += tok
+                continue
+            merged_tokens.append(tok)
+        tokens = merged_tokens
+    else:
+        # 没有 W 标记：取最后一个带地点特征的词，并把紧邻的前缀一起收进来
+        idx = None
+        for i, tok in enumerate(tokens):
+            if len(tok) >= 2 and _LOC_HINT_RE.search(tok):
+                idx = i
+        if idx is not None and idx > 1:
+            info["location"] = tokens[idx - 1] + tokens[idx]
+            tokens = tokens[:idx - 1] + tokens[idx + 1:]
+        elif idx is not None:
+            info["location"] = tokens[idx]
+            tokens = tokens[:idx] + tokens[idx + 1:]
+
+    # --- ④ 剩下的切分成 课程名 + 教师 --------------------------------
+    title_parts: list[str] = []
+    if len(tokens) == 1:
+        # 只剩一个词：正常情况下它就是课程名，但「…(上)官威」这种
+        # 教师名被粘在末尾的写法很常见，先试着拆出来。
+        # 只在「括号后面跟 2-3 个汉字」时动手：课程名不会在括号后再接两三个字，
+        # 而姓名几乎总是 2-3 个字（「官」这类罕见姓靠姓氏表认不出来，所以不能只靠表）。
+        tok = tokens[0]
+        m = re.match(r"^(.{2,}[)）])\s*([\u4e00-\u9fff]{2,3})$", tok)
+        if m:
+            title_parts = [m.group(1)]
+            info["teacher"] = m.group(2)
+        else:
+            title_parts = tokens[:]
+    else:
+        for i, tok in enumerate(tokens):
+            if i == len(tokens) - 1:
+                info["teacher"] = tok
+            else:
+                title_parts.append(tok)
+
+    # 「(上)官威」：括号是课程名的一部分，被 OCR 粘到了教师前面
+    m = re.match(r"^[（(]([^）)]{1,4})[）)]\s*(.+)$", info["teacher"] or "")
+    if m:
+        title_parts.append(f"({m.group(1)})")
+        info["teacher"] = m.group(2)
+
+    # 英文教师名常被空格切成两段（Okhotnikov Egor / Okhotnik ov Egor）
+    latin = r"[A-Za-z][A-Za-z.\- ]*"
+    while (info["teacher"] and title_parts
+           and re.fullmatch(latin, info["teacher"]) and re.fullmatch(latin, title_parts[-1])):
+        prev = title_parts.pop()
+        # 小写接小写说明单词被折行截断了（Okhotnik|ov），直接拼；
+        # 其余情况按空格拼（Okhotnikov|Egor）
+        joiner = "" if (prev[-1:].islower() and info["teacher"][:1].islower()) else " "
+        info["teacher"] = prev + joiner + info["teacher"]
+
+    # 教师姓被 OCR 甩到课程名末尾（「…(上)卜」+「庆刚」），用姓氏表认回来
+    if title_parts and info["teacher"] and len(info["teacher"]) <= 2:
+        tail = title_parts[-1]
+        if tail and tail[-1] in _CN_SURNAMES and len(info["teacher"]) + 1 <= 4:
+            info["teacher"] = tail[-1] + info["teacher"]
+            title_parts[-1] = tail[:-1]
+        elif (len(info["teacher"]) == 1 and len(tail) >= 2
+              and tail[-2] in _CN_SURNAMES and len(info["teacher"]) + 2 <= 4):
+            # 名字被折行切成「卜庆」+「刚」
+            info["teacher"] = tail[-2:] + info["teacher"]
+            title_parts[-1] = tail[:-2]
+
+    info["title"] = " ".join(p for p in title_parts if p).strip() or raw
+    return info
+
+
+# 默认作息表：第 1 节 08:00 起，每节 45 分钟，课间 5 分钟。
+# 各校略有差异（有的 8:20 上课、有的每节 40 分钟），所以课表导入的日程
+# 一律标记为「待核对」，并在备注里写明「按默认作息推算」。
+COURSE_PERIOD_TIMES: dict[int, tuple[int, int, int, int]] = {
+    1: (8, 0, 8, 45), 2: (8, 50, 9, 35), 3: (9, 55, 10, 40),
+    4: (10, 45, 11, 30), 5: (11, 35, 12, 20),
+    6: (14, 0, 14, 45), 7: (14, 50, 15, 35), 8: (15, 55, 16, 40),
+    9: (16, 45, 17, 30),
+    10: (19, 0, 19, 45), 11: (19, 50, 20, 35), 12: (20, 40, 21, 25),
+}
+
+
+def _period_clock(period: int, which: int) -> tuple[int, int]:
+    """取第 period 节的开始（which=0）或结束（which=1）时刻；超出表格就顺延。"""
+    times = COURSE_PERIOD_TIMES.get(period)
+    if times:
+        return (times[0], times[1]) if which == 0 else (times[2], times[3])
+    base = COURSE_PERIOD_TIMES[max(COURSE_PERIOD_TIMES)]
+    extra = max(0, period - max(COURSE_PERIOD_TIMES))
+    start = datetime(2000, 1, 1, base[2], base[3]) + timedelta(minutes=5 + extra * 50)
+    end = start + timedelta(minutes=45)
+    return (start.hour, start.minute) if which == 0 else (end.hour, end.minute)
+
+
+def _this_monday(today: "date | None" = None) -> "date":
+    """本周一。课表首周日期没设置时的兜底锚点。"""
+    day = today or datetime.now().date()
+    return day - timedelta(days=day.weekday())
+
+
+def _weeks_label(weeks: list[tuple[int, int]]) -> str:
+    """[(2,6),(9,18)] → 「2-6、9-18」。"""
+    return "、".join(f"{a}-{b}" if a != b else str(a) for a, b in weeks)
+
+
+def timetable_to_events(cells: list[dict[str, Any]],
+                        anchor_monday: "date") -> list[Event]:
+    """
+    把课表单元格转成日程。
+
+    anchor_monday 是「学期第 1 周的周一」，由用户在设置里指定；
+    没指定时默认取本周一，日期会偏，因此事件标记为待核对。
+    """
+    events: list[Event] = []
+    for cell in cells:
+        wd: int = cell["weekday"]
+        p0, p1 = cell["periods"]
+        h0, m0 = _period_clock(p0, 0)
+        h1, m1 = _period_clock(p1, 1)
+
+        for info in cell.get("courses") or _split_cell_courses(cell["text"]):
+            title = info["title"].strip()
+            if len(title) < 2 or re.fullmatch(r"[\d\s()（）.．·、/\\-]+", title):
+                continue                     # 表格里的空壳、噪声
+
+            weeks: list[tuple[int, int]] = info["weeks"]
+            first_week = weeks[0][0] if weeks else 1
+            day = anchor_monday + timedelta(days=(first_week - 1) * 7 + wd)
+
+            byday = _WEEKDAY_ICS[wd]
+            total = sum(b - a + 1 for a, b in weeks) if weeks else 16
+            odd_even = info["odd_even"]
+            if odd_even == "单周":
+                rrule = f"FREQ=WEEKLY;INTERVAL=2;BYDAY={byday};COUNT={max(1, (total + 1) // 2)}"
+            elif odd_even == "双周":
+                day += timedelta(days=7)
+                rrule = f"FREQ=WEEKLY;INTERVAL=2;BYDAY={byday};COUNT={max(1, total // 2)}"
+            else:
+                rrule = f"FREQ=WEEKLY;BYDAY={byday};COUNT={max(1, total)}"
+
+            bits = ["课表导入 · 按默认作息表推算时间"]
+            if weeks:
+                bits.append(f"第 {_weeks_label(weeks)} 周")
+            if odd_even:
+                bits.append(odd_even)
+            if info["teacher"]:
+                bits.append(f"教师 {info['teacher']}")
+            bits.append(f"第 {p0} 节" if p0 == p1 else f"第 {p0}-{p1} 节")
+
+            events.append(Event(
+                title=title,
+                start=datetime.combine(day, dt_time(h0, m0)),
+                end=datetime.combine(day, dt_time(h1, m1)),
+                location=info["location"],
+                note=" · ".join(bits),
+                priority="中",
+                rrule=rrule,
+                vague=True,
+                vague_reason="课程时间与首周日期由课表推算，请核对",
+                source="ocr",
+                raw=cell["text"],
+            ))
+    return events
+
+
+def _timetable_lines(cells: list[dict[str, Any]]) -> str:
+    """
+    把课表还原成「人话」文本行，供 OCR 详情展示，也供大模型使用。
+
+    比「星期一\\n高等数学\\n2-6,9-18」这种压平文本信息量大得多：
+    大模型看到「星期一 第1-2节 高等数学(一)(上) 卜庆刚 W9阶 第2-6、9-18周」
+    才有可能给出正确结果。
+    """
+    lines: list[str] = []
+    for cell in cells:
+        p0, p1 = cell["periods"]
+        wd = "一二三四五六日"[cell["weekday"]]
+        for info in cell.get("courses") or _split_cell_courses(cell["text"]):
+            parts = [f"星期{wd}", f"第{p0}-{p1}节" if p0 != p1 else f"第{p0}节",
+                     info["title"]]
+            if info["teacher"]:
+                parts.append(info["teacher"])
+            if info["location"]:
+                parts.append(info["location"])
+            if info["weeks"]:
+                parts.append(f"第{_weeks_label(info['weeks'])}周{info['odd_even']}")
+            lines.append(" ".join(p for p in parts if p))
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -2637,6 +3517,10 @@ def init_state() -> None:
         "recur_count": RECUR_COUNT_DEFAULT,
         "recur_start_date": datetime.now().date(),  # 循环开始日期
         "recur_advanced_open": False,  # 高级：手写 RRULE 展开状态
+        # --- 课表识别 ---
+        # course_anchor 由设置面板的 date_input 自己维护（widget key），
+        # 这里只记录「用户是否手动指定过」，决定导入后是否提示日期为推算值。
+        "course_anchor_set": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -2803,6 +3687,8 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
     st.session_state.last_error = ""
     st.session_state.last_ocr = []
     ocr_texts: list[str] = []
+    tt_cells: list[dict[str, Any]] = []
+    ocr_ok = 0
     warnings: list[str] = []
 
     # --- 1. 文本输入校验 ------------------------------------------------
@@ -2833,17 +3719,29 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
                 "error": res["error"],
                 "warnings": res["warnings"],
                 "confidence": res["confidence"],
+                "layout": res.get("layout"),
             })
             if res["ok"]:
-                ocr_texts.append(res["text"])
                 warnings.extend(res["warnings"])
+                ocr_ok += 1
+                if res.get("cells"):
+                    # 课表走结构化通道，不再把压平文本喂给规则引擎，
+                    # 否则「星期一」「高等数学」会被当成两条独立日程。
+                    tt_cells.extend(res["cells"])
+                    lay = res["layout"]
+                    warnings.append(
+                        f"第 {idx} 张图片识别为课表：{lay['weekdays']} 天 × "
+                        f"{lay['periods']} 节，共 {lay['cells']} 个课程单元格。"
+                    )
+                else:
+                    ocr_texts.append(res["text"])
             else:
                 warnings.append(f"第 {idx} 张图片：{res['error']}")
 
     combined = "\n".join([t for t in [text] + ocr_texts if t.strip()]).strip()
 
     # --- 3. 空输入兜底 --------------------------------------------------
-    if not combined:
+    if not combined and not tt_cells:
         st.session_state.last_error = (
             "没有可解析的内容。请粘贴日程文字，或上传清晰的日程截图（PNG/JPG）。"
             if not image_files else
@@ -2858,14 +3756,29 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
     ai_error = ""
     t0 = time.time()
 
-    try:
-        rule_events = parse_with_rules(combined)
-    except Exception:  # noqa: BLE001
-        log(f"规则解析异常: {traceback.format_exc()}")
-        rule_events = []
+    if combined:
+        try:
+            rule_events = parse_with_rules(combined)
+        except Exception:  # noqa: BLE001
+            log(f"规则解析异常: {traceback.format_exc()}")
+            rule_events = []
+
+    # 课表走确定性通道：行列已知，不需要模型去猜
+    if tt_cells:
+        try:
+            rule_events = rule_events + timetable_to_events(
+                tt_cells, st.session_state.get("course_anchor") or _this_monday())
+        except Exception:  # noqa: BLE001
+            log(f"课表解析异常: {traceback.format_exc()}")
+            warnings.append("课表结构已识别，但转换成日程时出错，已回退为文本解析。")
+            if not rule_events and combined:
+                try:
+                    rule_events = parse_with_rules(combined)
+                except Exception:  # noqa: BLE001
+                    rule_events = []
 
     ai_config = get_ai_config()
-    if use_ai and ai_config["available"]:
+    if use_ai and ai_config["available"] and combined:
         try:
             with st.spinner("AI 正在理解你的日程…"):
                 ai_events = parse_with_ai(combined, ai_config)
@@ -2881,12 +3794,17 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
     if ai_events and rule_events:
         final_events = merge_ai_and_rules(ai_events, rule_events)
         engine_label = "AI + 规则双引擎"
+        if tt_cells:
+            engine_label = "课表结构化 + AI"
     elif ai_events:
         final_events = ai_events
         engine_label = "AI 解析"
     elif rule_events:
         final_events = rule_events
-        engine_label = "本地规则引擎" + ("（AI 失败后降级）" if ai_error else "")
+        if tt_cells:
+            engine_label = "课表结构化识别"
+        else:
+            engine_label = "本地规则引擎" + ("（AI 失败后降级）" if ai_error else "")
     else:
         st.session_state.last_error = (
             "未能从内容中识别出任何日程。请检查文本中是否包含时间信息，"
@@ -2901,7 +3819,8 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
     report["elapsed"] = round(elapsed, 2)
     report["ai_error"] = ai_error
     report["warnings"] = warnings
-    report["ocr_count"] = len(ocr_texts)
+    report["ocr_count"] = ocr_ok
+    report["timetable_cells"] = len(tt_cells)
     report["vague"] = sum(1 for ev in st.session_state.events if ev.vague)
     st.session_state.last_report = report
 
@@ -2933,8 +3852,13 @@ def _cb_font_pick() -> None:
     st.session_state.ui_font = st.session_state.ui_font_pick
 
 
+def _cb_course_anchor() -> None:
+    """用户手动指定了学期首周，之后的课表导入就不再提示「日期为推算值」。"""
+    st.session_state.course_anchor_set = True
+
+
 def render_settings_panel() -> None:
-    """侧边栏设置面板：外观 → AI 解析 → OCR 识别 → 默认提醒。"""
+    """侧边栏设置面板：外观 → AI 解析 → OCR 识别 → 课表识别 → 默认提醒。"""
     # ---------- 外观 ----------
     st.markdown("#### ☀️ 界面与外观")
     st.radio(
@@ -2998,6 +3922,21 @@ def render_settings_panel() -> None:
         with st.expander("如何安装 OCR"):
             st.caption("执行 `pip install -r requirements.txt` 即可启用图片识别"
                        "（Python 3.13+ 需 `pip install rapidocr onnxruntime`）。")
+
+    # ---------- 课表识别 ----------
+    st.markdown("#### 📅 课表识别")
+    st.date_input(
+        "学期第 1 周的周一",
+        value=_this_monday(),
+        key="course_anchor",
+        on_change=_cb_course_anchor,
+        help=_tip("学期第 1 周的周一",
+                  "课表上写的是「第 9 周」「2-6,9-18 周」这种相对周次，"
+                  "要从这个日期往后推算成具体哪天。填对了日期就准；"
+                  "不填则按本周一算，导入的课程会标「待核对」。"),
+    )
+    st.caption("课表截图里的周次按这个日期换算；上课时间按默认作息表推算"
+               "（第 1 节 08:00 起、每节 45 分钟），导入后可在日程表里逐条微调。")
 
     # ---------- 默认提醒 ----------
     st.markdown("#### 🔔 默认提醒")
@@ -3268,10 +4207,21 @@ def _render_parse_report(report: dict[str, Any]) -> None:
         chips.append(_chip(f"待核对 {report['vague']} 条", "warn"))
     if report.get("ocr_count"):
         chips.append(_chip(f"OCR 识别 {report['ocr_count']} 张", "ok"))
+    if report.get("timetable_cells"):
+        chips.append(_chip(f"课表 {report['timetable_cells']} 格", "info"))
     if report.get("all_duplicate"):
         chips.append(_chip("全部为重复日程，未新增", "warn"))
     if chips:
         _html('<div style="margin-bottom:10px;">' + "".join(chips) + "</div>")
+
+    if report.get("timetable_cells") and not st.session_state.get("course_anchor_set"):
+        _html(
+            '<div class="notice notice-info">📅 识别为课表并按行列还原。'
+            '上课时间按默认作息表推算（第 1 节 08:00、每节 45 分钟），'
+            '周次日期按<b>本周为第 1 周</b>换算——'
+            '如果不对，到左侧「⚙️ 设置与外观 → 📅 课表识别」填上'
+            '<b>学期第 1 周的周一</b>，重新解析即可对齐。</div>'
+        )
 
     if report.get("ai_error"):
         _html(
@@ -3290,9 +4240,18 @@ def _render_ocr_detail() -> None:
             status = "成功" if item["ok"] else "失败"
             conf = f"，置信度 {item['confidence']:.0%}" if item.get("confidence") else ""
             st.markdown(f"**{item['name']}** — {status}（引擎：{item['engine']}{conf}）")
+            layout = item.get("layout")
+            if layout:
+                _html(
+                    _chip(f"识别为课表 · {layout['weekdays']} 天 × {layout['periods']} 节", "ok")
+                    + _chip(f"{layout['cells']} 个课程单元格", "info")
+                )
             if item["ok"]:
                 preview = item["text"][:600] + ("…" if len(item["text"]) > 600 else "")
                 st.code(preview, language="text")
+                if layout:
+                    st.caption("以上是**还原表格结构后**的文本（星期 + 节次 + 课程 + 教师 + 地点 + 周次），"
+                               "比逐行堆字更容易核对。")
             else:
                 st.caption(f"失败原因：{item['error']}")
 
