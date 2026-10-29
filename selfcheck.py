@@ -19,7 +19,7 @@ from __future__ import annotations
 import io
 import sys
 import traceback
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import numpy as np
@@ -185,7 +185,8 @@ def test_export() -> None:
     check("ICS 使用 CRLF 换行", "\r\n" in ics)
     over = [l for l in ics.split("\r\n") if len(l.encode("utf-8")) > 75]
     check("ICS 每行不超过 75 字节（RFC 5545）", not over, f"超长行 {len(over)}")
-    check("ICS 循环事件带 UNTIL 终止", "UNTIL=" in ics or "RRULE" not in ics)
+    check("ICS 循环事件带结束条件（COUNT 或 UNTIL）",
+          "UNTIL=" in ics or "COUNT=" in ics or "RRULE" not in ics)
 
     # 时区：UTC+8 → UTC
     ev = app.Event("时区测试", datetime(2026, 11, 5, 9, 0), datetime(2026, 11, 5, 10, 0))
@@ -291,6 +292,88 @@ def test_recurrence() -> None:
     # 次数步进器的夹取
     check("次数下限夹在 1", max(app.RECUR_COUNT_MIN, min(app.RECUR_COUNT_MAX, 0)) == 1)
     check("次数上限夹在 60", max(app.RECUR_COUNT_MIN, min(app.RECUR_COUNT_MAX, 999)) == 60)
+
+    # --- 循环开始日期：日期变了，BYDAY 必须跟着变 ---
+    moved = datetime(2026, 11, 6, 14, 0)          # 挪到周五
+    check("改开始日期后 BYDAY 跟着变成周五",
+          "BYDAY=FR" in app.build_recur_rrule(app.RECUR_FREQ_WEEKLY, moved),
+          app.build_recur_rrule(app.RECUR_FREQ_WEEKLY, moved))
+
+
+def test_calendar_and_sample() -> None:
+    section("E3. 日历（月历 / 当日命中）与江苏大学示例数据")
+
+    # --- 某条日程是否在某天发生 ---
+    monday_ev = app.Event("高数", datetime(2026, 11, 2, 8, 0),
+                          datetime(2026, 11, 2, 9, 40),
+                          rrule="FREQ=WEEKLY;BYDAY=MO;COUNT=3")
+    check("循环日程在周一发生", app._occurs_on(monday_ev, date(2026, 11, 9)))
+    check("循环日程不在周二发生", not app._occurs_on(monday_ev, date(2026, 11, 10)))
+    check("循环开始日之前不发生", not app._occurs_on(monday_ev, date(2026, 10, 26)))
+    check("COUNT 内最后一次仍发生", app._occurs_on(monday_ev, date(2026, 11, 16)))
+    check("超过 COUNT 后不再发生", not app._occurs_on(monday_ev, date(2026, 11, 23)),
+          "第 4 个周一应已结束")
+
+    daily_ev = app.Event("晨跑", datetime(2026, 11, 2, 7, 0),
+                         datetime(2026, 11, 2, 7, 30), rrule="FREQ=DAILY;COUNT=5")
+    check("每天重复在次日发生", app._occurs_on(daily_ev, date(2026, 11, 3)))
+    check("每天重复在第 5 天后停止", not app._occurs_on(daily_ev, date(2026, 11, 7)))
+
+    two_day = app.Event("大物 A(II)", datetime(2026, 11, 3, 16, 0),
+                        datetime(2026, 11, 3, 17, 40),
+                        rrule="FREQ=WEEKLY;BYDAY=TU,TH;COUNT=16")
+    check("周二/周四双日循环都命中",
+          app._occurs_on(two_day, date(2026, 11, 5))
+          and app._occurs_on(two_day, date(2026, 11, 10)))
+    check("双日循环在周三不命中", not app._occurs_on(two_day, date(2026, 11, 4)))
+
+    biweek = app.Event("两周一次", datetime(2026, 11, 2, 19, 0),
+                       datetime(2026, 11, 2, 20, 0),
+                       rrule="FREQ=WEEKLY;INTERVAL=2;BYDAY=MO;COUNT=8")
+    check("每两周重复在下一周不命中", not app._occurs_on(biweek, date(2026, 11, 9)))
+    check("每两周重复在间隔周命中", app._occurs_on(biweek, date(2026, 11, 16)))
+
+    single = app.Event("一次性", datetime(2026, 11, 7, 10, 0),
+                       datetime(2026, 11, 7, 11, 0))
+    check("单次日程只在当天命中",
+          app._occurs_on(single, date(2026, 11, 7))
+          and not app._occurs_on(single, date(2026, 11, 8)))
+
+    # --- 月历矩阵（周一开头）---
+    weeks = app._calendar_matrix(2026, 10)
+    check("月历矩阵每行 7 天", all(len(w) == 7 for w in weeks))
+    check("2026-10-01 是周四 → 首行前 3 格留空",
+          weeks[0][:3] == [None, None, None] and weeks[0][3] == date(2026, 10, 1))
+    check("月历矩阵覆盖整月 31 天",
+          sum(1 for w in weeks for d in w if d) == 31)
+    check("月历矩阵日期连续不重复",
+          sorted(d for w in weeks for d in w if d) ==
+          sorted(date(2026, 10, i) for i in range(1, 32)))
+
+    # --- 示例数据：江苏大学真实场景 ---
+    sample = app.build_sample_text()
+    check("示例含江大教学楼",
+          all(k in sample for k in ("三江楼", "三山楼", "能动楼", "京江")), sample[:40])
+    check("示例含循环课表字眼", "每周" in sample)
+
+    parsed = app.parse_with_rules(sample)
+    check("示例可解析出多条日程", len(parsed) >= 10, f"{len(parsed)} 条")
+    locs = " ".join(e.location for e in parsed)
+    check("「三江楼0802」被识别为地点", "三江楼" in locs, locs)
+    check("「能动楼301」被识别为地点", "能动楼" in locs, locs)
+    check("「京江2号楼2205」被识别为地点", "京江2号楼" in locs, locs)
+    check("「每周二、周四」识别为两天",
+          any("TU" in e.rrule and "TH" in e.rrule for e in parsed),
+          str([e.rrule for e in parsed if e.is_recurring]))
+
+    norm, _ = app.normalize_events(parsed)
+    check("默认不循环：单次日程 rrule 为空",
+          any(not e.is_recurring for e in norm),
+          "示例里应同时存在单次与循环日程")
+    check("循环日程自动补上默认次数",
+          all(app.get_recur_count(e.rrule) == app.RECUR_COUNT_DEFAULT
+              for e in norm if e.is_recurring),
+          str([e.rrule for e in norm if e.is_recurring]))
 
 
 def test_ocr() -> None:
@@ -465,7 +548,8 @@ def main() -> int:
     print("=" * 68)
 
     for fn in (test_text_only, test_time_parsing, test_structure_fields,
-               test_dedup_conflict, test_export, test_recurrence, test_ocr,
+               test_dedup_conflict, test_export, test_recurrence,
+               test_calendar_and_sample, test_ocr,
                test_ai_layer, test_merge, test_security):
         try:
             fn()

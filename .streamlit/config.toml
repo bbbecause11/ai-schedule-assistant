@@ -6,10 +6,10 @@
 
 [theme]
 base = "light"
-primaryColor = "#4F46E5"          # 主色：靛蓝，与页面内 CSS 保持一致
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F8FAFC"
-textColor = "#1F2937"
+primaryColor = "#EE5A92"          # 主色：ins 玫粉，与页面内 CSS 渐变同源
+backgroundColor = "#FFFAFC"
+secondaryBackgroundColor = "#F7F4FF"
+textColor = "#2E2A3B"
 font = "sans serif"
 
 [server]
