@@ -2008,15 +2008,22 @@ def build_sample_text() -> str:
 
 _CSS = """
 <style>
+/* ==========================================================================
+   颜色全部走 CSS 变量，明暗两套值由 _css_tokens() 注入到 :root
+   ========================================================================== */
+
 /* ---------- 全局：奶油底 + ins 三段柔光 ---------- */
 .stApp {
-    background:
-        radial-gradient(920px 540px at 6% -10%, rgba(255,178,196,.55), transparent 62%),
-        radial-gradient(780px 500px at 98% 2%,  rgba(178,162,255,.50), transparent 60%),
-        radial-gradient(760px 540px at 52% 112%, rgba(150,206,255,.42), transparent 62%),
-        linear-gradient(158deg, #FFFAFC 0%, #F8F5FF 46%, #F3F8FF 100%);
+    background: var(--app-bg);
     background-attachment: fixed;
+    color: var(--ink);
 }
+/* Streamlit 原生文字（放在最前，后面自有组件可覆盖） */
+.stApp p, .stApp li, .stApp h1, .stApp h2, .stApp h3,
+.stApp h4, .stApp h5, .stApp h6, .stApp label { color: var(--ink); }
+.stApp [data-testid="stCaptionContainer"] { color: var(--muted); }
+.stApp hr { border-color: var(--line); background: var(--line); }
+
 .block-container { padding-top: 1.2rem; padding-bottom: 1rem; max-width: 1180px; }
 /* 只隐藏主菜单与页脚；保留 header 以免侧边栏折叠按钮失效 */
 #MainMenu { visibility: hidden; }
@@ -2026,7 +2033,7 @@ html, body, [class*="css"] { font-family: -apple-system, "Segoe UI", "PingFang S
     "Microsoft YaHei", sans-serif; }
 
 /* ---------- 毛玻璃基底（按钮 / 卡片共用） ---------- */
-.metric-card, .notice, .disclaimer, .cal-shell, .cal-side, .chip {
+.metric-card, .notice, .disclaimer, .cal-shell, .cal-side, .chip, .settings-card {
     backdrop-filter: blur(22px) saturate(175%);
     -webkit-backdrop-filter: blur(22px) saturate(175%);
 }
@@ -2034,8 +2041,8 @@ html, body, [class*="css"] { font-family: -apple-system, "Segoe UI", "PingFang S
 /* ---------- 顶部 hero：ins 渐变色带 ---------- */
 .hero {
     background: linear-gradient(118deg, #FF9A63 0%, #F0568C 34%, #A45BEC 68%, #6C7BF5 100%);
-    border-radius: 24px; padding: 28px 32px 26px 32px; margin-bottom: 18px;
-    box-shadow: 0 18px 44px rgba(196,86,180,.26); position: relative; overflow: hidden;
+    border-radius: 1.5rem; padding: 1.75rem 2rem 1.6rem 2rem; margin-bottom: 1.1rem;
+    box-shadow: var(--hero-shadow); position: relative; overflow: hidden;
 }
 .hero::after {
     content: ""; position: absolute; right: -70px; top: -80px; width: 240px; height: 240px;
@@ -2046,56 +2053,82 @@ html, body, [class*="css"] { font-family: -apple-system, "Segoe UI", "PingFang S
     background: rgba(255,255,255,.10); border-radius: 50%;
 }
 .hero-badge {
-    display: inline-block; font-size: 11px; letter-spacing: 2.4px; font-weight: 700;
+    display: inline-block; font-size: .6875rem; letter-spacing: 2.4px; font-weight: 700;
     color: #FFF3FA; background: rgba(255,255,255,.20); border: 1px solid rgba(255,255,255,.42);
-    border-radius: 999px; padding: 5px 14px; margin-bottom: 13px;
+    border-radius: 999px; padding: 5px 14px; margin-bottom: .8rem;
     backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
 }
-.hero h1 { color: #FFFFFF; font-size: 31px; font-weight: 800; margin: 0 0 8px 0;
+.hero h1 { color: #FFFFFF !important; font-size: 1.9375rem; font-weight: 800; margin: 0 0 .5rem 0;
     letter-spacing: -.5px; }
-.hero p { color: rgba(255,255,255,.94); font-size: 14px; margin: 0; line-height: 1.6; }
+.hero p { color: rgba(255,255,255,.94) !important; font-size: .875rem; margin: 0; line-height: 1.6; }
 
 /* ---------- 指标卡（毛玻璃） ---------- */
-.metric-row { display: flex; gap: 12px; margin: 6px 0 16px 0; flex-wrap: wrap; }
+.metric-row { display: flex; gap: 12px; margin: 6px 0 1rem 0; flex-wrap: wrap; }
 .metric-card {
-    flex: 1 1 150px; background: rgba(255,255,255,.58);
-    border: 1px solid rgba(255,255,255,.9); border-radius: 18px;
-    padding: 15px 18px; box-shadow: 0 10px 30px rgba(126,87,194,.09);
+    flex: 1 1 150px; background: var(--card-bg);
+    border: 1px solid var(--card-border); border-radius: 1.1rem;
+    padding: .95rem 1.1rem; box-shadow: var(--card-shadow);
 }
-.metric-card .label { font-size: 12px; color: #7A728C; font-weight: 600; margin-bottom: 4px; }
-.metric-card .value { font-size: 25px; font-weight: 800; color: #2E2A3B; line-height: 1.2; }
-.metric-card .value.warn { color: #C2761A; }
-.metric-card .value.danger { color: #D23B5E; }
-.metric-card .value.ok { color: #0E9F7E; }
+.metric-card .label { font-size: .75rem; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
+.metric-card .value { font-size: 1.5625rem; font-weight: 800; color: var(--ink); line-height: 1.2; }
+.metric-card .value.warn { color: var(--warn-strong); }
+.metric-card .value.danger { color: var(--bad-strong); }
+.metric-card .value.ok { color: var(--ok-strong); }
 
 /* ---------- 小标签 ---------- */
 .chip {
-    display: inline-block; font-size: 12px; font-weight: 600; border-radius: 999px;
+    display: inline-block; font-size: .75rem; font-weight: 600; border-radius: 999px;
     padding: 3px 10px; margin-right: 6px; margin-bottom: 4px;
 }
-.chip-ok { background: rgba(224,250,240,.85); color: #0B7A60; border: 1px solid rgba(150,225,203,.9); }
-.chip-warn { background: rgba(255,247,226,.9); color: #A26510; border: 1px solid rgba(245,205,130,.9); }
-.chip-bad { background: rgba(255,235,238,.9); color: #B02A44; border: 1px solid rgba(250,180,190,.9); }
-.chip-info { background: rgba(240,238,255,.9); color: #5B43C0; border: 1px solid rgba(200,192,250,.9); }
+.chip-ok { background: var(--chip-ok-bg); color: var(--chip-ok-fg); border: 1px solid var(--chip-ok-bd); }
+.chip-warn { background: var(--chip-warn-bg); color: var(--chip-warn-fg); border: 1px solid var(--chip-warn-bd); }
+.chip-bad { background: var(--chip-bad-bg); color: var(--chip-bad-fg); border: 1px solid var(--chip-bad-bd); }
+.chip-info { background: var(--chip-info-bg); color: var(--chip-info-fg); border: 1px solid var(--chip-info-bd); }
+
+/* Streamlit 会给输入框套一层浅色底，去掉它，让毛玻璃透出页面渐变 */
+html, body { background: var(--body-bg); }
+[data-testid="stTextAreaRootElement"], [data-testid="stTextInputRootElement"],
+[data-testid="stNumberInputContainer"], [data-testid="stDateInputRootElement"],
+[data-testid="stFileUploaderDropzone"], [data-baseweb="base-input"] {
+    background: transparent !important;
+    border-color: var(--input-border) !important;
+}
 
 /* ---------- 按钮：毛玻璃 ---------- */
+/* Streamlit 的次要按钮自带白底（主题色），必须 !important 才能让变量生效 */
+.stButton > button:not([kind="primary"]),
+.stDownloadButton > button:not([kind="primary"]),
+[data-testid="stBaseButton-secondary"],
+[data-testid="stBaseButton-secondaryFormSubmit"] {
+    background: var(--btn-bg) !important;
+    border: 1px solid var(--btn-border) !important;
+    color: var(--btn-text) !important;
+}
+.stButton > button:not([kind="primary"]):hover,
+.stDownloadButton > button:not([kind="primary"]):hover,
+[data-testid="stBaseButton-secondary"]:hover {
+    background: var(--btn-hover-bg) !important;
+    border-color: var(--btn-hover-border) !important;
+    color: var(--btn-hover-text) !important;
+}
+
 .stButton > button, .stDownloadButton > button {
-    border-radius: 14px; font-weight: 600;
-    border: 1px solid rgba(255,255,255,.92);
-    background: rgba(255,255,255,.50);
+    border-radius: .9rem; font-weight: 600;
+    border: 1px solid var(--btn-border);
+    background: var(--btn-bg);
     backdrop-filter: blur(16px) saturate(180%);
     -webkit-backdrop-filter: blur(16px) saturate(180%);
-    color: #453D57;
-    box-shadow: 0 6px 20px rgba(126,87,194,.10), inset 0 1px 0 rgba(255,255,255,.95);
+    color: var(--btn-text);
+    box-shadow: var(--btn-shadow);
     transition: transform .18s ease, box-shadow .18s ease,
                 background .18s ease, border-color .18s ease;
 }
 .stButton > button:hover, .stDownloadButton > button:hover {
     transform: translateY(-1px);
-    background: rgba(255,255,255,.74);
-    border-color: rgba(233,150,201,.8);
-    color: #7A3E8E;
-    box-shadow: 0 10px 28px rgba(200,90,170,.16), inset 0 1px 0 rgba(255,255,255,1);
+    background: var(--btn-hover-bg);
+    border-color: var(--btn-hover-border);
+    color: var(--btn-hover-text);
+    box-shadow: var(--btn-hover-shadow);
 }
 .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
     background: linear-gradient(118deg, #FF8F6B 0%, #EE5A92 48%, #A05BE8 100%);
@@ -2107,15 +2140,20 @@ html, body, [class*="css"] { font-family: -apple-system, "Segoe UI", "PingFang S
     color: #FFFFFF; transform: translateY(-1px);
     box-shadow: 0 14px 32px rgba(226,88,158,.38), inset 0 1px 0 rgba(255,255,255,.55);
 }
+/* 按钮禁用态：调低不透明度，避免深色模式下看起来仍可点 */
+.stButton > button:disabled { opacity: .45; }
 
 /* ---------- 输入框（毛玻璃） ---------- */
 .stTextArea textarea, .stTextInput input, .stNumberInput input, .stDateInput input {
-    background: rgba(255,255,255,.62) !important;
-    border: 1px solid rgba(255,255,255,.95) !important;
-    border-radius: 16px !important;
+    background: var(--input-bg) !important;
+    border: 1px solid var(--input-border) !important;
+    border-radius: 1rem !important;
     backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-    color: #342E44 !important;
-    box-shadow: 0 4px 16px rgba(126,87,194,.07);
+    color: var(--input-text) !important;
+    box-shadow: var(--input-shadow);
+}
+.stTextArea textarea::placeholder, .stTextInput input::placeholder {
+    color: var(--muted-2) !important;
 }
 .stTextArea textarea:focus, .stTextInput input:focus, .stDateInput input:focus {
     border-color: rgba(226,120,180,.85) !important;
@@ -2123,127 +2161,394 @@ html, body, [class*="css"] { font-family: -apple-system, "Segoe UI", "PingFang S
 }
 
 /* ---------- 下拉 / 单选 / 开关 ---------- */
+/* 外层给底色，内层全部透明，否则 Streamlit 的白底会盖住毛玻璃 */
+[data-baseweb="select"] {
+    background: var(--input-bg) !important;
+    border: 1px solid var(--input-border) !important;
+    border-radius: .9rem !important;
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+}
 [data-baseweb="select"] > div {
-    background: rgba(255,255,255,.62) !important;
-    border-radius: 14px !important;
-    border-color: rgba(255,255,255,.95) !important;
+    background: transparent !important;
+    border: none !important;
+    color: var(--input-text) !important;
+}
+[data-baseweb="select"] div { color: var(--input-text); }
+
+/* ---------- 上传区 ---------- */
+[data-testid="stFileUploaderDropzone"] {
+    background: var(--input-bg) !important;
+    border: 1px dashed var(--input-border) !important;
+    border-radius: 1rem !important;
+}
+[data-testid="stFileUploaderDropzone"] small,
+[data-testid="stFileUploaderDropzoneInstructions"] { color: var(--muted) !important; }
+
+/* ---------- 悬停提示气泡 ----------
+   气泡永远是浅色底（Streamlit 自带主题），文字必须锁死深色，
+   否则深色模式下会被 .stApp p 的浅色文字规则带跑，白底白字。 */
+[data-testid="stTooltipContent"], [data-testid="stTooltipContent"] *,
+[role="tooltip"], [role="tooltip"] * { color: #23202E !important; }
+[data-testid="stTooltipContent"], [role="tooltip"] {
+    box-shadow: 0 12px 30px rgba(0,0,0,.18) !important;
 }
 [data-testid="stExpander"] details {
-    background: rgba(255,255,255,.52);
-    border: 1px solid rgba(255,255,255,.9) !important;
-    border-radius: 18px !important;
+    background: var(--card-bg-3);
+    border: 1px solid var(--card-border) !important;
+    border-radius: 1.1rem !important;
     backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-    box-shadow: 0 8px 26px rgba(126,87,194,.08);
+    box-shadow: var(--card-shadow);
 }
+[data-testid="stExpander"] summary { color: var(--ink-2); }
 
-/* ---------- bordered 容器（日历 / 重复面板） ---------- */
+/* ---------- bordered 容器（日历 / 重复面板 / 设置） ---------- */
 [data-testid="stVerticalBlockBorderWrapper"] {
-    background: rgba(255,255,255,.52);
-    border: 1px solid rgba(255,255,255,.9) !important;
-    border-radius: 20px !important;
+    background: var(--card-bg-3);
+    border: 1px solid var(--card-border) !important;
+    border-radius: 1.25rem !important;
     backdrop-filter: blur(22px) saturate(175%);
     -webkit-backdrop-filter: blur(22px) saturate(175%);
-    box-shadow: 0 12px 34px rgba(126,87,194,.09);
+    box-shadow: var(--card-shadow-lg);
     padding: 4px 2px;
 }
 
 /* ---------- Tab ---------- */
-.stTabs [data-baseweb="tab-list"] { gap: 8px; border-bottom: none; padding-bottom: 6px; }
-.stTabs [data-baseweb="tab"] {
-    height: 42px; border-radius: 999px; padding: 0 20px;
-    font-weight: 600; font-size: 14px; color: #7A728C;
-    background: rgba(255,255,255,.42);
-    border: 1px solid rgba(255,255,255,.85);
+/* 新版 Streamlit 的标签是 div[data-testid="stTab"]，旧的 data-baseweb 选择器已失效，
+   用 min-width:max-content 让胶囊随文字撑开，否则背景会比文字窄、被切一半 */
+.stTabs [data-baseweb="tab-list"], .stTabs [role="tablist"] {
+    gap: 8px; border-bottom: none; padding-bottom: 6px;
+}
+.stTabs [data-testid="stTab"], .stTabs [data-baseweb="tab"] {
+    height: 42px !important; padding: 0 20px !important;
+    min-width: max-content !important;
+    border-radius: 999px !important;
+    font-weight: 600; font-size: .875rem; color: var(--tab-text) !important;
+    background: var(--tab-bg);
+    border: 1px solid var(--tab-border);
     backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    transition: background .2s ease, color .2s ease;
 }
 .stTabs [aria-selected="true"] {
-    color: #FFFFFF;
-    background: linear-gradient(118deg, #FF8F6B 0%, #EE5A92 50%, #A05BE8 100%);
-    border-color: transparent;
+    color: #FFFFFF !important;
+    background: linear-gradient(118deg, #FF8F6B 0%, #EE5A92 50%, #A05BE8 100%) !important;
+    border-color: transparent !important;
     box-shadow: 0 8px 22px rgba(226,88,158,.26);
 }
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"],
+.stTabs [role="tablist"] > div:not([role="tab"]),
+.stTabs [role="tablist"]::after { display: none !important; }
 
 /* ---------- 侧边栏 ---------- */
 [data-testid="stSidebar"] {
-    background: rgba(255,255,255,.46);
-    border-right: 1px solid rgba(255,255,255,.85);
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--sidebar-border);
     backdrop-filter: blur(26px) saturate(170%);
     -webkit-backdrop-filter: blur(26px) saturate(170%);
 }
-[data-testid="stSidebar"] .stMarkdown h3 { font-size: 15px; color: #4E4761; }
+[data-testid="stSidebar"] .stMarkdown h3 { font-size: .9375rem; color: var(--ink-3) !important; }
+[data-testid="stSidebar"] .stMarkdown h4 { font-size: .875rem; color: var(--ink-3) !important; }
 
 /* ---------- 区块标题 ---------- */
 .section-title {
-    font-size: 16px; font-weight: 700; color: #2E2A3B; margin: 16px 0 8px 0;
+    font-size: 1rem; font-weight: 700; color: var(--ink); margin: 1rem 0 .5rem 0;
     padding-left: 11px; border-left: 4px solid transparent; line-height: 1.3;
     border-image: linear-gradient(180deg,#FF9A63,#EE5A92,#A05BE8) 1;
 }
 
 /* ---------- 提示条（毛玻璃） ---------- */
 .notice {
-    border-radius: 16px; padding: 13px 17px; font-size: 13px; line-height: 1.68;
-    margin: 8px 0 14px 0;
-    border: 1px solid rgba(255,255,255,.9);
-    box-shadow: 0 8px 26px rgba(126,87,194,.08);
+    border-radius: 1rem; padding: .8rem 1.05rem; font-size: .8125rem; line-height: 1.68;
+    margin: .5rem 0 .875rem 0;
+    border: 1px solid var(--card-border);
+    box-shadow: var(--card-shadow);
 }
-.notice-info { background: rgba(244,240,255,.72); border-left: 4px solid #A05BE8; color: #4B3A8E; }
-.notice-warn { background: rgba(255,248,232,.78); border-left: 4px solid #F0A83C; color: #8A5B12; }
-.notice-ok   { background: rgba(233,251,244,.78); border-left: 4px solid #35C08F; color: #0A6A50; }
-.notice-bad  { background: rgba(255,238,240,.78); border-left: 4px solid #EE5A6E; color: #98203A; }
+.notice-info { background: var(--notice-info-bg); border-left: 4px solid #A05BE8; color: var(--notice-info-fg); }
+.notice-warn { background: var(--notice-warn-bg); border-left: 4px solid #F0A83C; color: var(--notice-warn-fg); }
+.notice-ok   { background: var(--notice-ok-bg); border-left: 4px solid #35C08F; color: var(--notice-ok-fg); }
+.notice-bad  { background: var(--notice-bad-bg); border-left: 4px solid #EE5A6E; color: var(--notice-bad-fg); }
+
+/* ---------- 设置面板 ---------- */
+.settings-card {
+    background: var(--card-bg); border: 1px solid var(--card-border);
+    border-radius: 1.1rem; padding: .9rem 1rem; margin: .4rem 0 .9rem 0;
+    box-shadow: var(--card-shadow);
+}
+.settings-card .k { font-size: .75rem; color: var(--muted); }
+.settings-hint { font-size: .75rem; color: var(--muted); line-height: 1.7; }
 
 /* ---------- 日历 ---------- */
 .cal-shell {
-    background: rgba(255,255,255,.56);
-    border: 1px solid rgba(255,255,255,.92);
-    border-radius: 22px; padding: 14px 16px 10px 16px;
-    box-shadow: 0 12px 34px rgba(126,87,194,.10);
+    background: var(--card-bg-3);
+    border: 1px solid var(--card-border-2);
+    border-radius: 1.375rem; padding: .875rem 1rem .625rem 1rem;
+    box-shadow: var(--card-shadow-lg);
 }
 .cal-title {
-    text-align: center; font-size: 16px; font-weight: 800; color: #2E2A3B;
+    text-align: center; font-size: 1rem; font-weight: 800; color: var(--ink);
     letter-spacing: .2px; line-height: 2.2;
 }
-.cal-title span { font-size: 11px; font-weight: 600; color: #9A93AB; margin-left: 6px; }
-.cal-wd { text-align: center; font-size: 11px; font-weight: 700; color: #9A93AB;
+.cal-title span { font-size: .6875rem; font-weight: 600; color: var(--muted-2); margin-left: 6px; }
+.cal-wd { text-align: center; font-size: .6875rem; font-weight: 700; color: var(--muted-2);
     letter-spacing: .5px; padding: 2px 0 4px 0; }
 .cal-side {
-    background: rgba(255,255,255,.56);
-    border: 1px solid rgba(255,255,255,.92);
-    border-radius: 22px; padding: 16px 18px;
-    box-shadow: 0 12px 34px rgba(126,87,194,.10);
+    background: var(--card-bg-3);
+    border: 1px solid var(--card-border-2);
+    border-radius: 1.375rem; padding: 1rem 1.1rem;
+    box-shadow: var(--card-shadow-lg);
     min-height: 100%;
 }
-.cal-side h4 { margin: 0 0 10px 0; font-size: 15px; font-weight: 800; color: #2E2A3B; }
+.cal-side h4 { margin: 0 0 .625rem 0; font-size: .9375rem; font-weight: 800; color: var(--ink); }
 .cal-ev {
     display: flex; gap: 10px; align-items: flex-start;
-    padding: 9px 11px; margin-bottom: 8px; border-radius: 14px;
-    background: rgba(255,255,255,.62);
-    border: 1px solid rgba(255,255,255,.95);
-    box-shadow: 0 4px 14px rgba(126,87,194,.07);
+    padding: .55rem .7rem; margin-bottom: .5rem; border-radius: .875rem;
+    background: var(--cal-ev-bg);
+    border: 1px solid var(--cal-ev-border);
+    box-shadow: var(--card-shadow);
 }
-.cal-ev .t { font-size: 11px; font-weight: 800; color: #A05BE8; min-width: 42px; }
-.cal-ev .m { font-size: 13px; color: #342E44; font-weight: 600; line-height: 1.45; }
-.cal-ev .s { font-size: 11px; color: #8B8398; margin-top: 2px; }
-.cal-ev.bad { background: rgba(255,238,240,.8); border-color: rgba(250,190,200,.95); }
-.cal-ev.bad .t { color: #D23B5E; }
-.cal-ev.vague { background: rgba(255,249,232,.8); border-color: rgba(248,220,160,.95); }
-.cal-ev.vague .t { color: #B8791A; }
-.cal-empty { font-size: 12px; color: #A8A1B8; padding: 12px 2px; }
+.cal-ev .t { font-size: .6875rem; font-weight: 800; color: #A05BE8; min-width: 42px; }
+.cal-ev .m { font-size: .8125rem; color: var(--ink); font-weight: 600; line-height: 1.45; }
+.cal-ev .s { font-size: .6875rem; color: var(--muted); margin-top: 2px; }
+.cal-ev.bad { background: var(--cal-bad-bg); border-color: var(--cal-bad-bd); }
+.cal-ev.bad .t { color: var(--bad-strong); }
+.cal-ev.vague { background: var(--cal-vague-bg); border-color: var(--cal-vague-bd); }
+.cal-ev.vague .t { color: var(--warn-strong); }
+.cal-empty { font-size: .75rem; color: var(--muted-3); padding: .75rem 2px; }
 
 /* ---------- 页脚免责声明 ---------- */
 .disclaimer {
-    margin-top: 26px; padding: 18px 20px; border-radius: 18px;
-    background: rgba(255,255,255,.52); border: 1px dashed rgba(180,168,210,.6);
-    color: #7A728C; font-size: 12px; line-height: 1.8;
+    margin-top: 1.6rem; padding: 1.1rem 1.25rem; border-radius: 1.1rem;
+    background: var(--disc-bg); border: 1px dashed var(--disc-border);
+    color: var(--disc-text); font-size: .75rem; line-height: 1.8;
     backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
 }
-.disclaimer strong { color: #453D57; }
-.disclaimer .title { font-size: 13px; font-weight: 700; color: #453D57; margin-bottom: 6px; }
+.disclaimer strong { color: var(--ink-2); }
+.disclaimer .title { font-size: .8125rem; font-weight: 700; color: var(--ink-2); margin-bottom: 6px; }
 </style>
 """
 
 
+# ---------------------------------------------------------------------------
+# 主题令牌：明 / 暗两套 CSS 变量
+# ---------------------------------------------------------------------------
+
+THEME_LIGHT = "浅色"
+THEME_DARK = "深色"
+THEME_OPTIONS = [THEME_LIGHT, THEME_DARK]
+
+FONT_SMALL = "小"
+FONT_NORMAL = "标准"
+FONT_LARGE = "大"
+FONT_HUGE = "特大"
+FONT_OPTIONS = [FONT_SMALL, FONT_NORMAL, FONT_LARGE, FONT_HUGE]
+FONT_SCALES = {FONT_SMALL: 0.92, FONT_NORMAL: 1.0, FONT_LARGE: 1.08, FONT_HUGE: 1.16}
+
+_TOKENS_LIGHT = {
+    "app-bg": (
+        "radial-gradient(920px 540px at 6% -10%, rgba(255,178,196,.55), transparent 62%),"
+        "radial-gradient(780px 500px at 98% 2%, rgba(178,162,255,.50), transparent 60%),"
+        "radial-gradient(760px 540px at 52% 112%, rgba(150,206,255,.42), transparent 62%),"
+        "linear-gradient(158deg, #FFFAFC 0%, #F8F5FF 46%, #F3F8FF 100%)"
+    ),
+    "ink": "#2E2A3B",
+    "ink-2": "#453D57",
+    "ink-3": "#4E4761",
+    "muted": "#7A728C",
+    "muted-2": "#9A93AB",
+    "muted-3": "#A8A1B8",
+    "line": "rgba(126,87,194,.14)",
+    "card-bg": "rgba(255,255,255,.58)",
+    "card-bg-3": "rgba(255,255,255,.52)",
+    "card-border": "rgba(255,255,255,.9)",
+    "card-border-2": "rgba(255,255,255,.92)",
+    "card-shadow": "0 10px 30px rgba(126,87,194,.09)",
+    "card-shadow-lg": "0 12px 34px rgba(126,87,194,.10)",
+    "hero-shadow": "0 18px 44px rgba(196,86,180,.26)",
+    "input-bg": "rgba(255,255,255,.62)",
+    "input-border": "rgba(255,255,255,.95)",
+    "input-text": "#342E44",
+    "input-shadow": "0 4px 16px rgba(126,87,194,.07)",
+    "btn-bg": "rgba(255,255,255,.50)",
+    "btn-border": "rgba(255,255,255,.92)",
+    "btn-text": "#453D57",
+    "btn-hover-bg": "rgba(255,255,255,.74)",
+    "btn-hover-border": "rgba(233,150,201,.8)",
+    "btn-hover-text": "#7A3E8E",
+    "btn-shadow": "0 6px 20px rgba(126,87,194,.10), inset 0 1px 0 rgba(255,255,255,.95)",
+    "btn-hover-shadow": "0 10px 28px rgba(200,90,170,.16), inset 0 1px 0 rgba(255,255,255,1)",
+    "tab-bg": "rgba(255,255,255,.42)",
+    "tab-border": "rgba(255,255,255,.85)",
+    "tab-text": "#7A728C",
+    "sidebar-bg": "rgba(255,255,255,.46)",
+    "sidebar-border": "rgba(255,255,255,.85)",
+    "chip-ok-bg": "rgba(224,250,240,.85)",
+    "chip-ok-fg": "#0B7A60",
+    "chip-ok-bd": "rgba(150,225,203,.9)",
+    "chip-warn-bg": "rgba(255,247,226,.9)",
+    "chip-warn-fg": "#A26510",
+    "chip-warn-bd": "rgba(245,205,130,.9)",
+    "chip-bad-bg": "rgba(255,235,238,.9)",
+    "chip-bad-fg": "#B02A44",
+    "chip-bad-bd": "rgba(250,180,190,.9)",
+    "chip-info-bg": "rgba(240,238,255,.9)",
+    "chip-info-fg": "#5B43C0",
+    "chip-info-bd": "rgba(200,192,250,.9)",
+    "notice-info-bg": "rgba(244,240,255,.72)",
+    "notice-info-fg": "#4B3A8E",
+    "notice-warn-bg": "rgba(255,248,232,.78)",
+    "notice-warn-fg": "#8A5B12",
+    "notice-ok-bg": "rgba(233,251,244,.78)",
+    "notice-ok-fg": "#0A6A50",
+    "notice-bad-bg": "rgba(255,238,240,.78)",
+    "notice-bad-fg": "#98203A",
+    "cal-ev-bg": "rgba(255,255,255,.62)",
+    "cal-ev-border": "rgba(255,255,255,.95)",
+    "cal-bad-bg": "rgba(255,238,240,.8)",
+    "cal-bad-bd": "rgba(250,190,200,.95)",
+    "cal-vague-bg": "rgba(255,249,232,.8)",
+    "cal-vague-bd": "rgba(248,220,160,.95)",
+    "warn-strong": "#C2761A",
+    "bad-strong": "#D23B5E",
+    "ok-strong": "#0E9F7E",
+    "disc-bg": "rgba(255,255,255,.52)",
+    "disc-border": "rgba(180,168,210,.6)",
+    "disc-text": "#7A728C",
+    "logo": "#8E3D6B",
+    "stepper-bg": "rgba(255,242,248,.92)",
+    "stepper-bd": "rgba(250,205,228,.95)",
+    "stepper-fg": "#D8377A",
+    "body-bg": "#FFFAFC",
+}
+
+_TOKENS_DARK = {
+    "app-bg": (
+        "radial-gradient(900px 520px at 6% -10%, rgba(126,60,120,.45), transparent 62%),"
+        "radial-gradient(760px 480px at 98% 0%, rgba(86,72,200,.42), transparent 60%),"
+        "radial-gradient(720px 520px at 52% 112%, rgba(30,96,150,.34), transparent 62%),"
+        "linear-gradient(158deg, #14111C 0%, #171327 46%, #10141D 100%)"
+    ),
+    "ink": "#F1EDF9",
+    "ink-2": "#DCD5EC",
+    "ink-3": "#CAC2DC",
+    "muted": "#A79FB8",
+    "muted-2": "#8F87A2",
+    "muted-3": "#7C7490",
+    "line": "rgba(255,255,255,.12)",
+    "card-bg": "rgba(255,255,255,.055)",
+    "card-bg-3": "rgba(255,255,255,.045)",
+    "card-border": "rgba(255,255,255,.11)",
+    "card-border-2": "rgba(255,255,255,.12)",
+    "card-shadow": "0 10px 30px rgba(0,0,0,.34)",
+    "card-shadow-lg": "0 12px 34px rgba(0,0,0,.38)",
+    "hero-shadow": "0 18px 44px rgba(0,0,0,.42)",
+    "input-bg": "rgba(255,255,255,.07)",
+    "input-border": "rgba(255,255,255,.13)",
+    "input-text": "#F2EFFA",
+    "input-shadow": "0 4px 16px rgba(0,0,0,.22)",
+    "btn-bg": "rgba(255,255,255,.07)",
+    "btn-border": "rgba(255,255,255,.13)",
+    "btn-text": "#EDE9F7",
+    "btn-hover-bg": "rgba(255,255,255,.13)",
+    "btn-hover-border": "rgba(238,90,146,.65)",
+    "btn-hover-text": "#FFD6E7",
+    "btn-shadow": "0 6px 20px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.07)",
+    "btn-hover-shadow": "0 10px 28px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.12)",
+    "tab-bg": "rgba(255,255,255,.06)",
+    "tab-border": "rgba(255,255,255,.10)",
+    "tab-text": "#B9B2CB",
+    "sidebar-bg": "rgba(16,13,24,.62)",
+    "sidebar-border": "rgba(255,255,255,.08)",
+    "chip-ok-bg": "rgba(53,192,143,.16)",
+    "chip-ok-fg": "#7FE7C2",
+    "chip-ok-bd": "rgba(53,192,143,.35)",
+    "chip-warn-bg": "rgba(240,168,60,.16)",
+    "chip-warn-fg": "#F5C97E",
+    "chip-warn-bd": "rgba(240,168,60,.36)",
+    "chip-bad-bg": "rgba(238,90,110,.16)",
+    "chip-bad-fg": "#FF9DAE",
+    "chip-bad-bd": "rgba(238,90,110,.36)",
+    "chip-info-bg": "rgba(160,91,232,.18)",
+    "chip-info-fg": "#CBA8FF",
+    "chip-info-bd": "rgba(160,91,232,.42)",
+    "notice-info-bg": "rgba(120,86,214,.14)",
+    "notice-info-fg": "#D3C2FF",
+    "notice-warn-bg": "rgba(240,168,60,.12)",
+    "notice-warn-fg": "#F3CE8C",
+    "notice-ok-bg": "rgba(53,192,143,.12)",
+    "notice-ok-fg": "#8FE8C7",
+    "notice-bad-bg": "rgba(238,90,110,.13)",
+    "notice-bad-fg": "#FFA8B7",
+    "cal-ev-bg": "rgba(255,255,255,.05)",
+    "cal-ev-border": "rgba(255,255,255,.10)",
+    "cal-bad-bg": "rgba(238,90,110,.13)",
+    "cal-bad-bd": "rgba(238,90,110,.30)",
+    "cal-vague-bg": "rgba(240,168,60,.12)",
+    "cal-vague-bd": "rgba(240,168,60,.28)",
+    "warn-strong": "#F0B45C",
+    "bad-strong": "#FF7E96",
+    "ok-strong": "#4FD3A5",
+    "disc-bg": "rgba(255,255,255,.035)",
+    "disc-border": "rgba(255,255,255,.12)",
+    "disc-text": "#A79FB8",
+    "logo": "#FFB3D9",
+    "stepper-bg": "rgba(238,90,146,.16)",
+    "stepper-bd": "rgba(238,90,146,.38)",
+    "stepper-fg": "#FF8FB4",
+    "body-bg": "#12101A",
+}
+
+
+_CSS_DARK_EXTRA = """
+<style>
+/* ---------- 深色模式补丁 ---------- */
+/* 代码块与行内代码：避免露出浅色底 */
+.stApp pre, .stApp [data-testid="stCode"] pre {
+    background: rgba(255,255,255,.06) !important;
+    border: 1px solid rgba(255,255,255,.10) !important;
+    border-radius: .75rem !important;
+}
+.stApp code { color: #E7E1F6 !important; }
+.stApp pre code { color: #D8D1EC !important; }
+/* 日期选择器 / 下拉弹层在 body 之外，保持浅色更易读，这里只加阴影避免"糊"在深底上 */
+[data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"] {
+    box-shadow: 0 18px 42px rgba(0,0,0,.45) !important;
+}
+/* 可编辑表格是 canvas，CSS 改不了它的绘制色；做成浅色"纸片卡"，和深色页面反而更清楚 */
+.stApp [data-testid="stDataFrame"], .stApp [data-testid="stDataEditor"] {
+    border-radius: 16px !important; overflow: hidden;
+    box-shadow: 0 12px 34px rgba(0,0,0,.45);
+}
+</style>
+"""
+
+
+def _is_dark() -> bool:
+    """当前是否深色模式。"""
+    return st.session_state.get("ui_theme", THEME_LIGHT) == THEME_DARK
+
+
+def _css_tokens() -> str:
+    """
+    把当前主题的调色板写成 CSS 变量，并顺带缩放根字号。
+
+    字号的做法：`html { font-size }` 直接改变 rem 基准，Streamlit 自带的组件
+    （按钮、标签、说明文字都是 rem）会等比放大；自有样式也统一用 rem 书写，
+    因此一处改动就能让整个界面在「小 / 标准 / 大 / 特大」之间平滑切换。
+    """
+    tokens = _TOKENS_DARK if _is_dark() else _TOKENS_LIGHT
+    scale = FONT_SCALES.get(st.session_state.get("ui_font", FONT_NORMAL), 1.0)
+    body = "".join(f"--{k}:{v};" for k, v in tokens.items())
+    return (
+        "<style>:root{" + body
+        + f"--fs:{scale};font-size:calc(16px * {scale});"
+        + "}</style>"
+    )
+
+
 def _inject_css() -> None:
+    st.markdown(_css_tokens(), unsafe_allow_html=True)
     st.markdown(_CSS, unsafe_allow_html=True)
+    if _is_dark():
+        st.markdown(_CSS_DARK_EXTRA, unsafe_allow_html=True)
 
 
 def _html(html: str) -> None:
@@ -2258,6 +2563,16 @@ def _html(html: str) -> None:
 
 def _chip(text: str, kind: str = "info") -> str:
     return f'<span class="chip chip-{kind}">{text}</span>'
+
+
+def _tip(name: str, desc: str) -> str:
+    """
+    按钮 / 控件的悬停说明文案。
+
+    约定：第一行先点明「这是哪个按钮」，空一行再写它做什么，
+    这样鼠标停一会儿弹出的提示能第一眼对上控件。
+    """
+    return f"**{name}**\n\n{desc}"
 
 
 # ---------------------------------------------------------------------------
@@ -2276,6 +2591,10 @@ def init_state() -> None:
         "confirm_clear": False,       # 「清空全部日程」的二次确认状态
         "clear_origin": "",           # 确认条归属：ingest / table / sidebar
         "uploader_nonce": 0,          # 换 key 用：清空时把已选图片一并丢弃
+        # --- 外观偏好（全部只存内存，不落盘） ---
+        "ui_theme": THEME_LIGHT,      # 浅色 / 深色
+        "ui_font": FONT_NORMAL,       # 小 / 标准 / 大 / 特大
+        "settings_open": False,       # 侧边栏设置面板是否展开
         "use_ai": True,               # 是否优先调用大模型
         "default_remind": 15,         # 全局提醒（分钟）
         "calendar_name": "我的 AI 日程",
@@ -2355,7 +2674,8 @@ def render_clear_all_button(origin: str, label: str = "🗑️ 清空全部日�
         width="stretch",
         on_click=_cb_request_clear,
         args=(origin,),
-        help="把已录入的日程、解析报告、输入框内容和已选图片全部清空，回到空白状态。",
+        help=_tip(label, "清空已录入的全部日程、解析报告、输入框内容和已选图片，"
+                         "回到刚打开页面的空白状态。点一次只会亮出确认条，确定后才会真删。"),
     )
 
 
@@ -2366,17 +2686,20 @@ def render_clear_all_confirm(origin: str) -> None:
         return
     count = len(st.session_state.events)
     _html(
-        f'<div class="notice notice-warn" style="margin:8px 0 10px 0;font-size:12.5px;">'
+        f'<div class="notice notice-warn" style="margin:8px 0 10px 0;font-size:.78rem;">'
         f'⚠️ 将清空 <b>{count}</b> 条日程，并清空输入框与已选图片。'
         f'此操作不可撤销。</div>'
     )
     c_yes, c_no = st.columns(2)
     with c_yes:
         st.button("确定清空", key=f"clear_yes_{origin}", type="primary",
-                  width="stretch", on_click=_reset_all)
+                  width="stretch", on_click=_reset_all,
+                  help=_tip("确定清空", "确认执行清空：日程、报告、输入框与图片一次性归零，"
+                                        "无法撤销。"))
     with c_no:
         st.button("取消", key=f"clear_no_{origin}", width="stretch",
-                  on_click=_cb_cancel_clear)
+                  on_click=_cb_cancel_clear,
+                  help=_tip("取消", "放弃这次清空，所有数据保持原样。"))
 
 
 def render_clear_all_control(origin: str, label: str = "🗑️ 清空全部日程") -> None:
@@ -2565,72 +2888,164 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
 # 13. 侧边栏
 # ---------------------------------------------------------------------------
 
+def _cb_toggle_settings() -> None:
+    """展开 / 收起侧边栏设置面板。"""
+    st.session_state.settings_open = not st.session_state.settings_open
+
+
+def _cb_theme_pick() -> None:
+    """
+    主题变化时立刻写回 ui_theme。
+
+    必须走 on_change 回调：CSS 在脚本最开头注入，若等到控件实例化时才改 state，
+    这次 rerun 用的还是旧主题，用户会觉得「点了没反应，要再点一下」。
+    """
+    st.session_state.ui_theme = st.session_state.ui_theme_pick
+
+
+def _cb_font_pick() -> None:
+    """字号同理，回调里同步，本次 rerun 即生效。"""
+    st.session_state.ui_font = st.session_state.ui_font_pick
+
+
+def render_settings_panel() -> None:
+    """侧边栏设置面板：外观 → AI 解析 → OCR 识别 → 默认提醒。"""
+    # ---------- 外观 ----------
+    st.markdown("#### ☀️ 界面与外观")
+    st.radio(
+        "明暗模式",
+        THEME_OPTIONS,
+        index=THEME_OPTIONS.index(st.session_state.ui_theme),
+        key="ui_theme_pick",
+        horizontal=True,
+        format_func=lambda x: f"☀️ {x}" if x == THEME_LIGHT else f"🌙 {x}",
+        on_change=_cb_theme_pick,
+        help=_tip("明暗模式", "在浅色（奶油柔光底）与深色（暗夜紫）之间切换，立即生效。"
+                              "只影响本机显示，不影响导出内容。"),
+    )
+    st.select_slider(
+        "界面字号",
+        options=FONT_OPTIONS,
+        value=st.session_state.ui_font,
+        key="ui_font_pick",
+        on_change=_cb_font_pick,
+        help=_tip("界面字号", "整体放大或缩小页面文字：小 / 标准 / 大 / 特大。"
+                              "按钮、表格、日历会一起缩放，导出文件不受影响。"),
+    )
+
+    # ---------- AI ----------
+    st.markdown("#### 🤖 AI 解析")
+    ai_config = get_ai_config()
+    if ai_config["available"]:
+        _html(
+            _chip("已连接", "ok")
+            + f'<span style="font-size:.75rem;color:var(--muted-2);">'
+              f'{_escape(ai_config["model"])}</span>'
+        )
+        st.checkbox(
+            "优先使用 AI 解析", key="use_ai",
+            help=_tip("优先使用 AI 解析",
+                      "勾选时先让大模型理解这段文字，再用本地规则补充漏项；"
+                      "取消勾选则完全离线，只用本地规则引擎。"),
+        )
+        st.caption("**作用**：把口语化的整段话（微信群聊、语音转写）交给大模型，"
+                   "理解出「标题 / 时间 / 地点」，比纯规则更懂上下文。")
+    else:
+        _html(_chip("未配置 API Key", "warn"))
+        st.caption("**作用**：把口语化的整段话交给大模型，理解出标题、时间、地点。"
+                   "现在没检测到密钥，会自动用**本地规则引擎**——格式规整的课表、"
+                   "备忘录一样能解析，而且完全离线、不联网。")
+        with st.expander("如何配置 API Key"):
+            st.markdown(_read_config_hint())
+
+    # ---------- OCR ----------
+    st.markdown("#### 👁️ OCR 识别")
+    engine_name, _ = get_ocr_engine()
+    if engine_name == "rapidocr":
+        _html(_chip("本地 OCR 已就绪", "ok"))
+    elif engine_name == "pytesseract":
+        _html(_chip("Tesseract 已就绪", "ok"))
+    else:
+        _html(_chip("OCR 未安装", "warn"))
+    st.caption("**作用**：把课表、车票、聊天截图里的字读出来，再交给解析引擎。"
+               "识别全程在本机内存完成，图片不上传、不落盘。")
+    if not engine_name:
+        with st.expander("如何安装 OCR"):
+            st.caption("执行 `pip install -r requirements.txt` 即可启用图片识别"
+                       "（Python 3.13+ 需 `pip install rapidocr onnxruntime`）。")
+
+    # ---------- 默认提醒 ----------
+    st.markdown("#### 🔔 默认提醒")
+    remind_labels = list(REMIND_OPTIONS.keys())
+    current_label = _remind_label(st.session_state.default_remind)
+    idx = remind_labels.index(current_label) if current_label in remind_labels else 1
+    chosen = st.selectbox(
+        "默认提醒", remind_labels, index=idx,
+        help=_tip("默认提醒", "新日程默认提前多久提醒，导出 .ics 时写入 VALARM；"
+                              "单条日程可以在表格的「提醒」列里单独改。"),
+    )
+    st.session_state.default_remind = REMIND_OPTIONS[chosen]
+
+    st.caption("🔁 循环日程的**开始日期与重复次数**在「日程表 → 重复设置」里逐条调整，"
+               "默认不循环，只有出现「每周一」「每天」这类字眼才会自动循环。")
+
+    st.markdown("")
+    st.button(
+        "收起设置", key="settings_close", width="stretch",
+        on_click=_cb_toggle_settings,
+        help=_tip("收起设置", "把设置面板收起来，回到只看数据和日程的清爽状态。"
+                              "偏好会保留，下次点开还在。"),
+    )
+
+
 def render_sidebar() -> None:
     with st.sidebar:
         _html(
             '<div style="padding:2px 0 10px 0;">'
-            '<div style="font-size:19px;font-weight:800;color:#8E3D6B;letter-spacing:-.3px;">'
+            '<div style="font-size:1.1875rem;font-weight:800;color:var(--logo);'
+            'letter-spacing:-.3px;">'
             '🗂️ 日程收纳台</div>'
-            '<div style="font-size:12px;color:#9CA3AF;margin-top:2px;">'
+            '<div style="font-size:.75rem;color:var(--muted-2);margin-top:2px;">'
             f'v{APP_VERSION} · 内存计算 · 不存数据</div></div>'
         )
 
-        # --- AI 状态 ---
-        st.markdown("### 🤖 AI 解析")
-        ai_config = get_ai_config()
-        if ai_config["available"]:
-            _html(
-                _chip("已连接", "ok")
-                + f'<span style="font-size:12px;color:#9A93AB;">'
-                  f'{_escape(ai_config["model"])}</span>'
-            )
-            st.checkbox("优先使用 AI 解析", key="use_ai",
-                        help="关闭后仅使用本地规则引擎，完全离线。")
+        # --- 设置入口（AI / OCR / 外观都收在这里面） ---
+        is_open = bool(st.session_state.settings_open)
+        st.button(
+            "✕ 收起设置" if is_open else "⚙️ 设置与外观",
+            key="settings_toggle",
+            width="stretch",
+            on_click=_cb_toggle_settings,
+            help=_tip(
+                "收起设置" if is_open else "设置与外观",
+                "收起设置面板，回到只看数据的视图。" if is_open else
+                "在这里调整：明暗模式、界面字号、AI 解析开关、OCR 识别状态、默认提醒时间。",
+            ),
+        )
+        if is_open:
+            with st.container(border=True):
+                render_settings_panel()
         else:
-            _html(_chip("未配置 API Key", "warn"))
-            st.caption("未检测到大模型密钥，将使用**本地规则引擎**解析（离线可用）。")
-            with st.expander("如何配置"):
-                st.markdown(_read_config_hint())
-
-        # --- OCR 状态 ---
-        st.markdown("### 🔍 OCR 识别")
-        engine_name, _ = get_ocr_engine()
-        if engine_name == "rapidocr":
-            _html(_chip("本地 OCR 已就绪", "ok"))
-            st.caption("图片在本机内存中识别，不会上传到任何服务器。")
-        elif engine_name == "pytesseract":
-            _html(_chip("Tesseract 已就绪", "ok"))
-        else:
-            _html(_chip("OCR 未安装", "warn"))
-            st.caption("执行 `pip install -r requirements.txt` 即可启用图片识别"
-                       "（Python 3.13+ 需 `pip install rapidocr onnxruntime`）。")
+            # 收起时保留一行极简状态，不占地方又不至于完全看不到能力状态
+            st.caption(f"{'🌙' if _is_dark() else '☀️'} {st.session_state.ui_theme}"
+                       f" · 字号 {st.session_state.ui_font}")
+            ai_ok = get_ai_config()["available"]
+            ocr_name, _ = get_ocr_engine()
+            st.caption(f"{'AI 已连接' if ai_ok else 'AI 未配置'}"
+                       f" · {'OCR 就绪' if ocr_name else 'OCR 未安装'}")
 
         st.markdown("---")
 
-        # --- 全局设置 ---
-        st.markdown("### ⚙️ 全局设置")
-        remind_labels = list(REMIND_OPTIONS.keys())
-        current_label = _remind_label(st.session_state.default_remind)
-        idx = remind_labels.index(current_label) if current_label in remind_labels else 1
-        chosen = st.selectbox("默认提醒", remind_labels, index=idx,
-                              help="导出日历时写入 VALARM；单条日程可在表格中单独覆盖。")
-        st.session_state.default_remind = REMIND_OPTIONS[chosen]
-
-        st.caption("🔁 循环日程的**开始日期与重复次数**统一在「日程表 → 重复设置」"
-                   "里逐条调整。默认**不循环**；只有当输入里出现「每周一」「每天」"
-                   "这类字眼时，才会自动识别为循环日程。")
-
-        st.markdown("---")
         # --- 数据 ---
         st.markdown("### 📊 当前数据")
         total = len(st.session_state.events)
         conflict = sum(1 for ev in st.session_state.events if ev.conflict)
         vague = sum(1 for ev in st.session_state.events if ev.vague)
         st.markdown(
-            f'<div style="font-size:13px;line-height:2;color:#4B5563;">'
+            f'<div style="font-size:.8125rem;line-height:2;color:var(--ink-2);">'
             f'日程总数：<b>{total}</b><br>'
-            f'时间冲突：<b style="color:#DC2626;">{conflict}</b><br>'
-            f'待人工核对：<b style="color:#D97706;">{vague}</b>'
+            f'时间冲突：<b style="color:var(--bad-strong);">{conflict}</b><br>'
+            f'待人工核对：<b style="color:var(--warn-strong);">{vague}</b>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -2702,7 +3117,9 @@ def render_ingest_tab() -> None:
             # key 里带 nonce：清空时 n+1，等于换一个全新的上传控件，
             # 已选的旧图片会一起消失，不会被下一次解析重复 OCR
             key=f"upload_{st.session_state.uploader_nonce}",
-            help="单张不超过 10MB，最多 3 张。图片仅在本机内存中做 OCR。",
+            help=_tip("② 上传日程截图",
+                      "支持 PNG / JPG / WEBP / BMP，单张不超过 10MB，最多 3 张。\n"
+                      "图片只在本机内存里做 OCR，识别完即丢弃，不会上传。"),
         )
         if images:
             st.caption(f"已选择 {len(images)} 张图片（最多识别前 3 张）")
@@ -2717,7 +3134,7 @@ def render_ingest_tab() -> None:
     existing = len(st.session_state.events)
     if existing:
         _html(
-            f'<div class="notice notice-info" style="margin:14px 0 6px 0;font-size:12.5px;">'
+            f'<div class="notice notice-info" style="margin:14px 0 6px 0;font-size:.78rem;">'
             f'当前已有 <b>{existing}</b> 条日程。再次解析会<b>追加</b>在这 {existing} 条后面，'
             f'不会覆盖。想从空白重新开始，就点下面的「🗑️ 清空全部日程」。</div>'
         )
@@ -2729,14 +3146,27 @@ def render_ingest_tab() -> None:
     # session_state：回调在 rerun 开始时、text_area 实例化之前执行，否则会触发
     # StreamlitAPIException: cannot be modified after the widget is instantiated。
     with btn_cols[0]:
-        do_parse = st.button("✨ 开始解析", type="primary", width="stretch")
+        do_parse = st.button(
+            "✨ 开始解析", type="primary", width="stretch",
+            help=_tip("✨ 开始解析",
+                      "解析左侧文字和已上传的截图，把识别出的日程追加到日程表。"
+                      "不会覆盖已有内容；重复的条目会自动去重。"),
+        )
     with btn_cols[1]:
-        st.button("📚 加载示例", width="stretch",
-                  on_click=_cb_load_sample,
-                  help="一键填入示例日程，适合比赛现场演示。")
+        st.button(
+            "📚 加载示例", width="stretch",
+            on_click=_cb_load_sample,
+            help=_tip("📚 加载示例",
+                      "把一段混排的江苏大学课表 / 班群通知 / DDL 示例填进文本框，"
+                      "适合比赛现场一键演示。填完再点「开始解析」。"),
+        )
     with btn_cols[2]:
-        st.button("🧹 清空文本框", width="stretch", on_click=_cb_clear_input,
-                  help="只清空左侧文字和已上传的截图，已录入的日程不受影响。")
+        st.button(
+            "🧹 清空文本框", width="stretch", on_click=_cb_clear_input,
+            help=_tip("🧹 清空文本框",
+                      "只擦掉左侧文字和已选的截图，**已录入的日程不受影响**。"
+                      "想连日程一起清掉，用右边的「🗑️ 清空全部日程」。"),
+        )
     with btn_cols[3]:
         render_clear_all_button("ingest", label="🗑️ 清空全部日程")
 
@@ -3092,7 +3522,8 @@ def _render_recur_panel() -> None:
         index=uids.index(st.session_state.recur_target_uid),
         key="recur_pick_label",
         on_change=_on_recur_pick_change,
-        help="先选一条日程，再决定它是否重复、多久重复一次、总共重复几次。",
+        help=_tip("选择要设置重复的日程",
+                  "先挑一条日程，再决定它是否重复、多久重复一次、总共重复几次。"),
     )
     target_ev = next((e for e in st.session_state.events
                       if e.uid == st.session_state.recur_target_uid), None)
@@ -3100,7 +3531,8 @@ def _render_recur_panel() -> None:
     enabled = st.toggle(
         "是否重复",
         key="recur_enabled",
-        help="关闭表示只发生一次；开启后可设置重复频率与次数。",
+        help=_tip("是否重复",
+                  "关闭＝这条日程只发生一次；开启后可以设置重复频率、开始日期与次数。"),
     )
 
     if enabled:
@@ -3109,11 +3541,14 @@ def _render_recur_panel() -> None:
             RECUR_FREQ_OPTIONS,
             key="recur_freq",
             horizontal=True,
+            help=_tip("重复频率",
+                      "每周重复 / 每两周重复 / 每天重复。切换频率不会改变星期几，"
+                      "「每周一三五」改成每两周后仍然是一、三、五，只是隔周。"),
         )
 
         # ---- 循环开始日期 -------------------------------------------------
         st.markdown(
-            '<div style="font-size:13px;font-weight:600;color:#4E4761;'
+            '<div style="font-size:.8125rem;font-weight:600;color:var(--ink-3);'
             'margin:12px 0 4px;">循环开始日期</div>',
             unsafe_allow_html=True,
         )
@@ -3124,15 +3559,16 @@ def _render_recur_panel() -> None:
                 key="recur_start_date",
                 format="YYYY-MM-DD",
                 label_visibility="collapsed",
-                help="这一天是循环的第 1 次。改它会连同日程本身的开始/结束时间"
-                     "一起平移，时分与时长保持不变。",
+                help=_tip("循环开始日期",
+                          "这一天算作循环的第 1 次。改它会连同年月日一起平移整条日程，"
+                          "时分和时长保持不变，星期几也会跟着重算。"),
             )
         with w_col:
             _html(
                 '<div style="height:38px;display:flex;align-items:center;'
-                'justify-content:center;background:rgba(255,240,247,.85);'
-                'border:1px solid rgba(255,255,255,.95);border-radius:14px;'
-                'font-size:13px;font-weight:700;color:#B8305F;">'
+                'justify-content:center;background:var(--chip-info-bg);'
+                'border:1px solid var(--chip-info-bd);border-radius:14px;'
+                'font-size:.8125rem;font-weight:700;color:var(--chip-info-fg);">'
                 f'周{"一二三四五六日"[start_pick.weekday()]}</div>'
             )
 
@@ -3140,7 +3576,7 @@ def _render_recur_panel() -> None:
 
         # ---- 次数步进器：➖ ｜ 中间数字 ｜ ➕ ----
         st.markdown(
-            '<div style="font-size:13px;font-weight:600;color:#4E4761;'
+            '<div style="font-size:.8125rem;font-weight:600;color:var(--ink-3);'
             'margin:8px 0 2px;">重复次数</div>',
             unsafe_allow_html=True,
         )
@@ -3152,24 +3588,26 @@ def _render_recur_panel() -> None:
                 st.button(
                     "－", key="recur_minus", on_click=_bump_recur_count, args=(-1,),
                     width="stretch", disabled=count <= RECUR_COUNT_MIN,
-                    help=f"减少一次（最少 {RECUR_COUNT_MIN} 次）",
+                    help=_tip("－ 减少一次",
+                              f"把重复次数减 1，最少 {RECUR_COUNT_MIN} 次。"),
                 )
             with c_num:
                 _html(
                     # 与左右按钮等高（40px）并用 flex 居中，避免数字上下错位
                     '<div style="height:40px;display:flex;align-items:center;'
-                    'justify-content:center;background:rgba(255,242,248,.92);'
-                    'border:1px solid rgba(250,205,228,.95);'
+                    'justify-content:center;background:var(--stepper-bg);'
+                    'border:1px solid var(--stepper-bd);'
                     'border-radius:14px;">'
-                    f'<span style="font-size:24px;font-weight:800;color:#D8377A;">{count}</span>'
-                    '<span style="font-size:13px;font-weight:600;color:#9A8FA6;'
+                    f'<span style="font-size:1.5rem;font-weight:800;color:var(--stepper-fg);">{count}</span>'
+                    '<span style="font-size:.8125rem;font-weight:600;color:var(--muted);'
                     'margin-left:4px;">次</span></div>'
                 )
             with c_plus:
                 st.button(
                     "＋", key="recur_plus", on_click=_bump_recur_count, args=(1,),
                     width="stretch", disabled=count >= RECUR_COUNT_MAX,
-                    help=f"增加一次（最多 {RECUR_COUNT_MAX} 次）",
+                    help=_tip("＋ 增加一次",
+                              f"把重复次数加 1，最多 {RECUR_COUNT_MAX} 次。"),
                 )
 
         # 实时预览：点「应用」前就能看到最终规则与结束日期
@@ -3208,11 +3646,15 @@ def _render_recur_panel() -> None:
             "✅ 应用重复设置", key="apply_recur", type="primary", width="stretch",
             on_click=_apply_recur_setting,
             args=(picked_uid, enabled, freq, count, start_pick),
+            help=_tip("✅ 应用重复设置",
+                      "把上面的开关、频率、开始日期和次数写进这条日程，"
+                      "并同步到导出的 .ics 里。"),
         )
     with b2:
         st.button(
             "🚫 取消这条的重复", key="remove_recur", width="stretch",
-            help="改回单次日程，不会删除这条日程本身。",
+            help=_tip("🚫 取消这条的重复",
+                      "把这条日程改回只发生一次，不会删除日程本身。"),
             on_click=_apply_recur_setting,
             args=(picked_uid, False, freq, count, start_pick),
         )
@@ -3251,7 +3693,7 @@ def _render_calendar() -> None:
             head_prev, head_title, head_next = st.columns([1, 3.4, 1], gap="small")
             with head_prev:
                 st.button("‹", key="cal_prev", on_click=_cal_shift, args=(-1,),
-                          width="stretch", help="上一个月")
+                          width="stretch", help=_tip("‹ 上个月", "翻到上一个月的月历。"))
             with head_title:
                 _html(
                     '<div class="cal-title">'
@@ -3260,7 +3702,7 @@ def _render_calendar() -> None:
                 )
             with head_next:
                 st.button("›", key="cal_next", on_click=_cal_shift, args=(1,),
-                          width="stretch", help="下一个月")
+                          width="stretch", help=_tip("› 下个月", "翻到下一个月的月历。"))
 
             wd_cols = st.columns(7, gap="small")
             for idx, col in enumerate(wd_cols):
@@ -3280,7 +3722,7 @@ def _render_calendar() -> None:
                         # 有安排的日期在日号后加一个中点，作为"有日程"的视觉提示
                         label = str(day.day) if not has else f"{day.day}·"
                         tip = (f"{day:%m月%d日} 有 {has} 项安排" if has
-                               else f"{day:%m月%d日} 无安排")
+                               else f"{day:%m月%d日} 暂无安排")
                         if day == today:
                             tip += "（今天）"
                         st.button(
@@ -3290,14 +3732,15 @@ def _render_calendar() -> None:
                             args=(day,),
                             width="stretch",
                             type="primary" if day == selected else "secondary",
-                            help=tip,
+                            help=_tip(f"选中 {day:%m月%d日}", tip + "。点一下，右侧会列出这天的全部安排。"),
                         )
 
     with right:
         with st.container(border=True):
             st.button("↩ 回到今天", key="cal_today",
                       on_click=_cal_goto_today, width="stretch",
-                      help="跳到当前月份并选中今天")
+                      help=_tip("↩ 回到今天",
+                                "不管当前翻到哪个月，都直接跳回本月并选中今天。"))
 
             sel_events = events_on_day(selected)
             weekday_cn = "一二三四五六日"[selected.weekday()]
@@ -3305,7 +3748,7 @@ def _render_calendar() -> None:
             head = (
                 f'<div class="cal-side">'
                 f'<h4>{selected:%Y 年 %m 月 %d 日} · 周{weekday_cn}'
-                f'<span style="font-size:11px;font-weight:600;color:#9A93AB;'
+                f'<span style="font-size:.6875rem;font-weight:600;color:var(--muted-2);'
                 f'margin-left:8px;">第 {iso_week} 周</span></h4>'
             )
             if not sel_events:
@@ -3335,7 +3778,7 @@ def _render_calendar() -> None:
                 for w in _calendar_matrix(year, month) for d in w if d
             )
             tail = (
-                '<div style="font-size:12px;color:#8B8398;margin-top:12px;'
+                '<div style="font-size:.75rem;color:var(--muted);margin-top:12px;'
                 'padding-top:10px;border-top:1px dashed rgba(160,91,232,.22);">'
                 f'本月共 <b>{month_total}</b> 项安排　·　'
                 f'循环日程 {sum(1 for e in st.session_state.events if e.is_recurring)} 条'
@@ -3354,7 +3797,12 @@ def render_schedule_tab() -> None:
             '请到「录入解析」页粘贴文字或上传截图，或点击「加载示例」快速体验。'
             '</div>'
         )
-        if st.button("📚 一键加载示例日程", type="primary"):
+        if st.button(
+            "📚 一键加载示例日程", type="primary",
+            help=_tip("📚 一键加载示例日程",
+                      "跳过录入步骤，直接把示例课表解析成 14 条日程，"
+                      "用来快速看看表格、日历和导出长什么样。"),
+        ):
             sample = parse_with_rules(build_sample_text())
             _push_events(sample, "示例数据")
             st.rerun()
@@ -3483,7 +3931,11 @@ def render_schedule_tab() -> None:
             picked = st.selectbox("选择要删除的日程", list(options.keys()), key="del_pick")
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("删除选中这一条", key="del_btn"):
+                if st.button(
+                    "删除选中这一条", key="del_btn",
+                    help=_tip("删除选中这一条",
+                              "从日程表里删掉下拉框选中的那一条，其他日程不受影响。"),
+                ):
                     target = options[picked]
                     st.session_state.events = [
                         ev for ev in st.session_state.events if ev.uid != target
@@ -3517,14 +3969,14 @@ def _render_week_view(events: list[Event]) -> None:
             is_today = day.date() == datetime.now().date()
             color = "#D8377A" if is_today else "#9A93AB"
             st.markdown(
-                f'<div style="text-align:center;font-size:11px;font-weight:700;color:{color};">'
+                f'<div style="text-align:center;font-size:.6875rem;font-weight:700;color:{color};">'
                 f'{day:%m/%d}<br>周{weekday_cn[day.weekday()]}</div>',
                 unsafe_allow_html=True,
             )
             day_events = [e for e in events if e.start.date() == day.date()]
             if not day_events:
                 st.markdown(
-                    '<div style="text-align:center;color:#D1D5DB;font-size:11px;'
+                    '<div style="text-align:center;color:var(--muted-3);font-size:.6875rem;'
                     'padding:12px 0;">—</div>',
                     unsafe_allow_html=True,
                 )
@@ -3535,7 +3987,7 @@ def _render_week_view(events: list[Event]) -> None:
                 fg = "#B02A44" if ev.conflict else ("#A26510" if ev.vague else "#4B3A8E")
                 st.markdown(
                     f'<div style="background:{bg};color:{fg};border-radius:8px;'
-                    f'padding:6px 7px;margin-bottom:5px;font-size:11px;line-height:1.35;">'
+                    f'padding:6px 7px;margin-bottom:5px;font-size:.6875rem;line-height:1.35;">'
                     f'<b>{ev.start:%H:%M}</b><br>{_escape(ev.title[:12])}</div>',
                     unsafe_allow_html=True,
                 )
@@ -3562,7 +4014,9 @@ def render_export_tab() -> None:
             "日历名称",
             value=st.session_state.calendar_name,
             key="cal_name_input",
-            help="导入到手机 / Outlook 后显示的日历分组名称。留空则使用默认名称。",
+            help=_tip("日历名称",
+                      "导入手机 / Outlook 后显示的日历分组名，留空则用「我的 AI 日程」。\n"
+                      "只影响 .ics 里的 X-WR-CALNAME，不改变文件里的日程内容。"),
         )
         st.session_state.calendar_name = (name or "").strip() or "我的 AI 日程"
     with col2:
@@ -3616,7 +4070,9 @@ def render_export_tab() -> None:
                 mime="text/calendar",
                 type="primary",
                 width="stretch",
-                help="标准 iCalendar 格式，双击即可导入系统日历",
+                help=_tip("📅 下载 .ics 日历",
+                          "标准 iCalendar 格式，双击就能导入 iPhone / 安卓 / Outlook 日历，"
+                          "提醒和重复规则一并写入。"),
             )
         else:
             st.error(ics_error or "ICS 生成失败")
@@ -3628,7 +4084,9 @@ def render_export_tab() -> None:
                 file_name=f"ai_schedule_{stamp}.csv",
                 mime="text/csv",
                 width="stretch",
-                help="UTF-8 BOM 编码，Excel / WPS 直接打开不乱码",
+                help=_tip("📊 下载 CSV 表格",
+                          "每行一条日程的表格文件，带 UTF-8 BOM，"
+                          "用 Excel / WPS 直接打开不会乱码。"),
             )
     with dl3:
         if md_text:
@@ -3638,7 +4096,8 @@ def render_export_tab() -> None:
                 file_name=f"ai_schedule_{stamp}.md",
                 mime="text/markdown",
                 width="stretch",
-                help="按日期分组的表格，适合粘贴到笔记或文档",
+                help=_tip("📝 下载 Markdown",
+                          "按日期分组的纯文本表格，适合贴进笔记、文档或提交材料里。"),
             )
 
     # --- 预览 ---
@@ -3712,6 +4171,23 @@ def render_help_tab() -> None:
         )
 
     _html('<div class="section-title">常见问题</div>')
+    with st.expander("界面字太小 / 想要深色模式，在哪调？"):
+        st.markdown(
+            "点侧边栏顶部的 **⚙️ 设置与外观**：\n\n"
+            "- **明暗模式**：浅色（奶油柔光）↔ 深色（暗夜紫），立刻生效\n"
+            "- **界面字号**：小 / 标准 / 大 / 特大，按钮、表格、日历一起缩放\n\n"
+            "这两个只影响本机显示，换台电脑打开还是默认外观；导出文件不受影响。\n"
+            "同一个面板里还收着 **AI 解析状态**、**OCR 识别状态** 和 **默认提醒时间**。"
+        )
+    with st.expander("每个按钮是干什么的？"):
+        st.markdown(
+            "把鼠标停在任意按钮 / 下拉 / 开关上，停一小会儿就会弹出说明，"
+            "格式是：**第一行写按钮名，空一行写它做什么**。\n\n"
+            "例如停在「✨ 开始解析」上会看到：\n\n"
+            "> **✨ 开始解析**\n>\n"
+            "> 解析左侧文字和已上传的截图，把识别出的日程追加到日程表。"
+            "不会覆盖已有内容；重复的条目会自动去重。"
+        )
     with st.expander("为什么有些时间标注了 ⚠️ 待核对？"):
         st.markdown(
             "当文本里没有写清楚具体时间（例如只写了日期、或只写「3点」没说上下午），"
@@ -3765,7 +4241,7 @@ def render_footer() -> None:
         '</div>'
     )
     _html(
-        '<div style="text-align:center;color:#9CA3AF;font-size:11px;padding:14px 0 6px 0;">'
+        '<div style="text-align:center;color:var(--muted-2);font-size:.6875rem;padding:14px 0 6px 0;">'
         f'{APP_TITLE} · v{APP_VERSION}　|　Streamlit + OCR + LLM　|　'
         '为大学生 AI 创新比赛而作</div>'
     )
@@ -3782,8 +4258,9 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    _inject_css()
+    # 先初始化会话状态，_inject_css 才能读到用户选的明暗 / 字号
     init_state()
+    _inject_css()
 
     _html(
         '<div class="hero">'
