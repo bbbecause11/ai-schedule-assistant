@@ -609,6 +609,68 @@ def test_timetable() -> None:
           double[0].rrule if double else "")
 
 
+def test_theme_guard() -> None:
+    section("K. 主题令牌一致性（防硬编码 / 防漏定义）")
+    import re
+
+    src = open("app.py", encoding="utf-8").read()
+    light, dark = app._TOKENS_LIGHT, app._TOKENS_DARK
+
+    check("明暗两套令牌键名完全一致",
+          set(light) == set(dark),
+          f"浅色多出 {sorted(set(light) - set(dark))}；"
+          f"深色多出 {sorted(set(dark) - set(light))}")
+    check("每个令牌都是非空字符串",
+          all(isinstance(v, str) and v.strip() for v in list(light.values()) + list(dark.values())))
+
+    # 样式块里除"白色叠加层"外不应再有颜色字面量
+    lines = src.split("\n")
+
+    def block(name: str) -> str:
+        start = next(i for i, l in enumerate(lines) if l.startswith(name))
+        end = next(i for i in range(start + 1, len(lines)) if lines[i].rstrip() == '"""')
+        return "\n".join(lines[start:end])
+
+    color_re = re.compile(r"#[0-9A-Fa-f]{3,8}\b|\brgba?\([^)]*\)|\bhsla?\([^)]*\)")
+    offenders: list[str] = []
+    for name in ("_CSS =", "_CSS_WIDGETS =", "_CSS_DARK_ONLY ="):
+        for m in color_re.finditer(block(name)):
+            token = m.group(0).replace(" ", "")
+            # 唯一允许的字面量：品牌渐变上的白色高光/描边，两种主题共用
+            if re.fullmatch(r"rgba\(255,255,255,\.[0-9]+\)", token):
+                continue
+            offenders.append(f"{name} {token}")
+    check("样式表里没有散落硬编码颜色（白色高光除外）",
+          not offenders, str(offenders[:6]))
+
+    # 所有 var(--x) 引用的变量都必须有定义
+    defined = set(light) | {"fs"}
+    used = set(re.findall(r"var\(--([a-z0-9\-]+)\)", src))
+    missing = sorted(used - defined)
+    check("var(--x) 引用的变量都有定义", not missing, str(missing))
+
+    # 主题注入：color-scheme 与首帧底色
+    check("按主题输出 color-scheme（原生滚动条/日期面板跟着变）",
+          'color-scheme:{scheme}' in src or "color-scheme:" in src)
+    check("首帧先铺底色，避免刷新时闪白",
+          "html,body{background:var(--body-bg);}" in src)
+    check("支持 ?theme=dark 深链，刷新保持主题",
+          'st.query_params.get("theme")' in src and "_remember_theme(" in src)
+    check("提供了跟随系统偏好的兜底",
+          "_system_prefers_dark" in src and "st.context.theme" in src)
+
+    # 反色滤镜只允许出现在数据表 canvas 这条规则里，不允许是全局反色
+    css_rules = re.findall(r"([^{}]+)\{([^{}]*)\}", block("_CSS_DARK_ONLY ="))
+    invert_rules = [(sel.strip(), body.strip()) for sel, body in css_rules
+                    if "invert" in body]
+    check("invert 只作用在数据表 canvas 的选择器上",
+          bool(invert_rules) and all("canvas" in sel for sel, _ in invert_rules),
+          str([sel for sel, _ in invert_rules]))
+    all_rules = re.findall(r"([^{}]+)\{([^{}]*)\}", src)
+    stray = [sel.strip() for sel, body in all_rules if "invert" in body and "canvas" not in sel]
+    check("全站样式中没有兜底式的 filter:invert", not stray, str(stray[:3]))
+
+
 def test_security() -> None:
     section("I. 安全与合规静态检查")
     src = open("app.py", encoding="utf-8").read()
@@ -639,7 +701,7 @@ def main() -> int:
     for fn in (test_text_only, test_time_parsing, test_structure_fields,
                test_dedup_conflict, test_export, test_recurrence,
                test_calendar_and_sample, test_ocr,
-               test_ai_layer, test_merge, test_timetable, test_security):
+               test_ai_layer, test_merge, test_timetable, test_security, test_theme_guard):
         try:
             fn()
         except Exception:  # noqa: BLE001

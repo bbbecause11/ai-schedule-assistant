@@ -54,7 +54,8 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   1.2.0  月历视图、循环开始日期、移除全局兜底周数、ins 风毛玻璃 UI、江大示例
 #   1.3.0  设置与外观面板、全站悬停说明、明暗双主题、四档界面字号
 #   1.4.0  课表版面重建（识别课表截图并还原成逐节日程）、图片自动放大与增强
-APP_VERSION = "1.4.0"
+#   1.5.0  配色体系重构：设计令牌全覆盖、原生组件深色适配、主题持久化与系统偏好
+APP_VERSION = "1.5.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -2929,7 +2930,7 @@ html, body, [class*="css"] { font-family: -apple-system, "Segoe UI", "PingFang S
 
 /* ---------- 顶部 hero：ins 渐变色带 ---------- */
 .hero {
-    background: linear-gradient(118deg, #FF9A63 0%, #F0568C 34%, #A45BEC 68%, #6C7BF5 100%);
+    background: var(--brand-grad);
     border-radius: 1.5rem; padding: 1.75rem 2rem 1.6rem 2rem; margin-bottom: 1.1rem;
     box-shadow: var(--hero-shadow); position: relative; overflow: hidden;
 }
@@ -2943,11 +2944,11 @@ html, body, [class*="css"] { font-family: -apple-system, "Segoe UI", "PingFang S
 }
 .hero-badge {
     display: inline-block; font-size: .6875rem; letter-spacing: 2.4px; font-weight: 700;
-    color: #FFF3FA; background: rgba(255,255,255,.20); border: 1px solid rgba(255,255,255,.42);
+    color: var(--brand-fg); background: rgba(255,255,255,.20); border: 1px solid rgba(255,255,255,.36);
     border-radius: 999px; padding: 5px 14px; margin-bottom: .8rem;
     backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
 }
-.hero h1 { color: #FFFFFF !important; font-size: 1.9375rem; font-weight: 800; margin: 0 0 .5rem 0;
+.hero h1 { color: var(--brand-fg) !important; font-size: 1.9375rem; font-weight: 800; margin: 0 0 .5rem 0;
     letter-spacing: -.5px; }
 .hero p { color: rgba(255,255,255,.94) !important; font-size: .875rem; margin: 0; line-height: 1.6; }
 
@@ -3020,14 +3021,14 @@ html, body { background: var(--body-bg); }
     box-shadow: var(--btn-hover-shadow);
 }
 .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
-    background: linear-gradient(118deg, #FF8F6B 0%, #EE5A92 48%, #A05BE8 100%);
-    border: 1px solid rgba(255,255,255,.55);
-    color: #FFFFFF;
-    box-shadow: 0 10px 26px rgba(226,88,158,.30), inset 0 1px 0 rgba(255,255,255,.45);
+    background: var(--brand-grad);
+    border: 1px solid rgba(255,255,255,.38);
+    color: var(--brand-fg);
+    box-shadow: 0 10px 26px var(--brand-glow), inset 0 1px 0 rgba(255,255,255,.32);
 }
 .stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {
-    color: #FFFFFF; transform: translateY(-1px);
-    box-shadow: 0 14px 32px rgba(226,88,158,.38), inset 0 1px 0 rgba(255,255,255,.55);
+    color: var(--brand-fg); transform: translateY(-1px);
+    box-shadow: 0 14px 32px var(--brand-glow-hover), inset 0 1px 0 rgba(255,255,255,.45);
 }
 /* 按钮禁用态：调低不透明度，避免深色模式下看起来仍可点 */
 .stButton > button:disabled { opacity: .45; }
@@ -3045,8 +3046,8 @@ html, body { background: var(--body-bg); }
     color: var(--muted-2) !important;
 }
 .stTextArea textarea:focus, .stTextInput input:focus, .stDateInput input:focus {
-    border-color: rgba(226,120,180,.85) !important;
-    box-shadow: 0 0 0 4px rgba(240,86,140,.12) !important;
+    border-color: var(--focus-bd) !important;
+    box-shadow: 0 0 0 4px var(--focus-ring) !important;
 }
 
 /* ---------- 下拉 / 单选 / 开关 ---------- */
@@ -3073,14 +3074,7 @@ html, body { background: var(--body-bg); }
 [data-testid="stFileUploaderDropzone"] small,
 [data-testid="stFileUploaderDropzoneInstructions"] { color: var(--muted) !important; }
 
-/* ---------- 悬停提示气泡 ----------
-   气泡永远是浅色底（Streamlit 自带主题），文字必须锁死深色，
-   否则深色模式下会被 .stApp p 的浅色文字规则带跑，白底白字。 */
-[data-testid="stTooltipContent"], [data-testid="stTooltipContent"] *,
-[role="tooltip"], [role="tooltip"] * { color: #23202E !important; }
-[data-testid="stTooltipContent"], [role="tooltip"] {
-    box-shadow: 0 12px 30px rgba(0,0,0,.18) !important;
-}
+/* 悬停提示气泡的颜色由 _CSS_WIDGETS 统一按 --tip-* 变量接管 */
 [data-testid="stExpander"] details {
     background: var(--card-bg-3);
     border: 1px solid var(--card-border) !important;
@@ -3118,10 +3112,10 @@ html, body { background: var(--body-bg); }
     transition: background .2s ease, color .2s ease;
 }
 .stTabs [aria-selected="true"] {
-    color: #FFFFFF !important;
-    background: linear-gradient(118deg, #FF8F6B 0%, #EE5A92 50%, #A05BE8 100%) !important;
+    color: var(--brand-fg) !important;
+    background: var(--brand-grad) !important;
     border-color: transparent !important;
-    box-shadow: 0 8px 22px rgba(226,88,158,.26);
+    box-shadow: 0 8px 22px var(--brand-glow);
 }
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"],
 .stTabs [role="tablist"] > div:not([role="tab"]),
@@ -3141,7 +3135,7 @@ html, body { background: var(--body-bg); }
 .section-title {
     font-size: 1rem; font-weight: 700; color: var(--ink); margin: 1rem 0 .5rem 0;
     padding-left: 11px; border-left: 4px solid transparent; line-height: 1.3;
-    border-image: linear-gradient(180deg,#FF9A63,#EE5A92,#A05BE8) 1;
+    border-image: var(--brand-grad) 1;
 }
 
 /* ---------- 提示条（毛玻璃） ---------- */
@@ -3151,10 +3145,10 @@ html, body { background: var(--body-bg); }
     border: 1px solid var(--card-border);
     box-shadow: var(--card-shadow);
 }
-.notice-info { background: var(--notice-info-bg); border-left: 4px solid #A05BE8; color: var(--notice-info-fg); }
-.notice-warn { background: var(--notice-warn-bg); border-left: 4px solid #F0A83C; color: var(--notice-warn-fg); }
-.notice-ok   { background: var(--notice-ok-bg); border-left: 4px solid #35C08F; color: var(--notice-ok-fg); }
-.notice-bad  { background: var(--notice-bad-bg); border-left: 4px solid #EE5A6E; color: var(--notice-bad-fg); }
+.notice-info { background: var(--notice-info-bg); border-left: 4px solid var(--brand-3); color: var(--notice-info-fg); }
+.notice-warn { background: var(--notice-warn-bg); border-left: 4px solid var(--warn-strong); color: var(--notice-warn-fg); }
+.notice-ok   { background: var(--notice-ok-bg); border-left: 4px solid var(--ok-strong); color: var(--notice-ok-fg); }
+.notice-bad  { background: var(--notice-bad-bg); border-left: 4px solid var(--bad-strong); color: var(--notice-bad-fg); }
 
 /* ---------- 设置面板 ---------- */
 .settings-card {
@@ -3194,7 +3188,7 @@ html, body { background: var(--body-bg); }
     border: 1px solid var(--cal-ev-border);
     box-shadow: var(--card-shadow);
 }
-.cal-ev .t { font-size: .6875rem; font-weight: 800; color: #A05BE8; min-width: 42px; }
+.cal-ev .t { font-size: .6875rem; font-weight: 800; color: var(--cal-time-fg); min-width: 42px; }
 .cal-ev .m { font-size: .8125rem; color: var(--ink); font-weight: 600; line-height: 1.45; }
 .cal-ev .s { font-size: .6875rem; color: var(--muted); margin-top: 2px; }
 .cal-ev.bad { background: var(--cal-bad-bg); border-color: var(--cal-bad-bd); }
@@ -3248,96 +3242,199 @@ FONT_OPTIONS = [FONT_SMALL, FONT_NORMAL, FONT_LARGE, FONT_HUGE]
 FONT_SCALES = {FONT_SMALL: 0.92, FONT_NORMAL: 1.0, FONT_LARGE: 1.08, FONT_HUGE: 1.16}
 
 _TOKENS_LIGHT = {
+    # ---------- 底色与文字 ----------
     "app-bg": (
         "radial-gradient(920px 540px at 6% -10%, rgba(255,178,196,.55), transparent 62%),"
         "radial-gradient(780px 500px at 98% 2%, rgba(178,162,255,.50), transparent 60%),"
         "radial-gradient(760px 540px at 52% 112%, rgba(150,206,255,.42), transparent 62%),"
         "linear-gradient(158deg, #FFFAFC 0%, #F8F5FF 46%, #F3F8FF 100%)"
     ),
+    "body-bg": "#FFFAFC",
+    "img-brightness": "1",
     "ink": "#2E2A3B",
     "ink-2": "#453D57",
     "ink-3": "#4E4761",
-    "muted": "#7A728C",
-    "muted-2": "#9A93AB",
-    "muted-3": "#A8A1B8",
+    "muted": "#635B74",
+    "muted-2": "#6F6781",
+    "muted-3": "#746C86",
     "line": "rgba(126,87,194,.14)",
+
+    # ---------- 品牌色（渐变四档，白字全部 ≥4.5:1） ----------
+    "brand-1": "#BF5433",
+    "brand-2": "#C02A66",
+    "brand-3": "#8E3FBF",
+    "brand-4": "#5B62E0",
+    "brand-grad": "linear-gradient(118deg,#BF5433 0%,#C02A66 34%,#8E3FBF 68%,#5B62E0 100%)",
+    "brand-fg": "#FFFFFF",
+    "brand-glow": "rgba(192,42,102,.30)",
+    "brand-glow-hover": "rgba(192,42,102,.42)",
+    "accent": "#B01F5A",
+    "accent-hover": "#8C1747",
+    "logo": "#8E3D6B",
+
+    # ---------- 面 / 卡片 ----------
+    "surface-1": "#FFFFFF",
+    "surface-2": "#FFFFFF",
     "card-bg": "rgba(255,255,255,.58)",
     "card-bg-3": "rgba(255,255,255,.52)",
     "card-border": "rgba(255,255,255,.9)",
     "card-border-2": "rgba(255,255,255,.92)",
     "card-shadow": "0 10px 30px rgba(126,87,194,.09)",
     "card-shadow-lg": "0 12px 34px rgba(126,87,194,.10)",
-    "hero-shadow": "0 18px 44px rgba(196,86,180,.26)",
+    "hero-shadow": "0 18px 44px rgba(160,60,140,.26)",
+
+    # ---------- 表单控件 ----------
     "input-bg": "rgba(255,255,255,.62)",
     "input-border": "rgba(255,255,255,.95)",
     "input-text": "#342E44",
     "input-shadow": "0 4px 16px rgba(126,87,194,.07)",
+    "field-bg": "rgba(255,255,255,.72)",
+    "field-bd": "rgba(160,140,190,.35)",
+    "field-bd-hover": "rgba(160,140,190,.55)",
+    "field-ph": "#857D96",
+    "field-dis-fg": "#9C94AA",
+    "field-dis-bg": "rgba(240,238,245,.55)",
+    "focus-ring": "rgba(192,42,102,.22)",
+    "focus-bd": "#C02A66",
+
+    # ---------- 按钮 ----------
     "btn-bg": "rgba(255,255,255,.50)",
     "btn-border": "rgba(255,255,255,.92)",
     "btn-text": "#453D57",
     "btn-hover-bg": "rgba(255,255,255,.74)",
-    "btn-hover-border": "rgba(233,150,201,.8)",
-    "btn-hover-text": "#7A3E8E",
+    "btn-hover-border": "rgba(192,42,102,.55)",
+    "btn-hover-text": "#8C1747",
     "btn-shadow": "0 6px 20px rgba(126,87,194,.10), inset 0 1px 0 rgba(255,255,255,.95)",
-    "btn-hover-shadow": "0 10px 28px rgba(200,90,170,.16), inset 0 1px 0 rgba(255,255,255,1)",
+    "btn-hover-shadow": "0 10px 28px rgba(160,60,140,.16), inset 0 1px 0 rgba(255,255,255,1)",
+    "btn-dis-fg": "#9C94AA",
+
+    # ---------- Tab ----------
     "tab-bg": "rgba(255,255,255,.42)",
     "tab-border": "rgba(255,255,255,.85)",
-    "tab-text": "#7A728C",
+    "tab-text": "#6F6781",
+
+    # ---------- 侧边栏 ----------
     "sidebar-bg": "rgba(255,255,255,.46)",
     "sidebar-border": "rgba(255,255,255,.85)",
+
+    # ---------- 语义色（标签 / 提示条） ----------
     "chip-ok-bg": "rgba(224,250,240,.85)",
-    "chip-ok-fg": "#0B7A60",
+    "chip-ok-fg": "#0A6B54",
     "chip-ok-bd": "rgba(150,225,203,.9)",
     "chip-warn-bg": "rgba(255,247,226,.9)",
-    "chip-warn-fg": "#A26510",
+    "chip-warn-fg": "#8A5409",
     "chip-warn-bd": "rgba(245,205,130,.9)",
     "chip-bad-bg": "rgba(255,235,238,.9)",
-    "chip-bad-fg": "#B02A44",
+    "chip-bad-fg": "#9E1F3A",
     "chip-bad-bd": "rgba(250,180,190,.9)",
     "chip-info-bg": "rgba(240,238,255,.9)",
-    "chip-info-fg": "#5B43C0",
+    "chip-info-fg": "#4B33AE",
     "chip-info-bd": "rgba(200,192,250,.9)",
+
     "notice-info-bg": "rgba(244,240,255,.72)",
-    "notice-info-fg": "#4B3A8E",
+    "notice-info-fg": "#412F84",
     "notice-warn-bg": "rgba(255,248,232,.78)",
-    "notice-warn-fg": "#8A5B12",
+    "notice-warn-fg": "#7A4F0C",
     "notice-ok-bg": "rgba(233,251,244,.78)",
-    "notice-ok-fg": "#0A6A50",
+    "notice-ok-fg": "#085C45",
     "notice-bad-bg": "rgba(255,238,240,.78)",
-    "notice-bad-fg": "#98203A",
+    "notice-bad-fg": "#861B33",
+
+    "warn-strong": "#8A5409",
+    "bad-strong": "#B0233F",
+    "ok-strong": "#0A6B54",
+
+    # ---------- 日历 ----------
     "cal-ev-bg": "rgba(255,255,255,.62)",
     "cal-ev-border": "rgba(255,255,255,.95)",
     "cal-bad-bg": "rgba(255,238,240,.8)",
     "cal-bad-bd": "rgba(250,190,200,.95)",
     "cal-vague-bg": "rgba(255,249,232,.8)",
     "cal-vague-bd": "rgba(248,220,160,.95)",
-    "warn-strong": "#C2761A",
-    "bad-strong": "#D23B5E",
-    "ok-strong": "#0E9F7E",
+    "cal-time-fg": "#8E3FBF",
+    "cal-day-fg": "#4E4761",
+    "cal-day-muted": "#6F6781",
+    "cal-today-bg": "#C02A66",
+    "cal-today-fg": "#FFFFFF",
+    "cal-day-hover": "rgba(192,42,102,.10)",
+
+    # ---------- 数据表行底色（Python 侧喂给 data_editor） ----------
+    "row-bad-bg": "#FFEEF1",
+    "row-bad-fg": "#9E1F3A",
+    "row-warn-bg": "#FFF9E8",
+    "row-warn-fg": "#7A4F0C",
+
+    # ---------- 弹层 / 气泡 / Toast / 代码 ----------
+    "pop-bg": "#FFFFFF",
+    "pop-bd": "rgba(126,87,194,.18)",
+    "pop-shadow": "0 18px 42px rgba(80,50,120,.18)",
+    "pop-item-hover": "rgba(192,42,102,.10)",
+    "tip-bg": "#FFFFFF",
+    "tip-fg": "#2E2A3B",
+    "tip-bd": "rgba(126,87,194,.18)",
+    "toast-bg": "#FFFFFF",
+    "toast-fg": "#2E2A3B",
+    "toast-bd": "rgba(126,87,194,.18)",
+    "code-bg": "rgba(96,72,140,.07)",
+    "code-fg": "#4A3D6B",
+    "code-bd": "rgba(126,87,194,.18)",
+    "code-kw": "#8E3FBF",
+    "code-str": "#086B52",
+    "code-num": "#A8420F",
+
+    # ---------- 表格外壳 / 选中 / 滚动条 ----------
+    "grid-bg": "#FFFFFF",
+    "grid-bd": "rgba(126,87,194,.16)",
+    "grid-head-fg": "#4E4761",
+    "grid-toolbar": "rgba(255,255,255,.9)",
+    "sel-bg": "rgba(192,42,102,.20)",
+    "sel-fg": "#2E2A3B",
+    "scroll-thumb": "rgba(126,87,194,.28)",
+    "scroll-thumb-hover": "rgba(126,87,194,.46)",
+
+    # ---------- 杂项 ----------
     "disc-bg": "rgba(255,255,255,.52)",
     "disc-border": "rgba(180,168,210,.6)",
-    "disc-text": "#7A728C",
-    "logo": "#8E3D6B",
+    "disc-text": "#6F6781",
     "stepper-bg": "rgba(255,242,248,.92)",
     "stepper-bd": "rgba(250,205,228,.95)",
-    "stepper-fg": "#D8377A",
-    "body-bg": "#FFFAFC",
+    "stepper-fg": "#B01F5A",
 }
 
 _TOKENS_DARK = {
+    # ---------- 底色与文字 ----------
     "app-bg": (
         "radial-gradient(900px 520px at 6% -10%, rgba(126,60,120,.45), transparent 62%),"
         "radial-gradient(760px 480px at 98% 0%, rgba(86,72,200,.42), transparent 60%),"
         "radial-gradient(720px 520px at 52% 112%, rgba(30,96,150,.34), transparent 62%),"
         "linear-gradient(158deg, #14111C 0%, #171327 46%, #10141D 100%)"
     ),
+    "body-bg": "#14111C",
+    "img-brightness": ".88",
     "ink": "#F1EDF9",
     "ink-2": "#DCD5EC",
     "ink-3": "#CAC2DC",
     "muted": "#A79FB8",
-    "muted-2": "#8F87A2",
-    "muted-3": "#7C7490",
+    "muted-2": "#9A92AC",
+    "muted-3": "#918AA4",
     "line": "rgba(255,255,255,.12)",
+
+    # ---------- 品牌色 ----------
+    "brand-1": "#BF5433",
+    "brand-2": "#C02A66",
+    "brand-3": "#8E3FBF",
+    "brand-4": "#5B62E0",
+    "brand-grad": "linear-gradient(118deg,#BF5433 0%,#C02A66 34%,#8E3FBF 68%,#5B62E0 100%)",
+    "brand-fg": "#FFFFFF",
+    "brand-glow": "rgba(192,42,102,.30)",
+    "brand-glow-hover": "rgba(192,42,102,.42)",
+    "accent": "#F075A6",
+    "accent-hover": "#FF9CC2",
+    "logo": "#FFB3D9",
+
+    # ---------- 面 / 卡片 ----------
+    "surface-1": "#1B1826",
+    "surface-2": "#221E2E",
     "card-bg": "rgba(255,255,255,.055)",
     "card-bg-3": "rgba(255,255,255,.045)",
     "card-border": "rgba(255,255,255,.11)",
@@ -3345,23 +3442,42 @@ _TOKENS_DARK = {
     "card-shadow": "0 10px 30px rgba(0,0,0,.34)",
     "card-shadow-lg": "0 12px 34px rgba(0,0,0,.38)",
     "hero-shadow": "0 18px 44px rgba(0,0,0,.42)",
+
+    # ---------- 表单控件 ----------
     "input-bg": "rgba(255,255,255,.07)",
     "input-border": "rgba(255,255,255,.13)",
     "input-text": "#F2EFFA",
     "input-shadow": "0 4px 16px rgba(0,0,0,.22)",
+    "field-bg": "rgba(255,255,255,.07)",
+    "field-bd": "rgba(255,255,255,.16)",
+    "field-bd-hover": "rgba(255,255,255,.26)",
+    "field-ph": "#9A92AC",
+    "field-dis-fg": "#7A7390",
+    "field-dis-bg": "rgba(255,255,255,.04)",
+    "focus-ring": "rgba(240,117,166,.28)",
+    "focus-bd": "#F075A6",
+
+    # ---------- 按钮 ----------
     "btn-bg": "rgba(255,255,255,.07)",
     "btn-border": "rgba(255,255,255,.13)",
     "btn-text": "#EDE9F7",
     "btn-hover-bg": "rgba(255,255,255,.13)",
-    "btn-hover-border": "rgba(238,90,146,.65)",
+    "btn-hover-border": "rgba(240,117,166,.60)",
     "btn-hover-text": "#FFD6E7",
     "btn-shadow": "0 6px 20px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.07)",
     "btn-hover-shadow": "0 10px 28px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.12)",
+    "btn-dis-fg": "#7A7390",
+
+    # ---------- Tab ----------
     "tab-bg": "rgba(255,255,255,.06)",
     "tab-border": "rgba(255,255,255,.10)",
     "tab-text": "#B9B2CB",
+
+    # ---------- 侧边栏 ----------
     "sidebar-bg": "rgba(16,13,24,.62)",
     "sidebar-border": "rgba(255,255,255,.08)",
+
+    # ---------- 语义色 ----------
     "chip-ok-bg": "rgba(53,192,143,.16)",
     "chip-ok-fg": "#7FE7C2",
     "chip-ok-bd": "rgba(53,192,143,.35)",
@@ -3374,6 +3490,7 @@ _TOKENS_DARK = {
     "chip-info-bg": "rgba(160,91,232,.18)",
     "chip-info-fg": "#CBA8FF",
     "chip-info-bd": "rgba(160,91,232,.42)",
+
     "notice-info-bg": "rgba(120,86,214,.14)",
     "notice-info-fg": "#D3C2FF",
     "notice-warn-bg": "rgba(240,168,60,.12)",
@@ -3382,46 +3499,430 @@ _TOKENS_DARK = {
     "notice-ok-fg": "#8FE8C7",
     "notice-bad-bg": "rgba(238,90,110,.13)",
     "notice-bad-fg": "#FFA8B7",
+
+    "warn-strong": "#F0B45C",
+    "bad-strong": "#FF7E96",
+    "ok-strong": "#4FD3A5",
+
+    # ---------- 日历 ----------
     "cal-ev-bg": "rgba(255,255,255,.05)",
     "cal-ev-border": "rgba(255,255,255,.10)",
     "cal-bad-bg": "rgba(238,90,110,.13)",
     "cal-bad-bd": "rgba(238,90,110,.30)",
     "cal-vague-bg": "rgba(240,168,60,.12)",
     "cal-vague-bd": "rgba(240,168,60,.28)",
-    "warn-strong": "#F0B45C",
-    "bad-strong": "#FF7E96",
-    "ok-strong": "#4FD3A5",
+    "cal-time-fg": "#CBA8FF",
+    "cal-day-fg": "#CAC2DC",
+    "cal-day-muted": "#918AA4",
+    "cal-today-bg": "#C02A66",
+    "cal-today-fg": "#FFFFFF",
+    "cal-day-hover": "rgba(240,117,166,.16)",
+
+    # ---------- 数据表行底色（会被 canvas 滤镜翻成深色） ----------
+    "row-bad-bg": "#FFEEF1",
+    "row-bad-fg": "#9E1F3A",
+    "row-warn-bg": "#FFF9E8",
+    "row-warn-fg": "#7A4F0C",
+
+    # ---------- 弹层 / 气泡 / Toast / 代码 ----------
+    "pop-bg": "#221E2E",
+    "pop-bd": "rgba(255,255,255,.12)",
+    "pop-shadow": "0 18px 42px rgba(0,0,0,.55)",
+    "pop-item-hover": "rgba(240,117,166,.16)",
+    "tip-bg": "#2A2536",
+    "tip-fg": "#EFEBF8",
+    "tip-bd": "rgba(255,255,255,.14)",
+    "toast-bg": "#2A2536",
+    "toast-fg": "#EFEBF8",
+    "toast-bd": "rgba(255,255,255,.14)",
+    "code-bg": "rgba(255,255,255,.06)",
+    "code-fg": "#E7E1F6",
+    "code-bd": "rgba(255,255,255,.10)",
+    "code-kw": "#D9B4FF",
+    "code-str": "#8FE8C7",
+    "code-num": "#F5C97E",
+
+    # ---------- 表格外壳 / 选中 / 滚动条 ----------
+    "grid-bg": "#14111C",
+    "grid-bd": "rgba(255,255,255,.12)",
+    "grid-head-fg": "#CAC2DC",
+    "grid-toolbar": "rgba(34,30,46,.92)",
+    "sel-bg": "rgba(240,117,166,.35)",
+    "sel-fg": "#FFF3FA",
+    "scroll-thumb": "rgba(255,255,255,.22)",
+    "scroll-thumb-hover": "rgba(255,255,255,.38)",
+
+    # ---------- 杂项 ----------
     "disc-bg": "rgba(255,255,255,.035)",
     "disc-border": "rgba(255,255,255,.12)",
     "disc-text": "#A79FB8",
-    "logo": "#FFB3D9",
     "stepper-bg": "rgba(238,90,146,.16)",
     "stepper-bd": "rgba(238,90,146,.38)",
     "stepper-fg": "#FF8FB4",
-    "body-bg": "#12101A",
 }
 
 
-_CSS_DARK_EXTRA = """
+# ---------------------------------------------------------------------------
+# Streamlit 原生组件的主题补丁
+#
+# 为什么需要这一层：Streamlit 1.66 的主题来自 .streamlit/config.toml，
+# 只在启动时读取一次，运行时切不了。所以「深色模式」的实现方式是——
+# 自有样式全走 :root 变量，原生组件则用下面这层 CSS 按变量重新上色。
+# 全部选择器都用 data-testid / role 这类稳定钩子，不碰 Emotion 的哈希类名。
+# ---------------------------------------------------------------------------
+_CSS_WIDGETS = """
 <style>
-/* ---------- 深色模式补丁 ---------- */
-/* 代码块与行内代码：避免露出浅色底 */
+/* ---------- 全局：选中文本、原生控件配色、滚动条 ----------
+   color-scheme 由 _css_tokens() 按主题写入 :root，这里不要再覆盖，
+   否则深色模式下浏览器原生滚动条 / 日期面板仍是亮色。 */
+::selection { background: var(--sel-bg) !important; color: var(--sel-fg) !important; }
+* { scrollbar-color: var(--scroll-thumb) transparent; scrollbar-width: thin; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+    background: var(--scroll-thumb); border-radius: 999px;
+    border: 2px solid transparent; background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); background-clip: content-box; }
+
+/* 浏览器自动填充：默认会给白底，深色下会闪一块白 */
+input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus,
+textarea:-webkit-autofill, select:-webkit-autofill {
+    -webkit-text-fill-color: var(--input-text) !important;
+    -webkit-box-shadow: 0 0 0 1000px var(--field-bg) inset !important;
+    caret-color: var(--input-text);
+}
+
+/* Streamlit 的无障碍跳转链接默认是浏览器原生的链接蓝，深色下几乎看不见 */
+[data-testid="stSkipToContent"],
+[data-testid="stSkipToContent"] a,
+[data-testid="stSkipToContent"] a:visited {
+    background: var(--surface-1) !important; color: var(--accent) !important;
+    border: 1px solid var(--pop-bd); border-radius: .5rem; padding: 6px 12px;
+}
+[data-testid="stSkipToContent"] * { color: var(--accent) !important; }
+
+/* 链接：正文里的 a / :visited 用强调色，保证两种主题都可读 */
+.stApp [data-testid="stMarkdownContainer"] a,
+.stApp [data-testid="stMarkdownContainer"] a:visited { color: var(--accent) !important; }
+.stApp [data-testid="stMarkdownContainer"] a:hover { color: var(--accent-hover) !important; }
+
+/* ---------- 侧边栏 ----------
+   Streamlit 会给侧边栏容器单独写死 config 里的 textColor（浅色主题是深灰），
+   子元素里没有自己颜色的会继承它 —— 深色下就是"深底深字"。只改容器，
+   不要用 `*` 通配，否则会把侧边栏里的彩色标签一起压成同色。 */
+[data-testid="stSidebar"] { color: var(--ink) !important; }
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+[data-testid="stSidebar"] small { color: var(--muted) !important; }
+
+/* ---------- 单选 / 复选 / 开关 ---------- */
+[data-testid="stRadio"] label, [data-testid="stCheckbox"] label,
+[data-testid="stToggle"] label { color: var(--ink) !important; }
+[data-baseweb="radio"] div:first-child,
+[data-baseweb="checkbox"] div:first-child {
+    border-color: var(--field-bd) !important; background: transparent !important;
+}
+[data-baseweb="radio"] [aria-checked="true"] div:first-child,
+[data-baseweb="checkbox"] [aria-checked="true"] div:first-child {
+    border-color: var(--accent) !important;
+}
+[data-baseweb="radio"] [aria-checked="true"] div:first-child > div,
+[data-baseweb="checkbox"] [aria-checked="true"] div:first-child > div {
+    background: var(--accent) !important;
+}
+[data-testid="stToggle"] [data-baseweb="checkbox"] div[role="checkbox"] {
+    background: var(--field-bd) !important;
+}
+
+/* ---------- 滑块 / 步进器 ---------- */
+[data-testid="stSlider"] [role="slider"] { background: var(--accent) !important; }
+[data-testid="stSlider"] [data-baseweb="slider"] > div > div > div:first-child {
+    background: var(--accent) !important;
+}
+[data-testid="stSlider"] [data-testid="stSliderThumbValue"] {
+    color: var(--brand-fg) !important;
+    -webkit-text-fill-color: var(--brand-fg) !important;
+}
+[data-testid="stSlider"] [data-testid="stSliderTickBarMin"],
+[data-testid="stSlider"] [data-testid="stSliderTickBarMax"] { color: var(--muted) !important; }
+
+/* ---------- 下拉框（Streamlit 1.66 用 react-aria ComboBox） ----------
+   它不是 <select> 也不是 BaseWeb，而是一个 div[role=group] 包着
+   input[role=combobox]，底色写在 Emotion 类上，只能按 role 打补丁。 */
+[data-testid="stSelectbox"] [role="group"],
+[data-testid="stMultiSelect"] [role="group"],
+.react-aria-ComboBox [role="group"] {
+    background: var(--field-bg) !important;
+    border: 1px solid var(--field-bd) !important;
+    border-radius: .9rem !important;
+    color: var(--input-text) !important;
+}
+[data-testid="stSelectbox"] input,
+[data-testid="stMultiSelect"] input {
+    background: transparent !important;
+    color: var(--input-text) !important;
+    -webkit-text-fill-color: var(--input-text) !important;
+}
+[data-testid="stSelectbox"] input::placeholder,
+[data-testid="stMultiSelect"] input::placeholder { color: var(--field-ph) !important; }
+[data-testid="stSelectbox"] button,
+[data-testid="stMultiSelect"] button { background: transparent !important; color: var(--muted) !important; }
+[data-testid="stSelectbox"] svg,
+[data-testid="stMultiSelect"] svg { fill: currentColor !important; }
+[data-testid="stSelectbox"]:focus-within [role="group"],
+[data-testid="stMultiSelect"]:focus-within [role="group"] {
+    border-color: var(--focus-bd) !important;
+    box-shadow: 0 0 0 4px var(--focus-ring) !important;
+}
+
+/* ---------- 原生表单控件 ----------
+   Streamlit 1.66 的下拉框已经换成原生 <select>，靠 color-scheme 就能变暗；
+   这里再兜一层，保证自绘背景/边框与页面一致。 */
+.stApp select, .stApp [data-testid="stSelectbox"] select {
+    background: var(--field-bg) !important;
+    color: var(--input-text) !important;
+    border: 1px solid var(--field-bd) !important;
+    border-radius: .9rem !important;
+    padding: .35rem .6rem;
+}
+.stApp select option, .stApp [data-testid="stSelectbox"] option {
+    background: var(--pop-bg); color: var(--ink);
+}
+.stApp input[type="range"] { accent-color: var(--accent); }
+.stApp input[type="checkbox"], .stApp input[type="radio"] { accent-color: var(--accent); }
+
+/* ---------- 下拉框（收起态） ---------- */
+[data-baseweb="select"] > div { background: transparent !important; border: none !important; }
+[data-baseweb="select"] svg { color: var(--muted) !important; fill: currentColor; }
+[data-baseweb="select"] input { color: var(--input-text) !important; }
+
+/* ---------- 下拉菜单 / 日期选择器 / 弹出层 ---------- */
+[data-baseweb="popover"] > div,
+[data-baseweb="popover"] [data-baseweb="menu"],
+[data-baseweb="popover"] ul[role="listbox"],
+[data-baseweb="menu"] ul,
+[role="listbox"],
+[data-baseweb="calendar"],
+[data-baseweb="popover"] [data-baseweb="calendar"] > div {
+    background: var(--pop-bg) !important;
+    color: var(--ink) !important;
+    border: 1px solid var(--pop-bd) !important;
+    box-shadow: var(--pop-shadow) !important;
+}
+[role="option"], [data-baseweb="menu"] li { color: var(--ink) !important; }
+[role="option"]:hover, [role="option"][aria-selected="true"],
+[data-baseweb="menu"] li:hover {
+    background: var(--pop-item-hover) !important; color: var(--ink) !important;
+}
+[data-baseweb="calendar"] * { color: var(--ink) !important; }
+[data-baseweb="calendar"] button:hover { background: var(--pop-item-hover) !important; }
+[data-baseweb="calendar"] [aria-selected="true"] {
+    background: var(--accent) !important; color: var(--brand-fg) !important;
+}
+
+/* ---------- Toast ---------- */
+[data-testid="stToast"] {
+    background: var(--toast-bg) !important; color: var(--toast-fg) !important;
+    border: 1px solid var(--toast-bd) !important;
+    box-shadow: var(--pop-shadow) !important; border-radius: .9rem !important;
+}
+[data-testid="stToast"] * { color: var(--toast-fg) !important; }
+[data-testid="stToast"] svg { fill: currentColor !important; }
+
+/* ---------- 悬停提示气泡 ---------- */
+[data-testid="stTooltipContent"], [data-testid="stTooltipContent"] *,
+[role="tooltip"], [role="tooltip"] * { color: var(--tip-fg) !important; }
+[data-testid="stTooltipContent"], [role="tooltip"] {
+    background: var(--tip-bg) !important;
+    border: 1px solid var(--tip-bd) !important;
+    box-shadow: var(--pop-shadow) !important;
+}
+[data-testid="stTooltipHoverTarget"] svg { color: var(--muted) !important; fill: currentColor; }
+
+/* ---------- 提示条 st.success / info / warning / error ---------- */
+[data-testid="stAlert"] {
+    background: var(--notice-info-bg) !important;
+    border: 1px solid var(--card-border) !important;
+    border-radius: 1rem !important;
+}
+[data-testid="stAlert"] [data-testid="stAlertContentInfo"],
+[data-testid="stAlert"] [data-testid="stAlertContentSuccess"],
+[data-testid="stAlert"] [data-testid="stAlertContentWarning"],
+[data-testid="stAlert"] [data-testid="stAlertContentError"] { color: var(--ink) !important; }
+[data-testid="stAlert"] p, [data-testid="stAlert"] li { color: var(--ink) !important; }
+[data-testid="stAlert"] svg { fill: currentColor !important; }
+
+/* ---------- 代码块与行内代码 ----------
+   Streamlit 给行内 code 的底色是主题里的浅紫，深色模式下会变成一块亮斑，
+   而且它是 <code> 自身的 background，必须单独覆盖。 */
+.stApp :not(pre) > code {
+    background: var(--code-bg) !important;
+    color: var(--code-fg) !important;
+    border: 1px solid var(--code-bd) !important;
+    border-radius: .35rem; padding: .08em .38em;
+}
 .stApp pre, .stApp [data-testid="stCode"] pre {
-    background: rgba(255,255,255,.06) !important;
-    border: 1px solid rgba(255,255,255,.10) !important;
+    background: var(--code-bg) !important;
+    border: 1px solid var(--code-bd) !important;
     border-radius: .75rem !important;
 }
-.stApp code { color: #E7E1F6 !important; }
-.stApp pre code { color: #D8D1EC !important; }
-/* 日期选择器 / 下拉弹层在 body 之外，保持浅色更易读，这里只加阴影避免"糊"在深底上 */
-[data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"] {
-    box-shadow: 0 18px 42px rgba(0,0,0,.45) !important;
+.stApp pre code { background: transparent !important; border: none !important; }
+.stApp code, .stApp [data-testid="stCode"] code { color: var(--code-fg) !important; }
+/* 语法高亮的 token 颜色来自 Streamlit 主题，逐个按令牌重设 */
+.stApp [data-testid="stCode"] code span { color: var(--code-fg) !important; }
+.stApp [data-testid="stCode"] .token.keyword,
+.stApp [data-testid="stCode"] .token.operator,
+.stApp [data-testid="stCode"] .token.builtin,
+.stApp [data-testid="stCode"] .token.class-name { color: var(--code-kw) !important; }
+.stApp [data-testid="stCode"] .token.string,
+.stApp [data-testid="stCode"] .token.attr-value { color: var(--code-str) !important; }
+.stApp [data-testid="stCode"] .token.number { color: var(--code-num) !important; }
+.stApp [data-testid="stCode"] .token.comment,
+.stApp [data-testid="stCode"] .token.punctuation { color: var(--muted-2) !important; }
+
+/* ---------- 展开器 ---------- */
+[data-testid="stExpander"] details {
+    background: var(--card-bg-3) !important;
+    border: 1px solid var(--card-border) !important;
+    border-radius: 1.1rem !important;
 }
-/* 可编辑表格是 canvas，CSS 改不了它的绘制色；做成浅色"纸片卡"，和深色页面反而更清楚 */
-.stApp [data-testid="stDataFrame"], .stApp [data-testid="stDataEditor"] {
+[data-testid="stExpander"] summary {
+    background: transparent !important;
+    border-radius: .9rem;
+}
+[data-testid="stExpander"] summary:hover { background: var(--pop-item-hover) !important; }
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] summary * { color: var(--ink-2) !important; }
+[data-testid="stExpander"] summary:hover,
+[data-testid="stExpander"] summary:hover * { color: var(--accent) !important; }
+[data-testid="stExpander"] summary svg { fill: currentColor !important; }
+[data-testid="stExpander"] [data-testid="stExpanderDetails"] { color: var(--ink) !important; }
+
+/* ---------- 上传组件 ---------- */
+[data-testid="stFileUploaderDropzone"] {
+    background: var(--field-bg) !important;
+    border: 1px dashed var(--field-bd) !important;
+}
+[data-testid="stFileUploaderDropzoneInstructions"],
+[data-testid="stFileUploaderDropzoneInstructions"] * { color: var(--muted) !important; }
+[data-testid="stFileUploaderDropzone"] button {
+    color: var(--btn-text) !important;
+    background: var(--field-bg) !important;
+    border: 1px solid var(--field-bd) !important;
+    border-radius: .7rem !important;
+    box-shadow: none !important;
+}
+/* 按钮内部的图标底座自带浅色底，深色下像一块灰斑，统一清空 */
+[data-testid="stFileUploaderDropzone"] button * { background: transparent !important; }
+[data-testid="stFileUploaderDropzone"] button * { color: var(--btn-text) !important; }
+[data-testid="stFileUploaderDropzone"] button:hover { border-color: var(--focus-bd) !important; }
+[data-testid="stFileUploaderDropzone"] button:hover {
+    background: var(--btn-hover-bg) !important;
+    border-color: var(--btn-hover-border) !important;
+}
+[data-testid="stFileUploaderDropzone"] svg { fill: currentColor !important; }
+[data-testid="stFileUploaderFile"], [data-testid="stFileUploaderFileName"] {
+    color: var(--ink) !important; background: transparent !important;
+}
+
+/* ---------- 日期输入 ----------
+   外层 stDateInputField 只是壳，真正的年月日在 stDateInputFieldsScroller 里，
+   而且每个 input 都被 Streamlit 写死了深色文字。 */
+[data-testid="stDateInputField"],
+[data-testid="stDateInput"] [data-baseweb="input"],
+[data-testid="stDateInputFieldsScroller"] {
+    background: var(--field-bg) !important;
+    color: var(--input-text) !important;
+    border-radius: .9rem !important;
+}
+[data-testid="stDateInput"] input,
+[data-testid="stDateInputFieldsScroller"] input,
+[data-testid="stDateInput"] [data-baseweb="input"] span,
+[data-testid="stDateInputFieldsScroller"] span {
+    color: var(--input-text) !important;
+    -webkit-text-fill-color: var(--input-text) !important;
+}
+[data-testid="stDateInput"] svg { fill: var(--muted) !important; }
+
+/* ---------- 进度条 / 加载中 ---------- */
+[data-testid="stProgress"] [role="progressbar"] > div { background: var(--accent) !important; }
+[data-testid="stProgress"] [role="progressbar"] { background: var(--field-bd) !important; }
+[data-testid="stSpinner"] { color: var(--muted) !important; }
+[data-testid="stSpinner"] svg { stroke: var(--accent) !important; }
+
+/* ---------- 数据表外壳（canvas 本体在深色模式里另有处理） ---------- */
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] {
+    background: var(--grid-bg) !important;
+    border: 1px solid var(--grid-bd) !important;
     border-radius: 16px !important; overflow: hidden;
-    box-shadow: 0 12px 34px rgba(0,0,0,.45);
 }
+[data-testid="stElementToolbar"], [data-testid="stElementToolbarButtonContainer"] {
+    background: var(--grid-toolbar) !important;
+    border: 1px solid var(--grid-bd) !important; border-radius: .6rem;
+}
+[data-testid="stElementToolbar"] button,
+[data-testid="stIconMaterial"] { color: var(--grid-head-fg) !important; }
+[data-testid="stElementToolbar"] svg,
+[data-testid="stIconMaterial"] { fill: currentColor !important; }
+
+/* 主按钮 / 选中 Tab 内部的 markdown 段落会被 `.stApp p` 的正文色带走，
+   必须把整棵子树钉成品牌前景色，否则浅色主题下是"深字压粉底"。 */
+.stButton > button[kind="primary"], .stButton > button[kind="primary"] *,
+.stDownloadButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] *,
+.stTabs [aria-selected="true"], .stTabs [aria-selected="true"] *,
+[data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primary"] * {
+    color: var(--brand-fg) !important;
+    -webkit-text-fill-color: var(--brand-fg) !important;
+}
+[data-testid="stBaseButton-primary"] {
+    background: var(--brand-grad) !important;
+    border: 1px solid rgba(255,255,255,.38) !important;
+}
+
+/* ---------- 按钮禁用态：两种主题都要看得出"不能点" ---------- */
+.stButton > button:disabled, .stDownloadButton > button:disabled,
+[data-testid="stBaseButton-secondary"]:disabled {
+    color: var(--btn-dis-fg) !important;
+    border-color: var(--field-bd) !important;
+    background: var(--field-dis-bg) !important;
+    opacity: 1 !important; cursor: not-allowed !important;
+    transform: none !important; box-shadow: none !important;
+}
+.stButton > button:focus-visible,
+.stDownloadButton > button:focus-visible {
+    outline: none !important;
+    box-shadow: 0 0 0 4px var(--focus-ring) !important;
+}
+.stTextArea textarea:disabled, .stTextInput input:disabled {
+    color: var(--field-dis-fg) !important;
+    background: var(--field-dis-bg) !important;
+    -webkit-text-fill-color: var(--field-dis-fg) !important;
+}
+
+/* ---------- 图片：深色下压一点亮度，避免截图白块刺眼 ---------- */
+.stApp [data-testid="stImage"] img, .stApp [data-testid="stImageContainer"] img {
+    filter: brightness(var(--img-brightness));
+    transition: filter .2s ease;
+}
+</style>
+"""
+
+_CSS_DARK_ONLY = """
+<style>
+/* ---------- 只有深色模式才需要的一段 ---------- */
+
+/* 数据表是 canvas（glide-data-grid），CSS 变量管不到它内部绘制色。
+   这里只对 canvas 元素本身做一次“反向 + 补色”，把它从浅色纸片翻成深色；
+   不做全局 invert，页面其它元素一律走变量。 */
+[data-testid="stDataFrame"] canvas,
+[data-testid="stDataEditor"] canvas {
+    filter: invert(1) hue-rotate(180deg);
+}
+/* canvas 里的滚动条/边框在翻转后需要重新对齐容器 */
+[data-testid="stDataFrame"] [data-testid="stDataFrameResizable"] { background: var(--grid-bg); }
+
+/* 深色下阴影要看不出"浮起白边"，把浅色高光去掉 */
+.hero-badge { border-color: rgba(255,255,255,.34) !important; }
 </style>
 """
 
@@ -3431,29 +3932,79 @@ def _is_dark() -> bool:
     return st.session_state.get("ui_theme", THEME_LIGHT) == THEME_DARK
 
 
+def _system_prefers_dark() -> bool:
+    """浏览器 / 系统是否偏好深色。取不到就当作浅色。"""
+    try:
+        theme = st.context.theme
+        kind = theme.get("type") if hasattr(theme, "get") else getattr(theme, "type", None)
+        return str(kind).lower() == "dark"
+    except Exception:  # noqa: BLE001 - 老版本 / 无前端上下文
+        return False
+
+
+def _initial_theme() -> str:
+    """
+    首次进入时用哪个主题，优先级：URL 参数 > 系统偏好 > 浅色。
+
+    用 URL 参数（?theme=dark）而不是 localStorage 存偏好，是因为它能在
+    服务端渲染第一帧之前就读到——刷新时不会先闪一下浅色再跳成深色。
+    """
+    try:
+        raw = st.query_params.get("theme")
+    except Exception:  # noqa: BLE001
+        raw = None
+    if raw in ("dark", "light"):
+        return THEME_DARK if raw == "dark" else THEME_LIGHT
+    return THEME_DARK if _system_prefers_dark() else THEME_LIGHT
+
+
+def _remember_theme(theme: str) -> None:
+    """把选择写回 URL，刷新 / 分享链接都能保持同一套配色。"""
+    try:
+        if theme == THEME_DARK:
+            st.query_params["theme"] = "dark"
+        else:
+            st.query_params["theme"] = "light"
+        st.session_state.ui_theme_pick = theme
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _css_tokens() -> str:
     """
-    把当前主题的调色板写成 CSS 变量，并顺带缩放根字号。
+    把当前主题的调色板写成 CSS 变量，并顺带缩放跟字号。
 
     字号的做法：`html { font-size }` 直接改变 rem 基准，Streamlit 自带的组件
     （按钮、标签、说明文字都是 rem）会等比放大；自有样式也统一用 rem 书写，
     因此一处改动就能让整个界面在「小 / 标准 / 大 / 特大」之间平滑切换。
+
+    `color-scheme` 一并切换：它决定浏览器原生滚动条、日期选择器、自动填充、
+    表单控件这些"CSS 管不到"的部分用亮色还是暗色皮肤。
     """
-    tokens = _TOKENS_DARK if _is_dark() else _TOKENS_LIGHT
+    dark = _is_dark()
+    tokens = _TOKENS_DARK if dark else _TOKENS_LIGHT
     scale = FONT_SCALES.get(st.session_state.get("ui_font", FONT_NORMAL), 1.0)
     body = "".join(f"--{k}:{v};" for k, v in tokens.items())
+    scheme = "dark" if dark else "light"
     return (
         "<style>:root{" + body
         + f"--fs:{scale};font-size:calc(16px * {scale});"
-        + "}</style>"
+        + f"color-scheme:{scheme};"
+        # 首帧底色：避免页面从浏览器默认白底闪到深色
+        + f"background:var(--body-bg);"
+        + "}html,body{background:var(--body-bg);}"
+        + "</style>"
     )
 
 
 def _inject_css() -> None:
+    """注入顺序：令牌 → 业务样式 → 原生组件补丁 → 深色专属补丁。"""
     st.markdown(_css_tokens(), unsafe_allow_html=True)
     st.markdown(_CSS, unsafe_allow_html=True)
+    st.markdown(_CSS_WIDGETS, unsafe_allow_html=True)
     if _is_dark():
-        st.markdown(_CSS_DARK_EXTRA, unsafe_allow_html=True)
+        st.markdown(_CSS_DARK_ONLY, unsafe_allow_html=True)
+
 
 
 def _html(html: str) -> None:
@@ -3464,6 +4015,17 @@ def _html(html: str) -> None:
     任何来自用户的内容都必须经过 html.escape 后才能传入。
     """
     st.markdown(html, unsafe_allow_html=True)
+
+
+def _token(name: str) -> str:
+    """
+    取当前主题的设计令牌值。
+
+    给 pandas Styler / canvas 这类"只吃字面量颜色、不认 CSS 变量"的地方用；
+    能写 CSS 的地方一律直接写 var(--令牌名)，不要走这里。
+    """
+    tokens = _TOKENS_DARK if _is_dark() else _TOKENS_LIGHT
+    return tokens.get(name, "")
 
 
 def _chip(text: str, kind: str = "info") -> str:
@@ -3497,7 +4059,7 @@ def init_state() -> None:
         "clear_origin": "",           # 确认条归属：ingest / table / sidebar
         "uploader_nonce": 0,          # 换 key 用：清空时把已选图片一并丢弃
         # --- 外观偏好（全部只存内存，不落盘） ---
-        "ui_theme": THEME_LIGHT,      # 浅色 / 深色
+        "ui_theme": _initial_theme(),   # 浅色 / 深色（URL 参数 > 系统偏好 > 浅色）
         "ui_font": FONT_NORMAL,       # 小 / 标准 / 大 / 特大
         "settings_open": False,       # 侧边栏设置面板是否展开
         "use_ai": True,               # 是否优先调用大模型
@@ -3845,6 +4407,7 @@ def _cb_theme_pick() -> None:
     这次 rerun 用的还是旧主题，用户会觉得「点了没反应，要再点一下」。
     """
     st.session_state.ui_theme = st.session_state.ui_theme_pick
+    _remember_theme(st.session_state.ui_theme)
 
 
 def _cb_font_pick() -> None:
@@ -4269,12 +4832,18 @@ def _style_events(df: pd.DataFrame, events: list[Event]) -> Any:
     """
     status_map = {ev.uid: ev.status for ev in events}
 
+    # 注意：data_editor 是 canvas，颜色由 JS 绘制，CSS 变量管不到这里，
+    # 只能喂字面量。深色模式下这张表由 canvas 滤镜整体翻转，所以这里
+    # 仍然给"浅色主题的值"，翻转后正好得到深色底 + 浅色字。
+    bad_bg, bad_fg = _token("row-bad-bg"), _token("row-bad-fg")
+    warn_bg, warn_fg = _token("row-warn-bg"), _token("row-warn-fg")
+
     def _row_css(row: pd.Series) -> list[str]:
         status = status_map.get(str(row.get("uid")), "")
         if status.startswith("🔴"):
-            return ["background-color: #FFEEF1; color: #B02A44"] * len(row)
+            return [f"background-color: {bad_bg}; color: {bad_fg}"] * len(row)
         if status.startswith("⚠️"):
-            return ["background-color: #FFF9E8; color: #A26510"] * len(row)
+            return [f"background-color: {warn_bg}; color: {warn_fg}"] * len(row)
         return [""] * len(row)
 
     return df.style.apply(_row_css, axis=1)
@@ -4763,7 +5332,7 @@ def _render_calendar() -> None:
             )
             tail = (
                 '<div style="font-size:.75rem;color:var(--muted);margin-top:12px;'
-                'padding-top:10px;border-top:1px dashed rgba(160,91,232,.22);">'
+                'padding-top:10px;border-top:1px dashed var(--line);">'
                 f'本月共 <b>{month_total}</b> 项安排　·　'
                 f'循环日程 {sum(1 for e in st.session_state.events if e.is_recurring)} 条'
                 '</div>'
@@ -4951,7 +5520,7 @@ def _render_week_view(events: list[Event]) -> None:
     for i, (col, day) in enumerate(zip(cols, days)):
         with col:
             is_today = day.date() == datetime.now().date()
-            color = "#D8377A" if is_today else "#9A93AB"
+            color = "var(--accent)" if is_today else "var(--cal-day-muted)"
             st.markdown(
                 f'<div style="text-align:center;font-size:.6875rem;font-weight:700;color:{color};">'
                 f'{day:%m/%d}<br>周{weekday_cn[day.weekday()]}</div>',
@@ -4966,9 +5535,12 @@ def _render_week_view(events: list[Event]) -> None:
                 )
                 continue
             for ev in sorted(day_events, key=lambda e: e.start)[:6]:
-                bg = ("rgba(255,238,240,.9)" if ev.conflict
-                      else ("rgba(255,249,232,.9)" if ev.vague else "rgba(240,238,255,.9)"))
-                fg = "#B02A44" if ev.conflict else ("#A26510" if ev.vague else "#4B3A8E")
+                if ev.conflict:
+                    bg, fg = "var(--cal-bad-bg)", "var(--bad-strong)"
+                elif ev.vague:
+                    bg, fg = "var(--cal-vague-bg)", "var(--warn-strong)"
+                else:
+                    bg, fg = "var(--chip-info-bg)", "var(--chip-info-fg)"
                 st.markdown(
                     f'<div style="background:{bg};color:{fg};border-radius:8px;'
                     f'padding:6px 7px;margin-bottom:5px;font-size:.6875rem;line-height:1.35;">'

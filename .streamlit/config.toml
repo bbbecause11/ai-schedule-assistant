@@ -6,7 +6,7 @@
 
 [theme]
 base = "light"
-primaryColor = "#EE5A92"          # 主色：ins 玫粉，与页面内 CSS 渐变同源
+primaryColor = "#C02A66"          # 主色：深玫红，与页面内 --brand-2 同源（白字对比 5.6:1）
 backgroundColor = "#FFFAFC"
 secondaryBackgroundColor = "#F7F4FF"
 textColor = "#2E2A3B"
