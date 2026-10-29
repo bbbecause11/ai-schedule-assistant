@@ -5,6 +5,13 @@
 
 面向**大学生 AI 创新比赛**的参赛作品，基于 Streamlit 构建，单文件应用，可本地一键运行。
 
+**仓库地址**：<https://github.com/bbbecause11/ai-schedule-assistant>（私有）
+
+| 访问方式 | 地址 | 说明 |
+| --- | --- | --- |
+| 本地运行 | <http://localhost:8502> | `streamlit run app.py --server.port 8502`（8501 已被本机其他项目占用） |
+| 云端部署 | 见「部署 → 方案 B」 | Streamlit Community Cloud，可生成公网分享链接 |
+
 ---
 
 ## ✨ 核心能力
@@ -273,19 +280,43 @@ app.py  (单文件，约 2600 行，分 19 个逻辑区块)
 
 ### 方案 B：Streamlit Community Cloud（免费，可分享链接）
 
-1. 把项目推送到 GitHub 公开仓库（**确认没有提交密钥**）。
-2. 访问 <https://share.streamlit.io> → `New app` → 选择仓库 → Main file 填 `app.py` → `Deploy`。
-3. 在 `Settings` → `Secrets` 中填入（TOML 格式）：
+**代码已托管在**：<https://github.com/bbbecause11/ai-schedule-assistant>（私有仓库）
+
+部署步骤：
+
+1. 打开 <https://share.streamlit.io>，用 GitHub 账号 `bbbecause11` 登录。
+2. 首次使用需点 **Authorize Streamlit**，授予它读取你仓库的权限
+   （私有仓库必须授权，否则列表里看不到）。
+3. 点 `Create app` → 选择 `Deploy a public app from GitHub`，
+   然后按下表填写：
+
+   | 字段 | 填写内容 |
+   | --- | --- |
+   | Repository | `bbbecause11/ai-schedule-assistant` |
+   | Branch | `main` |
+   | Main file path | `app.py` |
+   | App URL | 自定义子域名，如 `ai-schedule-xxxx` |
+   | Python version（Advanced settings） | **3.13** |
+
+4. 点 `Deploy`，等待 3~6 分钟构建（首次要装 OCR 依赖，较慢）。
+5. 构建完成后在 `Settings` → `Secrets` 粘贴以下内容并保存：
 
    ```toml
    AI_API_KEY = "sk-你的密钥"
    AI_BASE_URL = "https://api.deepseek.com/v1"
    AI_MODEL = "deepseek-chat"
+   AI_TIMEOUT = 60
    ```
 
-4. 保存后应用会自动重启，侧边栏应显示「已连接」。
+6. 保存后应用自动重启，侧边栏显示「已连接」即配置成功。
+   **不填 Secrets 也能用**，此时走本地规则引擎，只是不启用大模型增强。
 
-> Streamlit Cloud 免费实例内存有限，首次加载 OCR 模型可能较慢（约 20~40 秒），属正常现象。
+> **几个云端专属注意点**
+>
+> - `packages.txt` 已声明 `libgl1`、`libglib2.0-0`，解决云端 OpenCV 缺少系统库报错，无需改动。
+> - 免费实例内存约 1GB，且**闲置会休眠**，休眠后首次唤醒要 30 秒左右。比赛演示前先访问一次唤醒它。
+> - 免费实例首次加载 OCR 模型需 20~40 秒，属正常现象。
+> - 云端是**公共实例**，页面内存中的数据不跨用户共享，符合本项目「不落库」的设计。
 
 ### 方案 C：Docker（可选）
 
