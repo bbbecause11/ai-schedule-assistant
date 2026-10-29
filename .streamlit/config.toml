@@ -1,0 +1,28 @@
+# ===========================================================================
+# Streamlit 运行配置（本地与 Streamlit Community Cloud 通用）
+# 该文件不含任何密钥，可安全提交到仓库。
+# 密钥请写在 .streamlit/secrets.toml（本地）或云端 Secrets 面板，切勿写入本文件。
+# ===========================================================================
+
+[theme]
+base = "light"
+primaryColor = "#4F46E5"          # 主色：靛蓝，与页面内 CSS 保持一致
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8FAFC"
+textColor = "#1F2937"
+font = "sans serif"
+
+[server]
+# 单张图片上限 10MB，这里放宽到 30MB 以留出余量（应用内部仍会做二次校验）
+maxUploadSize = 30
+# 云端部署必须开启；本地开启也能避免自动弹浏览器
+headless = true
+# 长文本 + OCR 可能耗时较久，放宽到 300 秒，避免云端网关提前断开
+enableStaticServing = false
+
+[browser]
+gatherUsageStats = false          # 关闭匿名统计，符合隐私合规要求
+
+[client]
+showErrorDetails = true           # 出错时显示详细堆栈，便于比赛现场排查
+toolbarMode = "minimal"           # 隐藏右上角编辑按钮，演示画面更干净

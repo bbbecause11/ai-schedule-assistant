@@ -1,0 +1,23 @@
+# AI 智能日程收纳 & 日历导入工具 —— 依赖清单
+# 安装：pip install -r requirements.txt
+# 说明：OCR 引擎已列为主依赖，保证 clone 后一条命令即可完整运行。
+
+streamlit>=1.32,<2.0
+pandas>=2.0.0
+numpy>=1.24.0
+requests>=2.31.0
+pillow>=10.0.0
+
+# ---------------------------------------------------------------
+# 本地 OCR 引擎（纯 pip 安装，内置中文模型，无需系统级 Tesseract）
+#
+# 注意：旧包 rapidocr-onnxruntime 仅支持 Python < 3.13（自身依赖 onnxruntime）；
+#       3.13 及以上改用官方后继包 rapidocr，需**额外显式安装 onnxruntime**，
+#       否则运行时才会报 "onnxruntime is not installed"。
+#       若两者都装不上，应用仍可正常运行，仅图片识别不可用，
+#       侧边栏会给出明确提示，文本解析完全不受影响。
+# ---------------------------------------------------------------
+rapidocr-onnxruntime>=1.3.24; python_version < "3.13"
+rapidocr>=3.0.0; python_version >= "3.13"
+onnxruntime>=1.20.0; python_version >= "3.13"
+

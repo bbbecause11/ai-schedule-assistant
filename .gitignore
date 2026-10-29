@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+
+# 敏感配置：绝对不要提交
+.env
+.env.local
+.streamlit/secrets.toml
+
+# 导出产物
+*.ics
+*.csv
+*.md.bak
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 本地工具链数据（非项目代码，不上传）
+.workbuddy/
+__pycache__/
+
+# 注意：以下文件必须提交，不要加进忽略列表
+#   .streamlit/config.toml   —— 主题与运行参数（无密钥）
+#   .streamlit/secrets.toml.example —— 密钥填写模板（无真实密钥）
+#   packages.txt             —— 云端 apt 依赖
