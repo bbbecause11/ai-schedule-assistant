@@ -66,7 +66,9 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #          南航教务（教学班噪声字段）；27 张合成变体 + 5 张真实图，错误率 1.53%
 #   2.2.0  学期起始周：侧边栏选开学第一周任意一天自动对齐周一，
 #          显示第 1 周区间与当前教学周数，日历逐日标注教学第 N 周
-APP_VERSION = "2.2.0"
+#   2.2.1  手机端 UI：日历 7 列在窄屏强制横排（Streamlit 会纵向堆叠列），
+#          日历格/标题紧凑化，隐藏 Fork 工具栏与状态角标；桌面端零影响
+APP_VERSION = "2.2.1"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -5411,6 +5413,28 @@ _CSS = """
 }
 .st-key-cal_grid [data-testid^="stBaseButton"]:hover { filter: brightness(1.06); }
 
+/* 手机端日历：Streamlit 窄屏下会把 st.columns 纵向堆叠，日历会被拆成
+   一条长竖列。这里只把「方向」钉死为横向——桌面端本来就是横排，
+   规则等于没起作用；列宽均分与间距收紧只写在 640px 媒体查询里，
+   桌面端的间距、列宽一概不动。 */
+.st-key-cal_grid [data-testid="stHorizontalBlock"] {
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+}
+@media (max-width: 640px) {
+    .st-key-cal_grid [data-testid="stHorizontalBlock"] { gap: .2rem !important; }
+    .st-key-cal_grid [data-testid="stColumn"] {
+        flex: 1 1 0 !important;
+        min-width: 0 !important;
+        width: auto !important;
+        padding: 0 !important;
+    }
+    .st-key-cal_grid [data-testid="stVerticalBlock"] { gap: .25rem !important; }
+    .st-key-cal_grid [data-testid="stVerticalBlockBorderWrapper"] {
+        padding: .7rem .7rem .8rem !important;
+    }
+}
+
 /* ---------- 8. 免责声明与页脚 ---------- */
 .disclaimer {
     margin-top: var(--space-7);
@@ -5674,6 +5698,29 @@ _CSS = """
     .section-title { font-size: 1.125rem; margin: var(--space-5) 0 var(--space-3); }
     .cal-side { padding: var(--space-4); }
     .disclaimer { padding: var(--space-4); }
+    /* --- 手机端日历页 --- */
+    .cal-title { line-height: 1.5; }
+    .cal-title span { display: none; }          /* 副标题挤，隐藏 */
+    .st-key-cal_grid [data-testid="stBaseButton-secondary"],
+    .st-key-cal_grid [data-testid="stBaseButton-primary"] {
+        min-height: 2.05rem;
+        height: 2.05rem;
+        font-size: .7rem !important;
+        border-radius: .5rem !important;
+    }
+    /* 桌面「月历 | 当日安排」双栏在手机上纵向堆叠后，日历先出、右侧
+       当日安排跟着往下，天然可用；这里只压掉多余空隙 */
+    [data-testid="stVerticalBlock"] > [data-testid="stVerticalBlockBorderWrapper"] {
+        margin-top: 0 !important;
+    }
+    /* 隐藏 Streamlit 自带的 Fork/工具栏与右下角状态角标，手机上没用 */
+    [data-testid="stToolbar"], [data-testid="stStatusWidget"] {
+        display: none !important;
+    }
+    /* 顶栏压薄，给内容多留一行高度 */
+    header[data-testid="stHeader"] { height: 2.6rem; }
+    /* 侧边栏折叠按钮不要贴住状态栏 */
+    [data-testid="stSidebarCollapsedControl"] { top: .4rem !important; }
 }
 </style>
 """
