@@ -74,7 +74,9 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #          stExpandSidebarButton（收起侧边栏后唯一能再打开的按钮）。
 #          改为只隐藏工具栏杂项按钮，并把展开按钮做成左上角圆形悬浮钮；
 #          手机端侧边栏改 fixed 浮层 + 遮罩，主内容恢复全宽
-APP_VERSION = "2.2.3"
+#   2.2.4  恢复手机端侧边栏毛玻璃：v2.2.3 误用实色 body-bg 覆盖了
+#          半透明底，backdrop-filter 无背景可模糊导致玻璃感消失
+APP_VERSION = "2.2.4"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -5773,10 +5775,14 @@ _CSS = """
     header[data-testid="stHeader"] { height: 2.6rem; }
     /* 侧边栏折叠按钮不要贴住状态栏 */
     [data-testid="stSidebarCollapsedControl"] { top: .4rem !important; }
-    /* 手机端侧边栏是覆盖在内容之上的浮层，桌面端的半透明底会让主内容
-       透出来显得杂乱，这里换成实色 */
+    /* 手机端侧边栏是覆盖在内容之上的浮层。这里必须保留毛玻璃：
+       底色一旦改成不透明（body-bg），backdrop-filter 就没有可模糊的
+       背景，玻璃感会彻底消失。底色沿用桌面端的半透明 --sidebar-bg，
+       模糊强度略加强，浮在内容之上时文字依然清晰。 */
     [data-testid="stSidebar"] {
-        background: var(--body-bg) !important;
+        background: var(--sidebar-bg) !important;
+        backdrop-filter: blur(28px) saturate(180%) !important;
+        -webkit-backdrop-filter: blur(28px) saturate(180%) !important;
         box-shadow: var(--drawer-shadow);
     }
     /* Streamlit 移动端侧边栏是 position:relative 的 flex 子项，会占掉
