@@ -70,7 +70,11 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #          日历格/标题紧凑化，隐藏 Fork 工具栏与状态角标；桌面端零影响
 #   2.2.2  选中态胶囊底部横线修复：Streamlit 1.66 的 react-aria
 #          SelectionIndicator 未被隐藏，改为柔和外发光 + 按下轻微缩放
-APP_VERSION = "2.2.2"
+#   2.2.3  修复手机端侧边栏消失：v2.2.1 隐藏 stToolbar 时连带隐藏了
+#          stExpandSidebarButton（收起侧边栏后唯一能再打开的按钮）。
+#          改为只隐藏工具栏杂项按钮，并把展开按钮做成左上角圆形悬浮钮；
+#          手机端侧边栏改 fixed 浮层 + 遮罩，主内容恢复全宽
+APP_VERSION = "2.2.3"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -5733,14 +5737,82 @@ _CSS = """
     [data-testid="stVerticalBlock"] > [data-testid="stVerticalBlockBorderWrapper"] {
         margin-top: 0 !important;
     }
-    /* 隐藏 Streamlit 自带的 Fork/工具栏与右下角状态角标，手机上没用 */
-    [data-testid="stToolbar"], [data-testid="stStatusWidget"] {
+    /* 只隐藏右下角状态角标（手机没用）。
+       注意：Streamlit 1.66 的「展开侧边栏」按钮 stExpandSidebarButton
+       就挂在 stToolbar 内部，整块隐藏工具栏会连带把它干掉，
+       收起侧边栏后就再也打不开了（0×0 不可见）。所以工具栏只隐藏
+       Fork / Deploy / Rerun 这类杂项按钮，保留展开侧边栏。 */
+    [data-testid="stStatusWidget"] { display: none !important; }
+    [data-testid="stToolbar"] button:not([data-testid="stExpandSidebarButton"]) {
         display: none !important;
+    }
+    /* 展开侧边栏按钮：手机端做成左上角固定的圆形悬浮按钮，
+       收起侧边栏后依然一眼可见、一点就开 */
+    [data-testid="stExpandSidebarButton"] {
+        position: fixed !important;
+        top: .55rem;
+        left: .55rem;
+        z-index: 999995;
+        width: 2.35rem;
+        height: 2.35rem;
+        min-width: 2.35rem;
+        padding: 0 !important;
+        border-radius: 50%;
+        background: var(--surface-1);
+        border: 1px solid var(--line);
+        box-shadow: 0 2px 10px var(--card-shadow);
+        color: var(--ink) !important;
+        justify-content: center;
+        align-items: center;
+    }
+    [data-testid="stExpandSidebarButton"] svg {
+        width: 1.15rem;
+        height: 1.15rem;
     }
     /* 顶栏压薄，给内容多留一行高度 */
     header[data-testid="stHeader"] { height: 2.6rem; }
     /* 侧边栏折叠按钮不要贴住状态栏 */
     [data-testid="stSidebarCollapsedControl"] { top: .4rem !important; }
+    /* 手机端侧边栏是覆盖在内容之上的浮层，桌面端的半透明底会让主内容
+       透出来显得杂乱，这里换成实色 */
+    [data-testid="stSidebar"] {
+        background: var(--body-bg) !important;
+        box-shadow: var(--drawer-shadow);
+    }
+    /* Streamlit 移动端侧边栏是 position:relative 的 flex 子项，会占掉
+       300px 把主内容挤成一条窄缝。这里改成 fixed 浮层，主内容恢复全宽，
+       侧边栏盖在上面（宽度自适应，不超屏）。 */
+    [data-testid="stSidebar"] {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        height: 100dvh !important;
+        max-height: 100dvh !important;
+        z-index: 999992 !important;
+        box-sizing: border-box;
+    }
+    /* 侧边栏浮起时给主区域压一层暗色遮罩，视觉上区分前后层级。
+       遮罩不拦截点击：Streamlit 没有「外部点击收起侧边栏」的 API，
+       拦住点击会让主区域点不动；关闭入口是侧边栏右上角的 « 按钮。 */
+    main[data-testid="stMain"]::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background: var(--scrim);
+        z-index: 999990;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity .22s var(--ease-out);
+    }
+    .stApp:has([data-testid="stSidebar"][data-collapsed="false"])
+        main[data-testid="stMain"]::after {
+        opacity: 1;
+    }
+    /* 侧边栏右上角的折叠按钮在浮层上要够醒目 */
+    [data-testid="stSidebarCollapseButton"] {
+        position: relative;
+        z-index: 2;
+    }
 }
 </style>
 """
@@ -5850,6 +5922,9 @@ _TOKENS_LIGHT = {
     "card-shadow": "0 1px 2px rgba(0,0,0,.04), 0 6px 20px rgba(0,0,0,.045)",
     "card-shadow-lg": "0 1px 2px rgba(0,0,0,.04), 0 14px 36px rgba(0,0,0,.07)",
     "hero-shadow": "0 14px 36px rgba(140,25,75,.20)",
+    # 手机端侧边栏浮层：投影 + 遮罩
+    "drawer-shadow": "6px 0 24px rgba(0,0,0,.16)",
+    "scrim": "rgba(0,0,0,.28)",
 
     # ---------- 表单控件 ----------
     "input-bg": "#FFFFFF",
@@ -6009,6 +6084,9 @@ _TOKENS_DARK = {
     "card-shadow": "0 1px 2px rgba(0,0,0,.5)",
     "card-shadow-lg": "0 12px 32px rgba(0,0,0,.5)",
     "hero-shadow": "0 14px 36px rgba(0,0,0,.55)",
+    # 手机端侧边栏浮层：投影 + 遮罩
+    "drawer-shadow": "6px 0 24px rgba(0,0,0,.45)",
+    "scrim": "rgba(0,0,0,.55)",
 
     # ---------- 表单控件 ----------
     "input-bg": "rgba(255,255,255,.06)",
