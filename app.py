@@ -68,7 +68,9 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #          显示第 1 周区间与当前教学周数，日历逐日标注教学第 N 周
 #   2.2.1  手机端 UI：日历 7 列在窄屏强制横排（Streamlit 会纵向堆叠列），
 #          日历格/标题紧凑化，隐藏 Fork 工具栏与状态角标；桌面端零影响
-APP_VERSION = "2.2.1"
+#   2.2.2  选中态胶囊底部横线修复：Streamlit 1.66 的 react-aria
+#          SelectionIndicator 未被隐藏，改为柔和外发光 + 按下轻微缩放
+APP_VERSION = "2.2.2"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -5528,6 +5530,11 @@ _CSS = """
     filter: brightness(1.06);
     box-shadow: 0 2px 10px var(--brand-glow-hover);
 }
+/* 按下：轻微缩放 + 压一点亮度，克制的触感反馈（不用位移、不加硬边） */
+[data-testid="stBaseButton-primary"]:active {
+    transform: scale(.98);
+    filter: brightness(.97);
+}
 
 /* 主按钮 / 选中 Tab 内部的 markdown 段落会被 `.stApp p` 的正文色带走，
    必须把整棵子树钉成品牌前景色，否则浅色主题下是"深字压粉底"。 */
@@ -5612,9 +5619,22 @@ _CSS = """
     background: var(--brand-grad) !important;
     border-color: transparent !important;
     font-weight: 600;
-    box-shadow: 0 1px 2px var(--brand-glow);
+    /* 选中态的立体感交给一层柔和均匀的外发光，不要硬边阴影 */
+    box-shadow: 0 2px 12px var(--brand-glow);
+    transition: transform var(--dur-fast) var(--ease-out),
+                box-shadow var(--dur-fast) var(--ease-out),
+                filter var(--dur-fast) var(--ease-out);
 }
+/* 按下时轻微缩放 + 压一点亮度，比一条硬邦邦的横线更有手感 */
+.stTabs [aria-selected="true"]:active {
+    transform: scale(.985);
+    filter: brightness(.97);
+}
+/* Streamlit 1.66 的 react-aria 选中指示条：旧版是 [data-baseweb="tab-highlight"]，
+   新版换成 .react-aria-SelectionIndicator（2px 高的实色条，正好贴在胶囊下方），
+   不藏掉就会在按钮底部留下一道突兀的横线。两种实现一起盖。 */
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"],
+.stTabs [class*="SelectionIndicator"],
 .stTabs [role="tablist"] > div:not([role="tab"]),
 .stTabs [role="tablist"]::after { display: none !important; }
 
