@@ -76,7 +76,11 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #          手机端侧边栏改 fixed 浮层 + 遮罩，主内容恢复全宽
 #   2.2.4  恢复手机端侧边栏毛玻璃：v2.2.3 误用实色 body-bg 覆盖了
 #          半透明底，backdrop-filter 无背景可模糊导致玻璃感消失
-APP_VERSION = "2.2.4"
+#   2.3.0  全站换用思源黑体（Source Han Sans / Noto Sans SC，SIL OFL）：
+#          系统字体子集化 → 静态字重实例化 → unicode-range 分 18 片，
+#          浏览器按需加载（首屏仅 hot 片 ~190KB）；
+#          字体栈末尾挂 emoji 字体链，图标保持彩色
+APP_VERSION = "2.3.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -5078,6 +5082,20 @@ _CSS = """
    ========================================================================== */
 
 /* ---------- 1. 基础排版 ---------- */
+/* 字体：全站思源黑体（见 _font_face_css 注入的 @font-face）。
+   Streamlit 自带组件（按钮/输入框/表格）默认走主题字体，这里统一覆盖。
+   emoji 由字体栈里的 emoji 字体按字符回退接手（CSS 逐字符匹配），
+   所以图标保持彩色；Streamlit 的 Material 图标则单独排除。 */
+.stApp, .stApp *:not(.stApp [data-testid="stIconMaterial"]) {
+    font-family: var(--font-sans);
+}
+/* Streamlit 的 Material 图标保持原样 */
+.stApp [data-testid="stIconMaterial"],
+.stApp .material-icons,
+.stApp .material-symbols-outlined {
+    font-family: "Material Symbols Rounded", "Material Icons", "Material Icons Outlined",
+                 "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif !important;
+}
 .stApp {
     background: var(--app-bg);
     background-attachment: fixed;
@@ -5841,11 +5859,17 @@ FONT_SCALES = {FONT_SMALL: 0.92, FONT_NORMAL: 1.0, FONT_LARGE: 1.08, FONT_HUGE: 
 
 _TOKENS_COMMON = {
     # ---------- 字体 ----------
-    # 只用系统字体，不打包任何专有字体；中文单独列一组回退
-    "font-sans": ("-apple-system, BlinkMacSystemFont, \"SF Pro Display\", \"SF Pro Text\", "
-                  "\"Segoe UI\", Roboto, \"Helvetica Neue\", \"PingFang SC\", "
-                  "\"Hiragino Sans GB\", \"Microsoft YaHei\", \"Source Han Sans SC\", "
-                  "Arial, sans-serif"),
+    # 全站首选思源黑体：应用内嵌子集（_font_face_css 注入 @font-face），
+    # 中文、拉丁、数字统一字形，跨平台观感一致。
+    # 系统字体放在后面做兜底：字体文件未就绪 / 生僻字未命中分片时接管。
+    "font-sans": ("\"Source Han Sans SC\", \"Noto Sans SC\", \"Noto Sans CJK SC\", "
+                  "-apple-system, BlinkMacSystemFont, \"SF Pro Display\", "
+                  "\"SF Pro Text\", \"Segoe UI\", Roboto, \"Helvetica Neue\", "
+                  "\"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", "
+                  # emoji 字体放在最后：思源黑体不含彩色 emoji 字形，
+                  # 浏览器按字符回退到这里，图标才保持彩色而非黑白轮廓。
+                  "\"Apple Color Emoji\", \"Segoe UI Emoji\", \"Noto Color Emoji\", "
+                  "\"Twemoji Mozilla\", Arial, sans-serif"),
     "font-mono": ("ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, "
                   "\"Liberation Mono\", monospace"),
     # ---------- 字号阶梯（7 级，够用且不打架） ----------
@@ -6643,9 +6667,55 @@ def _css_tokens() -> str:
     )
 
 
+def _font_face_css() -> str:
+    """
+    生成思源黑体的 @font-face 声明。
+
+    字体来自系统里的 Noto Sans SC 可变字体（SIL OFL 授权），
+    由 .workbuddy/build_font.py 子集化后切成多片放在 static/fonts/，
+    配合 server.enableStaticServing=true 以 /app/static/... 托管。
+
+    分片用 unicode-range 声明：浏览器只下载页面上真正用到的片，
+    生僻字片几乎不会触发，首屏只拉 hot 片（约 190KB）。
+
+    manifest 缺失时静默降级为系统字体栈，不影响功能。
+    """
+    import json
+    import os
+
+    manifest = os.path.join(os.path.dirname(__file__), "static", "fonts",
+                            "manifest.json")
+    try:
+        with open(manifest, encoding="utf-8") as fh:
+            faces = json.load(fh)
+    except Exception:                     # noqa: BLE001
+        return ""
+    if not faces:
+        return ""
+    parts: list[str] = []
+    for f in faces:
+        url = f.get("file", "")
+        family = f.get("family", "Source Han Sans SC")
+        weight = f.get("weight", "400")
+        style = f.get("style", "normal")
+        rng = f.get("unicodeRange", "")
+        parts.append(
+            "@font-face{"
+            f"font-family:'{family}';"
+            f"src:url('{url}') format('woff2');"
+            f"font-weight:{weight};"
+            f"font-style:{style};"
+            f"font-display:swap;"
+            + (f"unicode-range:{rng};" if rng else "")
+            + "}"
+        )
+    return "<style>" + "".join(parts) + "</style>"
+
+
 def _inject_css() -> None:
     """注入顺序：令牌 → 业务样式 → 原生组件补丁 → 深色专属补丁。"""
     st.markdown(_css_tokens(), unsafe_allow_html=True)
+    st.markdown(_font_face_css(), unsafe_allow_html=True)
     st.markdown(_CSS, unsafe_allow_html=True)
     st.markdown(_CSS_WIDGETS, unsafe_allow_html=True)
     if _is_dark():

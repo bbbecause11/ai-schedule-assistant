@@ -1,0 +1,37 @@
+思源黑体（Source Han Sans / Noto Sans SC）子集
+==============================================
+
+本目录下的 woff2 文件由系统安装的思源黑体可变字体
+（C:\Windows\Fonts\NotoSansSC-VF.ttf）子集化生成。
+
+字体版权
+--------
+思源黑体由 Adobe 资助开发，以 SIL Open Font License 1.1 授权发布。
+思源黑体 / Noto Sans CJK 是同一款字体的不同命名分支（Google 发行版本
+名为 Noto Sans SC / Noto Sans CJK SC），字形完全一致。
+
+  版权 (C) 2014-2021 Adobe (http://www.adobe.com/)，以 Noto 项目名义
+  发布。
+
+授权条款（SIL Open Font License, Version 1.1）
+--------------------------------------------
+本字体可以自由使用、复制、修改、再分发与商业使用，前提是：
+
+1. 保留本版权声明与授权声明；
+2. 若修改了字体，改名后不得使用「思源黑体 / Source Han Sans」名称；
+3. 不得单独售卖字体本身。
+
+完整授权文本见：
+  https://scripts.sil.org/OFL
+  https://github.com/adobe-fonts/source-han-sans/blob/master/LICENSE.txt
+
+子集化说明
+----------
+由本仓库的 .workbuddy/build_font.py 生成：
+  - 按 GB2312 常用字表与应用实际用字切分为多个分片；
+  - 每片通过 unicode-range 声明，浏览器只下载页面真正用到的分片；
+  - 每片含 400（Regular）与 700（Bold）两个静态字重；
+  - 源字体为可变字体（wght 100–900），子集化时实例化为静态字重。
+
+重新生成：
+  python .workbuddy/build_font.py
