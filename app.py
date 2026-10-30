@@ -80,7 +80,11 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #          系统字体子集化 → 静态字重实例化 → unicode-range 分 18 片，
 #          浏览器按需加载（首屏仅 hot 片 ~190KB）；
 #          字体栈末尾挂 emoji 字体链，图标保持彩色
-APP_VERSION = "2.3.0"
+#   2.3.1  修复 Tab 胶囊两端渐变色溢出：iOS Safari 把滚动容器内
+#          「圆角+渐变」的背景按容器坐标绘制，渐变首尾色标从圆角缺口漏出。
+#          渐变改由 inset:0 伪元素承载 + overflow:hidden 强制圆角裁剪；
+#          手机端按 UA 自动折叠侧边栏，避免浮层压住正文
+APP_VERSION = "2.3.1"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -5549,6 +5553,10 @@ _CSS = """
     color: var(--brand-fg) !important;
     font-weight: 600;
     box-shadow: 0 1px 2px var(--brand-glow);
+    /* 圆角按钮 + 渐变在 iOS Safari 的横向滚动容器里会漏色，
+       显式裁剪一次，行为与所有浏览器一致 */
+    background-clip: padding-box;
+    overflow: hidden;
 }
 [data-testid="stBaseButton-primary"]:hover {
     filter: brightness(1.06);
@@ -5633,21 +5641,54 @@ _CSS = """
     color: var(--tab-text) !important;
     background: var(--tab-bg);
     border: 1px solid var(--tab-border);
+    /* 圆角 + 背景在 iOS Safari 的横向滚动容器里会漏色，显式裁剪 */
+    background-clip: padding-box;
+    overflow: hidden;
     transition: background var(--dur-fast) var(--ease-out),
                 color var(--dur-fast) var(--ease-out);
 }
 .stTabs [data-testid="stTab"]:hover, .stTabs [data-baseweb="tab"]:hover {
     color: var(--ink) !important;
 }
+/* 选中态胶囊：渐变不能直接画在按钮上。
+   Tab 条在窄屏是 overflow-x:auto 的横向滚动容器，iOS Safari 会把容器内
+   「圆角 + 渐变 + transform」的背景按滚动容器坐标绘制，渐变的首尾色标
+   就会从圆角缺口漏到胶囊两侧（左端冒出末色蓝紫、右端冒出首色砖红）。
+   修法：按钮自身背景透明，渐变放进一个 inset:0 的伪元素 ——
+   它的绘制盒 = 按钮内盒，尺寸完全确定，再由按钮的 overflow:hidden
+   按 border-radius 强制裁剪，任何浏览器都不会再越界。 */
 .stTabs [aria-selected="true"] {
-    background: var(--brand-grad) !important;
+    background: transparent !important;
     border-color: transparent !important;
     font-weight: 600;
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
     /* 选中态的立体感交给一层柔和均匀的外发光，不要硬边阴影 */
     box-shadow: 0 2px 12px var(--brand-glow);
     transition: transform var(--dur-fast) var(--ease-out),
                 box-shadow var(--dur-fast) var(--ease-out),
                 filter var(--dur-fast) var(--ease-out);
+}
+.stTabs [aria-selected="true"]::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    background-color: var(--brand-1);
+    background-image: var(--brand-grad);
+    /* 明确写死尺寸与原点，杜绝浏览器自行推算渐变绘制盒 */
+    background-size: 100% 100%;
+    background-position: 0 0;
+    background-repeat: no-repeat;
+    background-clip: padding-box;
+    pointer-events: none;
+}
+/* 文字压在渐变之上 */
+.stTabs [aria-selected="true"] > * {
+    position: relative;
+    z-index: 1;
 }
 /* 按下时轻微缩放 + 压一点亮度，比一条硬邦邦的横线更有手感 */
 .stTabs [aria-selected="true"]:active {
@@ -8740,12 +8781,32 @@ def render_footer() -> None:
 # 19. 主入口
 # ---------------------------------------------------------------------------
 
+def _is_mobile_client() -> bool:
+    """按 User-Agent 判断是否手机 / 平板。
+
+    手机端侧边栏是覆盖在内容之上的浮层（v2.2.3 起），默认展开会挡住正文，
+    所以手机首次进入时收起来，让用户用左上角的圆形按钮按需唤出。
+    """
+    try:
+        ua = st.context.headers.get("User-Agent", "") or ""
+    except Exception:                     # noqa: BLE001
+        return False
+    ua_l = ua.lower()
+    if any(k in ua_l for k in ("iphone", "ipod", "android", "mobile")):
+        return True
+    # iPadOS 13+ 默认发桌面版 UA，但触摸设备标识在 touch-capable 里
+    if "ipad" in ua_l:
+        return True
+    return False
+
+
 def main() -> None:
     st.set_page_config(
         page_title=f"{APP_TITLE} · 日历导入工具",
         page_icon="🗂️",
         layout="wide",
-        initial_sidebar_state="expanded",
+        # 手机端侧边栏是浮层，默认展开会压住正文；桌面保持展开
+        initial_sidebar_state="collapsed" if _is_mobile_client() else "expanded",
     )
     # 先初始化会话状态，_inject_css 才能读到用户选的明暗 / 字号
     init_state()
