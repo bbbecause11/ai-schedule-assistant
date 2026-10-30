@@ -609,6 +609,79 @@ def test_timetable() -> None:
           double[0].rrule if double else "")
 
 
+def test_time_blocks() -> None:
+    section("L. 时间块归并（字段列表型截图）")
+
+    # 教务系统课程详情：一个时间节点 + 若干字段行
+    text = (
+        "2026 年 10 月 29 日 · 周四 第 44 周\n"
+        "10:45\n场地：回龙2311(多)\n校区：回龙\n教师：张伟\n"
+        "课程性质简称：必修\n选课备注：\n重修标：\n每周四 · 共 16 次\n"
+        "14:50\n职业生涯发展与规划(6-7节)\n校区：回龙\n场地：回龙1212(多)\n"
+        "课程性质简称：必修\n每周四 · 共 16 次\n"
+    )
+    events = app.parse_with_rules(text)
+    check("事件数等于时间节点数（不是字段数）", len(events) == 2, str(len(events)))
+
+    by_time = {e.start.strftime("%H:%M"): e for e in events}
+    first, second = by_time.get("10:45"), by_time.get("14:50")
+
+    check("没课名的时间块用「时间 日程」兜底",
+          bool(first) and first.title.strip() == "10:45 日程",
+          first.title if first else "缺失")
+    check("属性词没有变成标题",
+          all(b not in e.title for e in events
+              for b in ("场地", "校区", "教师", "必修", "备注", "重修标")),
+          " | ".join(e.title for e in events))
+    check("具体场地进 location", bool(first) and "回龙2311" in first.location,
+          first.location if first else "")
+    check("校区并入 location 而非覆盖", bool(second) and "回龙1212" in second.location,
+          second.location if second else "")
+    check("教师 / 课程性质进备注",
+          bool(first) and "张伟" in first.note and "必修" in first.note,
+          first.note if first else "")
+    check("「共 16 次」转成 COUNT",
+          bool(first) and "COUNT=16" in first.rrule, first.rrule if first else "")
+    check("课程名被正确选为主标题",
+          bool(second) and second.title.startswith("职业生涯发展与规划"),
+          second.title if second else "")
+    check("字段列表型日程标记为待核对",
+          all(e.vague for e in events), str([e.vague for e in events]))
+
+    # 无冒号 / 无分隔符：教务系统复制出来常丢掉分隔符
+    plain = ("2026年10月30日·周五第44周\n08:00\n高等数学(一)(上)\n"
+             "场地三江楼0802\n教师卜庆刚\n课程性质简称必修\n每周四·共16次\n")
+    ev2 = app.parse_with_rules(plain)
+    check("无冒号的字段行也能归并", len(ev2) == 1, str(len(ev2)))
+    check("无冒号时地点仍正确",
+          bool(ev2) and "三江楼0802" in ev2[0].location,
+          ev2[0].location if ev2 else "")
+
+    # 节次式时间节点
+    per = ("2026年10月29日 周四\n第1-2节\n数据结构\n场地：三江楼0401\n"
+           "教师：王强\n课程性质简称：必修\n")
+    ev3 = app.parse_with_rules(per)
+    check("「第1-2节」也能当时间节点", len(ev3) == 1, str(len(ev3)))
+    check("节次换算成钟点",
+          bool(ev3) and ev3[0].start.strftime("%H:%M") == "08:00",
+          ev3[0].start.strftime("%H:%M") if ev3 else "")
+
+    # 反例：普通备忘不能被当成字段列表合并
+    memo = "周三 下午2点 项目评审 会议室\n周四 上午9点 面试 线上"
+    check("普通两行备忘不会被合并", len(app.parse_with_rules(memo)) == 2,
+          str(len(app.parse_with_rules(memo))))
+
+    # 反例：车票识别不受影响
+    trip = app.parse_with_rules("G7045 09:56 镇江 10:27 常州 2026年10月31日")
+    check("车票仍识别为 1 条行程", len(trip) == 1, str([e.title for e in trip]))
+
+    # 反例：字段不足 2 行时不做归并（避免误伤单条日程）
+    single = "10月31日 14:00 实验室安全培训\n场地：实验楼A201"
+    check("字段不足 2 行时不触发归并",
+          len(app.parse_with_rules(single)) == 1,
+          str(len(app.parse_with_rules(single))))
+
+
 def test_theme_guard() -> None:
     section("K. 主题令牌一致性（防硬编码 / 防漏定义）")
     import re
@@ -701,7 +774,7 @@ def main() -> int:
     for fn in (test_text_only, test_time_parsing, test_structure_fields,
                test_dedup_conflict, test_export, test_recurrence,
                test_calendar_and_sample, test_ocr,
-               test_ai_layer, test_merge, test_timetable, test_security, test_theme_guard):
+               test_ai_layer, test_merge, test_timetable, test_time_blocks, test_security, test_theme_guard):
         try:
             fn()
         except Exception:  # noqa: BLE001

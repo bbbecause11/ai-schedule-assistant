@@ -55,7 +55,8 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   1.3.0  设置与外观面板、全站悬停说明、明暗双主题、四档界面字号
 #   1.4.0  课表版面重建（识别课表截图并还原成逐节日程）、图片自动放大与增强
 #   1.5.0  配色体系重构：设计令牌全覆盖、原生组件深色适配、主题持久化与系统偏好
-APP_VERSION = "1.5.0"
+#   1.6.0  时间块归并：字段列表型截图按时间节点合并，属性词不再当作日程标题
+APP_VERSION = "1.6.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -922,6 +923,325 @@ def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[
     return [ev], consumed
 
 
+# ---------------------------------------------------------------------------
+# 「时间块 + 字段列表」结构识别
+#
+# 教务系统、排班表、会议详情页都存在同一种结构：
+#
+#     10:45
+#     职业生涯发展与规划(6-7节)
+#     场地：回龙2311(多)
+#     校区：回龙
+#     教师：张伟
+#     课程性质简称：必修
+#     选课备注：
+#     重修标：
+#     每周四 · 共 16 次
+#
+# 如果按「一行一条」处理，一门课会被拆成十几个日程：场地成了标题、
+# 教师成了标题、连「必修」都能变成标题。正确做法是先按时间节点切块，
+# 把块内所有行当**同一件事的属性**，再从中挑出真正的主标题。
+# ---------------------------------------------------------------------------
+
+# 字段前缀 → 语义归属。长的优先匹配（「课程性质简称」要先于「课程性质」）。
+_FIELD_ALIASES: dict[str, str] = {
+    "上课地点": "location", "场地": "location", "地点": "location", "教室": "location",
+    "上课校区": "campus", "校区": "campus",
+    "授课教师": "teacher", "任课教师": "teacher", "主讲教师": "teacher",
+    "主讲": "teacher", "教师": "teacher", "老师": "teacher",
+    "课程性质简称": "nature", "课程性质": "nature", "课程类型": "nature", "性质": "nature",
+    "选课备注": "note", "重修标": "note", "重修": "note", "备注": "note",
+    "上课周次": "weeks", "周次": "weeks", "节次": "period", "上课时间": "time",
+    "学分": "credit", "学时": "hours", "课程号": "code", "课程代码": "code",
+    "教学班": "cls", "班级": "cls", "考核方式": "assess",
+}
+_FIELD_KEYS = "|".join(sorted(map(re.escape, _FIELD_ALIASES), key=len, reverse=True))
+# 三种写法都要认：
+#   「场地：回龙2311(多)」（冒号） / 「场地  回龙2311(多)」（空格对齐）
+#   「场地三江楼0802」（OCR 把分隔符整个吞掉）
+_FIELD_KEY_RE = re.compile(
+    rf"^\s*(?P<key>{_FIELD_KEYS})\s*(?:[:：]\s*)?(?P<val>.*\S)?\s*$")
+# 整行只有字段名（可能还留着冒号），值落在下一行
+_FIELD_BARE_RE = re.compile(rf"^\s*(?P<key>{_FIELD_KEYS})\s*[:：]?\s*$")
+
+# 时间节点的三种写法：10:45 / 10：45 / 第6-7节
+_BLOCK_TIME_RE = re.compile(r"^\s*(?P<h>\d{1,2})\s*[:：]\s*(?P<m>\d{2})(?:\s|$)")
+_BLOCK_PERIOD_RE = re.compile(r"^\s*第\s*(\d{1,2})(?:\s*[-–—~]\s*(\d{1,2}))?\s*节\s*[:：]?\s*$")
+# 「每周四 · 共 16 次」「每周 1 次」这类循环说明
+_BLOCK_RECUR_RE = re.compile(r"(每\s*[周天日]|每周|\d+\s*次\s*/?\s*周)")
+
+# 课程性质、考核方式这类"值"，单独成行时绝不是标题
+_NATURE_VALUES = {
+    "必修", "选修", "限选", "任选", "公选", "必选", "通识", "通识课",
+    "专业必修", "专业选修", "公共必修", "公共选修", "学科基础", "专业基础",
+    "考试", "考查", "闭卷", "开卷",
+}
+
+# 地点特征：楼/室/馆/场 + 紧邻的门牌号，或整串就是一个 3~4 位房号。
+# 不能只凭「含『室』字」就判定成地点——「实验室安全培训」是日程名，不是地点。
+_PLACE_RE = re.compile(
+    r"(楼|室|馆|场|中心|校区|机房|阶梯)\s*[A-Za-z]?\d"
+    r"|\d{3,4}\s*[（(]?\S*[)）]?$"
+    r"|^[\u4e00-\u9fa5]{2,6}(楼|室|馆|场|堂|厅)$"
+)
+# 名字里带这些词的一定是事件，不是地点
+_EVENT_HINT_RE = re.compile(r"(课|培训|会议|讲座|活动|研讨|答辩|考试|实验课|班会|例会)")
+
+
+def _field_of(line: str) -> tuple[str, str] | None:
+    """命中学段前缀就返回 (语义, 值)；纯字段名返回 (语义, "")。"""
+    m = _FIELD_KEY_RE.match(line)
+    if m:
+        return _FIELD_ALIASES[m.group("key")], (m.group("val") or "").strip()
+    m = _FIELD_BARE_RE.match(line)
+    if m:
+        return _FIELD_ALIASES[m.group("key")], ""
+    return None
+
+
+def _looks_like_place(text: str) -> bool:
+    """像不像一个纯地点（没有事件含义）。"""
+    t = text.strip()
+    if not t or len(t) > 20:
+        return False
+    if _EVENT_HINT_RE.search(t):
+        return False
+    return bool(_PLACE_RE.search(t))
+
+
+def _looks_like_person(text: str) -> bool:
+    """2~4 个汉字、且首字是常见姓氏 → 当人名。"""
+    t = text.strip()
+    if not re.fullmatch(r"[\u4e00-\u9fa5]{2,4}", t):
+        return False
+    return t[0] in _CN_SURNAMES
+
+
+def _is_meta_only(text: str) -> bool:
+    """
+    这一行只能是属性、绝不适合当标题吗？
+
+    覆盖：字段前缀行、纯地点、纯人名、纯课程性质、纯循环说明、纯数字。
+    """
+    t = text.strip()
+    if not t:
+        return True
+    if _field_of(t) is not None:
+        return True
+    if t in _NATURE_VALUES:
+        return True
+    if _looks_like_place(t) or _looks_like_person(t):
+        return True
+    if _BLOCK_RECUR_RE.search(t) and len(t) <= 16:
+        return True
+    if re.fullmatch(r"[\d\s:：\-–—~/次周天日晚上午下午:：]+", t):
+        return True
+    return False
+
+
+def _time_block_start(line: str) -> tuple[int, int] | None:
+    """这一行是不是时间节点（块的开头）？返回 (时, 分)。"""
+    m = _BLOCK_TIME_RE.match(line)
+    if not m:
+        return None
+    h, mi = int(m.group("h")), int(m.group("m"))
+    if 0 <= h <= 23 and 0 <= mi <= 59:
+        return h, mi
+    return None
+
+
+def _period_block_start(line: str) -> tuple[int, int] | None:
+    """「第6-7节」形式的块开头，返回 (起始节, 结束节)。"""
+    m = _BLOCK_PERIOD_RE.match(line)
+    if not m:
+        return None
+    p0 = int(m.group(1))
+    p1 = int(m.group(2)) if m.group(2) else p0
+    if 1 <= p0 <= 20 and p0 <= p1 <= 20:
+        return p0, p1
+    return None
+
+
+def _extract_time_blocks(text: str, anchor_day: date) -> tuple[list[Event], set[str]]:
+    """
+    把「时间节点 + 若干属性行」的列表结构归并成日程。
+
+    返回 (事件列表, 已被消费的行文本集合)；不是这种结构时返回 ([], set())，
+    普通聊天记录、车票、通知类文本完全不受影响。
+
+    判定门槛：全文至少有 2 行命中字段前缀（场地/教师/课程性质…），
+    否则说明只是普通的多行备忘，交给原规则引擎逐行处理。
+    """
+    raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    lines = [ln.strip() for ln in raw_lines]
+    if sum(1 for ln in lines if _field_of(ln) is not None) < 2:
+        return [], set()
+
+    # --- 1. 按时间节点切块 ------------------------------------------------
+    blocks: list[dict[str, Any]] = []
+    preamble: list[str] = []            # 时间节点之前的日期/周次表头
+    current: dict[str, Any] | None = None
+    for ln in lines:
+        if not ln:
+            continue
+        clock = _time_block_start(ln)
+        period = None if clock else _period_block_start(ln)
+        if clock or period:
+            current = {"clock": clock, "period": period, "lines": [],
+                       "head": ln}
+            blocks.append(current)
+            # 「10:45 场地：回龙2311」这种时间与首行黏在一起的情况，拆出剩余部分
+            if clock:
+                rest = _BLOCK_TIME_RE.sub("", ln, count=1).strip(" -—·|")
+                if rest:
+                    current["lines"].append(rest)
+            continue
+        if current is None:
+            preamble.append(ln)           # 时间节点之前的内容（标题栏）不属于任何块
+            continue
+        current["lines"].append(ln)
+
+    if not blocks:
+        return [], set()
+
+    flat = "\n".join(lines)
+    day, _, _, _ = parse_date_in_text(flat, anchor_day)
+    day = day or anchor_day
+
+    events: list[Event] = []
+    consumed: set[str] = set()
+    # 表头（「2026 年 10 月 29 日 · 周四 第 44 周」）不能再被逐行解析成一条日程
+    for ln in preamble:
+        if re.search(r"20\d{2}\s*年|星期[一二三四五六日天]|周[一二三四五六日天]|第\s*\d+\s*周", ln):
+            consumed.add(ln)
+    for blk in blocks:
+        ev = _block_to_event(blk, day)
+        if ev is None:
+            continue
+        events.append(ev)
+        consumed.update(blk["lines"])
+        consumed.add(blk.get("head", ""))          # 「10:45」「第1-2节」这行本身
+        if blk["clock"]:
+            consumed.add(f"{blk['clock'][0]:02d}:{blk['clock'][1]:02d}")
+    return events, consumed
+
+
+def _block_to_event(blk: dict[str, Any], day: date) -> Event | None:
+    """把一个时间块里的若干行，拆成 标题 / 地点 / 备注 / 循环，合成一条日程。"""
+    attrs: dict[str, list[str]] = {"location": [], "campus": [], "teacher": [],
+                                   "nature": [], "note": [], "weeks": [],
+                                   "credit": [], "hours": [], "cls": []}
+    titles: list[str] = []
+    recur_note = ""
+    pending_key: str | None = None          # 「教师」单独成行时，下一行是它的值
+
+    for ln in blk["lines"]:
+        hit = _field_of(ln)
+        if hit:
+            key, val = hit
+            if val:
+                attrs.setdefault(key, []).append(val)
+                pending_key = None
+            else:
+                pending_key = key        # 值为空，等下一行补
+            continue
+        # 循环说明要先于"待补值字段"判断：
+        # 「选课备注：」下一行往往是「每周四 · 共 16 次」，不能被当成备注值。
+        if _BLOCK_RECUR_RE.search(ln) and len(ln) <= 24:
+            recur_note = recur_note or ln
+            pending_key = None
+            continue
+        if pending_key:
+            attrs.setdefault(pending_key, []).append(ln)
+            pending_key = None
+            continue
+        if _is_meta_only(ln):
+            # 纯地点/人名/性质：按特征归位，绝不进标题
+            if _looks_like_place(ln):
+                attrs["location"].append(ln)
+            elif _looks_like_person(ln):
+                attrs["teacher"].append(ln)
+            elif ln in _NATURE_VALUES:
+                attrs["nature"].append(ln)
+            continue
+        titles.append(ln)
+
+    # --- 时间 -------------------------------------------------------------
+    start_dt: datetime | None = None
+    end_dt: datetime | None = None
+    if blk["clock"]:
+        h, m = blk["clock"]
+        start_dt = datetime.combine(day, dt_time(h, m))
+        end_dt = start_dt + timedelta(minutes=45)
+    elif blk["period"]:
+        p0, p1 = blk["period"]
+        h0, m0 = _period_clock(p0, 0)
+        h1, m1 = _period_clock(p1, 1)
+        start_dt = datetime.combine(day, dt_time(h0, m0))
+        end_dt = datetime.combine(day, dt_time(h1, m1))
+    if start_dt is None:
+        return None
+
+    # --- 标题：宁可回退，也不拿场地/教师/必修当标题 ----------------------
+    title = ""
+    for cand in titles:
+        cand = re.sub(r"\s{2,}", " ", cand).strip(" -—·|")
+        if cand and not _is_meta_only(cand):
+            title = cand
+            break
+    fallback = f"{start_dt:%H:%M} 日程"
+    if not title:
+        title = fallback
+
+    # --- 地点：具体场地优先，校区只作补充 --------------------------------
+    location = ""
+    sites = [v for v in attrs["location"] if v]
+    campus = [v for v in attrs["campus"] if v]
+    if sites:
+        location = sites[0]
+        if campus and campus[0] and campus[0] not in location:
+            location = f"{location}（{campus[0]}）"
+    elif campus:
+        location = campus[0]
+
+    # --- 备注：教师 / 性质 / 备注 / 学分 全部进说明 ----------------------
+    bits: list[str] = []
+    for key, label in (("teacher", "教师"), ("nature", "课程性质"),
+                       ("credit", "学分"), ("hours", "学时"), ("cls", "教学班")):
+        vals = [v for v in attrs.get(key, []) if v]
+        if vals:
+            bits.append(f"{label} {'、'.join(dict.fromkeys(vals))}")
+    for v in attrs.get("note", []):
+        if v:
+            bits.append(f"备注 {v}")
+    if recur_note:
+        bits.append(recur_note)
+    note = " · ".join(bits)
+
+    # --- 循环 -------------------------------------------------------------
+    rrule, _label = parse_recurrence(recur_note or "")
+    m_count = re.search(r"共\s*(\d{1,2})\s*次", recur_note or "")
+    if rrule and m_count:
+        rrule = f"{rrule};COUNT={int(m_count.group(1))}"
+    vague_reason = "从截图的字段列表按时间归并得出，请核对标题与时间"
+    if title == fallback:
+        vague_reason = "该时间块没有找到明确的日程名，标题按时间自动生成，请补充"
+
+    return Event(
+        title=title,
+        start=start_dt,
+        end=end_dt,
+        location=location,
+        note=note,
+        priority="中",
+        rrule=rrule,
+        vague=True,
+        vague_reason=vague_reason,
+        source="ocr",
+        raw="\n".join(blk["lines"]),
+    )
+
+
 def parse_with_rules(text: str, anchor: datetime | None = None,
                      default_remind: int = -1) -> list[Event]:
     """
@@ -945,9 +1265,19 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
     trip_events, trip_consumed = _extract_trip_events(text, doc_day or anchor_day)
     events.extend(trip_events)
 
+    # 「时间节点 + 字段列表」结构优先整体归并。
+    # 这类截图一行一个字段（场地/教师/课程性质…），逐行解析会把一门课
+    # 拆成十几条日程，还会拿「场地：回龙2311」当标题。
+    block_events, block_consumed = _extract_time_blocks(text, doc_day or anchor_day)
+    events.extend(block_events)
+    has_blocks = bool(block_events)
+
     for line in _split_candidates(text):
         line = line[:400]
-        if line.strip() in trip_consumed:
+        if line.strip() in trip_consumed or line.strip() in block_consumed:
+            continue
+        # 已按时间块归并过的文档，字段行一律不再单独成条
+        if has_blocks and _field_of(line) is not None:
             continue
 
         # 过滤「【课程表 截图里的内容】」「## 备忘」这类分段标题行：
@@ -2209,6 +2539,23 @@ AI_SYSTEM_PROMPT = """你是一个严谨的日程结构化引擎，负责把用�
 8. 跨天活动（如 22:00 到次日 02:00）的 end 必须写次日日期。
 9. 已过期的日程不要输出。
 10. 时间有歧义（如只写「3点」）必须置 vague=true。
+
+【字段列表结构：教务详情 / 排班表 / 时间轴清单】
+11. 如果文本是「时间节点 + 若干字段行」的形状（例如「10:45 / 场地：回龙2311 /
+    教师：张伟 / 课程性质简称：必修 / 每周四 共16次」），**必须把同一时间节点下的
+    所有行合并成 1 个事件**，事件数量等于时间节点数量，绝不能一行一条。
+12. 以下内容**绝对不能当 title**，只能写进 location / note：
+    - 带字段前缀的行：「场地：」「校区：」「教室：」「教师：」「课程性质简称：」
+      「选课备注：」「重修标：」「备注：」「学分：」
+    - 单独成行的地点（如「回龙2311(多)」「三江楼0802」）
+    - 单独成行的人名
+    - 「必修」「选修」「考试」「考查」这类课程性质值
+    - 「每周四 · 共 16 次」这类循环说明
+    如果该时间节点下找不到真正的课程名/会议名，title 用空字符串 ""，不要编造，
+    更不要把场地或教师名顶上去。
+13. 字段映射：场地/校区/教室/地点 → location（具体房号优先，校区可并入或忽略）；
+    教师、课程性质、选课备注、重修标、学分 → note；「每周四 共16次」→ 同时写入
+    rrule 与 note。
 """
 
 
@@ -2899,328 +3246,588 @@ def build_sample_text() -> str:
 _CSS = """
 <style>
 /* ==========================================================================
-   颜色全部走 CSS 变量，明暗两套值由 _css_tokens() 注入到 :root
+   视觉系统：排版 / 间距 / 圆角 / 动效全部走 :root 的令牌
+   颜色两套值由 _css_tokens() 注入，这里不写死任何颜色
    ========================================================================== */
 
-/* ---------- 全局：奶油底 + ins 三段柔光 ---------- */
+/* ---------- 1. 基础排版 ---------- */
 .stApp {
     background: var(--app-bg);
     background-attachment: fixed;
     color: var(--ink);
-}
-/* Streamlit 原生文字（放在最前，后面自有组件可覆盖） */
-.stApp p, .stApp li, .stApp h1, .stApp h2, .stApp h3,
-.stApp h4, .stApp h5, .stApp h6, .stApp label { color: var(--ink); }
-.stApp [data-testid="stCaptionContainer"] { color: var(--muted); }
-.stApp hr { border-color: var(--line); background: var(--line); }
-
-.block-container { padding-top: 1.2rem; padding-bottom: 1rem; max-width: 1180px; }
-/* 只隐藏主菜单与页脚；保留 header 以免侧边栏折叠按钮失效 */
-#MainMenu { visibility: hidden; }
-footer { visibility: hidden; }
-header[data-testid="stHeader"] { background: transparent; }
-html, body, [class*="css"] { font-family: -apple-system, "Segoe UI", "PingFang SC",
-    "Microsoft YaHei", sans-serif; }
-
-/* ---------- 毛玻璃基底（按钮 / 卡片共用） ---------- */
-.metric-card, .notice, .disclaimer, .cal-shell, .cal-side, .chip, .settings-card {
-    backdrop-filter: blur(22px) saturate(175%);
-    -webkit-backdrop-filter: blur(22px) saturate(175%);
+    font-family: var(--font-sans);
+    font-size: var(--fs-body);
+    line-height: var(--lh-body);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
 }
 
-/* ---------- 顶部 hero：ins 渐变色带 ---------- */
-.hero {
+/* 正文：中文行高 1.75，段间留半个行距，不做首行缩进 */
+.stApp p, .stApp li {
+    color: var(--ink);
+    font-size: var(--fs-body);
+    line-height: var(--lh-body);
+}
+.stApp p { margin: 0 0 .7em; }
+.stApp li { margin-bottom: .25em; }
+.stApp li:last-child, .stApp p:last-child { margin-bottom: 0; }
+
+/* 标题：字重 600（不是 700/800），大标题收紧字距 */
+.stApp h1, .stApp h2, .stApp h3,
+.stApp h4, .stApp h5, .stApp h6 {
+    color: var(--ink);
+    font-weight: 600;
+    line-height: var(--lh-tight);
+    letter-spacing: var(--track-snug);
+    margin: 0 0 .45em;
+}
+.stApp h1 { font-size: var(--fs-h1); letter-spacing: var(--track-tight); }
+.stApp h2 { font-size: var(--fs-h2); margin-top: 1.4em; }
+.stApp h3 { font-size: var(--fs-h3); }
+.stApp h4, .stApp h5, .stApp h6 { font-size: var(--fs-sm); }
+
+/* 说明文字 / 辅助文字 */
+.stApp small,
+.stApp [data-testid="stCaptionContainer"],
+.stApp [data-testid="stCaptionContainer"] p {
+    color: var(--muted-2);
+    font-size: var(--fs-xs);
+    line-height: var(--lh-snug);
+    letter-spacing: 0;
+}
+.stApp [data-testid="stCaptionContainer"] { margin-bottom: .4rem; }
+
+.stApp label { font-size: var(--fs-sm); font-weight: 500; color: var(--ink-2); }
+.stApp strong, .stApp b { font-weight: 600; color: var(--ink); }
+.stApp hr {
+    border: none;
+    border-top: 1px solid var(--line);
+    margin: var(--space-5) 0;
+}
+.stApp code { font-family: var(--font-mono); font-size: .92em; }
+
+/* 链接：品牌强调色，下划线只在 hover 出现 */
+.stApp [data-testid="stMarkdownContainer"] a {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out);
+}
+.stApp [data-testid="stMarkdownContainer"] a:hover {
+    color: var(--accent-hover);
+    border-bottom-color: currentColor;
+}
+
+/* ---------- 2. 版心与节奏 ---------- */
+.block-container {
+    max-width: var(--content-max);
+    padding: var(--space-6) var(--space-5) var(--space-8);
+}
+
+/* 区块标题：一条 3px 品牌色竖线 + 21px 字 */
+.section-title {
+    display: flex;
+    align-items: center;
+    gap: .65rem;
+    font-size: var(--fs-h2);
+    font-weight: 600;
+    letter-spacing: var(--track-snug);
+    line-height: var(--lh-tight);
+    color: var(--ink);
+    margin: var(--space-7) 0 var(--space-4);
+}
+.section-title::before {
+    content: "";
+    width: 3px;
+    height: 1.05em;
+    border-radius: var(--r-pill);
     background: var(--brand-grad);
-    border-radius: 1.5rem; padding: 1.75rem 2rem 1.6rem 2rem; margin-bottom: 1.1rem;
-    box-shadow: var(--hero-shadow); position: relative; overflow: hidden;
+    flex: none;
+}
+
+/* ---------- 3. 首屏品牌条 ---------- */
+.hero {
+    position: relative;
+    overflow: hidden;
+    background: var(--brand-grad);
+    border-radius: var(--r-xl);
+    padding: 1.9rem 2rem 1.8rem;
+    margin-bottom: var(--space-5);
+    box-shadow: var(--hero-shadow);
 }
 .hero::after {
-    content: ""; position: absolute; right: -70px; top: -80px; width: 240px; height: 240px;
-    background: rgba(255,255,255,.16); border-radius: 50%;
+    content: "";
+    position: absolute;
+    right: -70px; top: -90px;
+    width: 260px; height: 260px;
+    border-radius: 50%;
+    background: rgba(255,255,255,.14);
 }
 .hero::before {
-    content: ""; position: absolute; left: 32%; bottom: -120px; width: 260px; height: 260px;
-    background: rgba(255,255,255,.10); border-radius: 50%;
+    content: "";
+    position: absolute;
+    left: 30%; bottom: -130px;
+    width: 280px; height: 280px;
+    border-radius: 50%;
+    background: rgba(255,255,255,.09);
 }
 .hero-badge {
-    display: inline-block; font-size: .6875rem; letter-spacing: 2.4px; font-weight: 700;
-    color: var(--brand-fg); background: rgba(255,255,255,.20); border: 1px solid rgba(255,255,255,.36);
-    border-radius: 999px; padding: 5px 14px; margin-bottom: .8rem;
-    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    display: inline-block;
+    font-size: var(--fs-2xs);
+    font-weight: 600;
+    letter-spacing: var(--track-wide);
+    color: var(--brand-fg);
+    background: rgba(255,255,255,.16);
+    border: 1px solid rgba(255,255,255,.28);
+    border-radius: var(--r-pill);
+    padding: .3rem .8rem;
+    margin-bottom: var(--space-4);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
 }
-.hero h1 { color: var(--brand-fg) !important; font-size: 1.9375rem; font-weight: 800; margin: 0 0 .5rem 0;
-    letter-spacing: -.5px; }
-.hero p { color: rgba(255,255,255,.94) !important; font-size: .875rem; margin: 0; line-height: 1.6; }
+.hero h1 {
+    color: var(--brand-fg) !important;
+    font-size: var(--fs-display);
+    font-weight: 600;
+    line-height: 1.12;
+    letter-spacing: var(--track-tight);
+    margin: 0 0 var(--space-3);
+    max-width: 22em;
+}
+.hero p {
+    color: rgba(255,255,255,.95) !important;
+    font-size: var(--fs-sm);
+    line-height: 1.6;
+    margin: 0;
+    max-width: 34em;
+}
 
-/* ---------- 指标卡（毛玻璃） ---------- */
-.metric-row { display: flex; gap: 12px; margin: 6px 0 1rem 0; flex-wrap: wrap; }
-.metric-card {
-    flex: 1 1 150px; background: var(--card-bg);
-    border: 1px solid var(--card-border); border-radius: 1.1rem;
-    padding: .95rem 1.1rem; box-shadow: var(--card-shadow);
+/* ---------- 4. 卡片族：白底 + 细边框 + 极轻阴影 ---------- */
+.metric-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: var(--space-3);
+    margin: var(--space-2) 0 var(--space-5);
 }
-.metric-card .label { font-size: .75rem; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
-.metric-card .value { font-size: 1.5625rem; font-weight: 800; color: var(--ink); line-height: 1.2; }
+.metric-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: var(--r-lg);
+    padding: var(--space-4);
+    box-shadow: var(--card-shadow);
+}
+.metric-card .label {
+    font-size: var(--fs-xs);
+    font-weight: 500;
+    color: var(--muted-2);
+    margin-bottom: .35rem;
+}
+.metric-card .value {
+    font-size: 1.75rem;
+    font-weight: 600;
+    letter-spacing: var(--track-snug);
+    line-height: 1.15;
+    color: var(--ink);
+}
 .metric-card .value.warn { color: var(--warn-strong); }
 .metric-card .value.danger { color: var(--bad-strong); }
 .metric-card .value.ok { color: var(--ok-strong); }
 
-/* ---------- 小标签 ---------- */
-.chip {
-    display: inline-block; font-size: .75rem; font-weight: 600; border-radius: 999px;
-    padding: 3px 10px; margin-right: 6px; margin-bottom: 4px;
+.settings-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: var(--r-lg);
+    padding: var(--space-4);
+    margin: var(--space-2) 0 var(--space-4);
+    box-shadow: var(--card-shadow);
 }
-.chip-ok { background: var(--chip-ok-bg); color: var(--chip-ok-fg); border: 1px solid var(--chip-ok-bd); }
+.settings-card .k { font-size: var(--fs-xs); color: var(--muted-2); }
+.settings-hint {
+    font-size: var(--fs-xs);
+    color: var(--muted-2);
+    line-height: var(--lh-snug);
+}
+
+/* ---------- 5. 提示条 ---------- */
+.notice {
+    border-radius: var(--r-md);
+    padding: .85rem 1.1rem;
+    font-size: var(--fs-sm);
+    line-height: 1.65;
+    margin: var(--space-3) 0 var(--space-4);
+    border: 1px solid var(--card-border);
+    border-left-width: 3px;
+    border-left-style: solid;
+}
+.notice-info { background: var(--notice-info-bg); border-left-color: var(--brand-3); color: var(--notice-info-fg); }
+.notice-warn { background: var(--notice-warn-bg); border-left-color: var(--warn-strong); color: var(--notice-warn-fg); }
+.notice-ok   { background: var(--notice-ok-bg); border-left-color: var(--ok-strong); color: var(--notice-ok-fg); }
+.notice-bad  { background: var(--notice-bad-bg); border-left-color: var(--bad-strong); color: var(--notice-bad-fg); }
+
+/* ---------- 6. 标签 ---------- */
+.chip {
+    display: inline-block;
+    font-size: var(--fs-2xs);
+    font-weight: 500;
+    line-height: 1.5;
+    border-radius: var(--r-pill);
+    padding: .18rem .6rem;
+    margin-right: .4rem;
+    margin-bottom: .3rem;
+}
+.chip-ok   { background: var(--chip-ok-bg);   color: var(--chip-ok-fg);   border: 1px solid var(--chip-ok-bd); }
 .chip-warn { background: var(--chip-warn-bg); color: var(--chip-warn-fg); border: 1px solid var(--chip-warn-bd); }
-.chip-bad { background: var(--chip-bad-bg); color: var(--chip-bad-fg); border: 1px solid var(--chip-bad-bd); }
+.chip-bad  { background: var(--chip-bad-bg);  color: var(--chip-bad-fg);  border: 1px solid var(--chip-bad-bd); }
 .chip-info { background: var(--chip-info-bg); color: var(--chip-info-fg); border: 1px solid var(--chip-info-bd); }
 
-/* Streamlit 会给输入框套一层浅色底，去掉它，让毛玻璃透出页面渐变 */
-html, body { background: var(--body-bg); }
-[data-testid="stTextAreaRootElement"], [data-testid="stTextInputRootElement"],
-[data-testid="stNumberInputContainer"], [data-testid="stDateInputRootElement"],
-[data-testid="stFileUploaderDropzone"], [data-baseweb="base-input"] {
-    background: transparent !important;
-    border-color: var(--input-border) !important;
+/* ---------- 7. 日历 ---------- */
+.cal-title {
+    text-align: center;
+    font-size: var(--fs-h3);
+    font-weight: 600;
+    letter-spacing: var(--track-snug);
+    color: var(--ink);
+    line-height: 2.1;
+}
+.cal-title span {
+    font-size: var(--fs-2xs);
+    font-weight: 500;
+    color: var(--muted-2);
+    margin-left: .4rem;
+    letter-spacing: 0;
+}
+.cal-wd {
+    text-align: center;
+    font-size: var(--fs-2xs);
+    font-weight: 600;
+    color: var(--muted-2);
+    letter-spacing: .06em;
+    padding: .25rem 0 .35rem;
+}
+.cal-side {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: var(--r-lg);
+    padding: var(--space-4) var(--space-5);
+    box-shadow: var(--card-shadow);
+    min-height: 100%;
+}
+.cal-side h4 {
+    margin: 0 0 var(--space-3);
+    font-size: var(--fs-h3);
+    font-weight: 600;
+    letter-spacing: var(--track-snug);
+    color: var(--ink);
+}
+.cal-ev {
+    display: flex;
+    gap: .7rem;
+    align-items: flex-start;
+    padding: .6rem .75rem;
+    margin-bottom: .5rem;
+    border-radius: var(--r-md);
+    background: var(--cal-ev-bg);
+    border: 1px solid var(--cal-ev-border);
+}
+.cal-ev .t {
+    font-size: var(--fs-2xs);
+    font-weight: 600;
+    color: var(--cal-time-fg);
+    min-width: 2.6rem;
+    font-variant-numeric: tabular-nums;
+}
+.cal-ev .m {
+    font-size: var(--fs-sm);
+    color: var(--ink);
+    font-weight: 500;
+    line-height: 1.45;
+}
+.cal-ev .s { font-size: var(--fs-2xs); color: var(--muted-2); margin-top: .15rem; }
+.cal-ev.bad { background: var(--cal-bad-bg); border-color: var(--cal-bad-bd); }
+.cal-ev.bad .t { color: var(--bad-strong); }
+.cal-ev.vague { background: var(--cal-vague-bg); border-color: var(--cal-vague-bd); }
+.cal-ev.vague .t { color: var(--warn-strong); }
+.cal-empty { font-size: var(--fs-xs); color: var(--muted-3); padding: var(--space-3) 0; }
+
+/* 日历格子：42 个按钮压成等宽方块，选中态用品牌色填充。
+   注意：st.button 带 help 时外面会多包一层 span，`.stButton > button` 匹配不到，
+   所以按钮统一按 data-testid 选。 */
+.st-key-cal_grid [data-testid="stBaseButton-secondary"],
+.st-key-cal_grid [data-testid="stBaseButton-primary"] {
+    min-height: 2.4rem;
+    height: 2.4rem;
+    padding: 0 !important;
+    border-radius: var(--r-md) !important;
+    font-size: var(--fs-2xs) !important;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    justify-content: center;
+    box-shadow: none !important;
+}
+/* 「13·」这类两位数会被省略号截断，放开内层裁剪 */
+.st-key-cal_grid [data-testid^="stBaseButton"] div,
+.st-key-cal_grid [data-testid^="stBaseButton"] span,
+.st-key-cal_grid [data-testid^="stBaseButton"] p {
+    overflow: visible !important;
+    text-overflow: clip !important;
+    white-space: nowrap !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    justify-content: center;
+    line-height: 1 !important;
+}
+.st-key-cal_grid [data-testid="stBaseButton-primary"] {
+    background: var(--cal-today-bg) !important;
+    color: var(--cal-today-fg) !important;
+    padding: 0 !important;
+}
+.st-key-cal_grid [data-testid="stBaseButton-primary"] * { color: var(--cal-today-fg) !important; }
+/* 翻月按钮做成小圆钮，不抢视线（按 key 精确命中，别用 :first-child，
+   否则日历每一行都是各自父元素的 first-child，会把所有日子一起改成药丸） */
+.st-key-cal_prev [data-testid^="stBaseButton"],
+.st-key-cal_next [data-testid^="stBaseButton"] {
+    border-radius: var(--r-pill) !important;
+    min-height: 2rem;
+    height: 2rem;
+}
+.st-key-cal_grid [data-testid^="stBaseButton"]:hover { filter: brightness(1.06); }
+
+/* ---------- 8. 免责声明与页脚 ---------- */
+.disclaimer {
+    margin-top: var(--space-7);
+    padding: var(--space-5);
+    border-radius: var(--r-lg);
+    background: var(--disc-bg);
+    border: 1px solid var(--disc-border);
+    color: var(--disc-text);
+    font-size: var(--fs-xs);
+    line-height: 1.85;
+}
+.disclaimer .title {
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--ink-2);
+    margin-bottom: .5rem;
+}
+.disclaimer strong { color: var(--ink-2); }
+
+.app-footer {
+    margin: var(--space-6) 0 var(--space-5);
+    padding-top: var(--space-5);
+    border-top: 1px solid var(--line);
+    text-align: center;
+    color: var(--muted-2);
+    font-size: var(--fs-2xs);
+    line-height: 2;
+}
+.app-footer .fv { font-weight: 600; color: var(--ink-3); letter-spacing: .01em; }
+.app-footer .fsep { color: var(--muted-3); margin: 0 .5rem; }
+.app-footer .fcredit { color: var(--muted-2); }
+.app-footer .fcredit b { font-weight: 600; color: var(--ink-3); }
+.app-footer .fmodel {
+    display: inline-block;
+    padding: .1rem .55rem;
+    border-radius: var(--r-pill);
+    background: var(--chip-info-bg);
+    color: var(--chip-info-fg);
+    border: 1px solid var(--chip-info-bd);
+    font-weight: 600;
 }
 
-/* ---------- 按钮：毛玻璃 ---------- */
-/* Streamlit 的次要按钮自带白底（主题色），必须 !important 才能让变量生效 */
-.stButton > button:not([kind="primary"]),
-.stDownloadButton > button:not([kind="primary"]),
+/* ---------- 9. 按钮：胶囊 + 轻微变亮 ---------- */
+.stButton > button,
+.stDownloadButton > button,
 [data-testid="stBaseButton-secondary"],
+[data-testid="stBaseButton-secondaryFormSubmit"],
+[data-testid="stBaseButton-primary"] {
+    border-radius: var(--r-pill) !important;
+    min-height: 2.5rem;
+    padding: .4rem 1.1rem;
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    letter-spacing: 0;
+    transition: background var(--dur-fast) var(--ease-out),
+                border-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out),
+                box-shadow var(--dur-fast) var(--ease-out),
+                transform var(--dur-fast) var(--ease-out);
+}
+.stButton > button:hover, .stDownloadButton > button:hover,
+[data-testid="stBaseButton-secondary"]:hover,
+[data-testid="stBaseButton-primary"]:hover { transform: none; }
+
+/* 次要按钮：浅底 + 细边框，两种主题都由令牌决定 */
+[data-testid="stBaseButton-secondary"],
+[data-testid="stBaseButton-secondaryFormSubmit"],
 [data-testid="stBaseButton-secondaryFormSubmit"] {
     background: var(--btn-bg) !important;
     border: 1px solid var(--btn-border) !important;
     color: var(--btn-text) !important;
+    box-shadow: var(--btn-shadow);
 }
-.stButton > button:not([kind="primary"]):hover,
-.stDownloadButton > button:not([kind="primary"]):hover,
-[data-testid="stBaseButton-secondary"]:hover {
+[data-testid="stBaseButton-secondary"]:hover,
+[data-testid="stBaseButton-secondaryFormSubmit"]:hover {
     background: var(--btn-hover-bg) !important;
     border-color: var(--btn-hover-border) !important;
     color: var(--btn-hover-text) !important;
-}
-
-.stButton > button, .stDownloadButton > button {
-    border-radius: .9rem; font-weight: 600;
-    border: 1px solid var(--btn-border);
-    background: var(--btn-bg);
-    backdrop-filter: blur(16px) saturate(180%);
-    -webkit-backdrop-filter: blur(16px) saturate(180%);
-    color: var(--btn-text);
-    box-shadow: var(--btn-shadow);
-    transition: transform .18s ease, box-shadow .18s ease,
-                background .18s ease, border-color .18s ease;
-}
-.stButton > button:hover, .stDownloadButton > button:hover {
-    transform: translateY(-1px);
-    background: var(--btn-hover-bg);
-    border-color: var(--btn-hover-border);
-    color: var(--btn-hover-text);
     box-shadow: var(--btn-hover-shadow);
 }
-.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
-    background: var(--brand-grad);
-    border: 1px solid rgba(255,255,255,.38);
-    color: var(--brand-fg);
-    box-shadow: 0 10px 26px var(--brand-glow), inset 0 1px 0 rgba(255,255,255,.32);
-}
-.stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {
-    color: var(--brand-fg); transform: translateY(-1px);
-    box-shadow: 0 14px 32px var(--brand-glow-hover), inset 0 1px 0 rgba(255,255,255,.45);
-}
-/* 按钮禁用态：调低不透明度，避免深色模式下看起来仍可点 */
-.stButton > button:disabled { opacity: .45; }
 
-/* ---------- 输入框（毛玻璃） ---------- */
+/* 主按钮：品牌渐变，hover 只做轻微变亮（不位移、不发光） */
+[data-testid="stBaseButton-primary"] {
+    background: var(--brand-grad) !important;
+    border: 1px solid transparent !important;
+    color: var(--brand-fg) !important;
+    font-weight: 600;
+    box-shadow: 0 1px 2px var(--brand-glow);
+}
+[data-testid="stBaseButton-primary"]:hover {
+    filter: brightness(1.06);
+    box-shadow: 0 2px 10px var(--brand-glow-hover);
+}
+
+/* 主按钮 / 选中 Tab 内部的 markdown 段落会被 `.stApp p` 的正文色带走，
+   必须把整棵子树钉成品牌前景色，否则浅色主题下是"深字压粉底"。 */
+[data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primary"] *,
+.stTabs [aria-selected="true"], .stTabs [aria-selected="true"] * {
+    color: var(--brand-fg) !important;
+    -webkit-text-fill-color: var(--brand-fg) !important;
+}
+
+/* ---------- 10. 输入框 ---------- */
 .stTextArea textarea, .stTextInput input, .stNumberInput input, .stDateInput input {
     background: var(--input-bg) !important;
     border: 1px solid var(--input-border) !important;
-    border-radius: 1rem !important;
-    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border-radius: var(--r-md) !important;
     color: var(--input-text) !important;
-    box-shadow: var(--input-shadow);
+    font-size: var(--fs-sm) !important;
+    line-height: 1.6 !important;
+    box-shadow: none;
+    transition: border-color var(--dur-fast) var(--ease-out),
+                box-shadow var(--dur-fast) var(--ease-out);
 }
+.stTextArea textarea { padding: .7rem .85rem !important; }
 .stTextArea textarea::placeholder, .stTextInput input::placeholder {
-    color: var(--muted-2) !important;
+    color: var(--field-ph) !important;
 }
-.stTextArea textarea:focus, .stTextInput input:focus, .stDateInput input:focus {
+.stTextArea textarea:focus, .stTextInput input:focus,
+.stNumberInput input:focus, .stDateInput input:focus {
     border-color: var(--focus-bd) !important;
-    box-shadow: 0 0 0 4px var(--focus-ring) !important;
+    box-shadow: 0 0 0 3px var(--focus-ring) !important;
+    outline: none !important;
 }
 
-/* ---------- 下拉 / 单选 / 开关 ---------- */
-/* 外层给底色，内层全部透明，否则 Streamlit 的白底会盖住毛玻璃 */
-[data-baseweb="select"] {
-    background: var(--input-bg) !important;
-    border: 1px solid var(--input-border) !important;
-    border-radius: .9rem !important;
-    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-}
-[data-baseweb="select"] > div {
-    background: transparent !important;
-    border: none !important;
-    color: var(--input-text) !important;
-}
-[data-baseweb="select"] div { color: var(--input-text); }
-
-/* ---------- 上传区 ---------- */
-[data-testid="stFileUploaderDropzone"] {
-    background: var(--input-bg) !important;
-    border: 1px dashed var(--input-border) !important;
-    border-radius: 1rem !important;
-}
-[data-testid="stFileUploaderDropzone"] small,
-[data-testid="stFileUploaderDropzoneInstructions"] { color: var(--muted) !important; }
-
-/* 悬停提示气泡的颜色由 _CSS_WIDGETS 统一按 --tip-* 变量接管 */
-[data-testid="stExpander"] details {
-    background: var(--card-bg-3);
-    border: 1px solid var(--card-border) !important;
-    border-radius: 1.1rem !important;
-    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-    box-shadow: var(--card-shadow);
-}
-[data-testid="stExpander"] summary { color: var(--ink-2); }
-
-/* ---------- bordered 容器（日历 / 重复面板 / 设置） ---------- */
-[data-testid="stVerticalBlockBorderWrapper"] {
-    background: var(--card-bg-3);
-    border: 1px solid var(--card-border) !important;
-    border-radius: 1.25rem !important;
-    backdrop-filter: blur(22px) saturate(175%);
-    -webkit-backdrop-filter: blur(22px) saturate(175%);
-    box-shadow: var(--card-shadow-lg);
-    padding: 4px 2px;
-}
-
-/* ---------- Tab ---------- */
-/* 新版 Streamlit 的标签是 div[data-testid="stTab"]，旧的 data-baseweb 选择器已失效，
-   用 min-width:max-content 让胶囊随文字撑开，否则背景会比文字窄、被切一半 */
+/* ---------- 11. Tab：胶囊分段控件 ---------- */
 .stTabs [data-baseweb="tab-list"], .stTabs [role="tablist"] {
-    gap: 8px; border-bottom: none; padding-bottom: 6px;
+    gap: .35rem;
+    border-bottom: none;
+    padding-bottom: .5rem;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
 }
+.stTabs [data-baseweb="tab-list"]::-webkit-scrollbar,
+.stTabs [role="tablist"]::-webkit-scrollbar { display: none; }
 .stTabs [data-testid="stTab"], .stTabs [data-baseweb="tab"] {
-    height: 42px !important; padding: 0 20px !important;
+    height: 2.5rem !important;
+    padding: 0 1.05rem !important;
     min-width: max-content !important;
-    border-radius: 999px !important;
-    font-weight: 600; font-size: .875rem; color: var(--tab-text) !important;
+    border-radius: var(--r-pill) !important;
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    color: var(--tab-text) !important;
     background: var(--tab-bg);
     border: 1px solid var(--tab-border);
-    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-    transition: background .2s ease, color .2s ease;
+    transition: background var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out);
+}
+.stTabs [data-testid="stTab"]:hover, .stTabs [data-baseweb="tab"]:hover {
+    color: var(--ink) !important;
 }
 .stTabs [aria-selected="true"] {
-    color: var(--brand-fg) !important;
     background: var(--brand-grad) !important;
     border-color: transparent !important;
-    box-shadow: 0 8px 22px var(--brand-glow);
+    font-weight: 600;
+    box-shadow: 0 1px 2px var(--brand-glow);
 }
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"],
 .stTabs [role="tablist"] > div:not([role="tab"]),
 .stTabs [role="tablist"]::after { display: none !important; }
 
-/* ---------- 侧边栏 ---------- */
+/* ---------- 12. 侧边栏（唯一保留毛玻璃的地方） ---------- */
 [data-testid="stSidebar"] {
     background: var(--sidebar-bg);
     border-right: 1px solid var(--sidebar-border);
-    backdrop-filter: blur(26px) saturate(170%);
-    -webkit-backdrop-filter: blur(26px) saturate(170%);
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
 }
-[data-testid="stSidebar"] .stMarkdown h3 { font-size: .9375rem; color: var(--ink-3) !important; }
-[data-testid="stSidebar"] .stMarkdown h4 { font-size: .875rem; color: var(--ink-3) !important; }
+[data-testid="stSidebar"] .stMarkdown h3 {
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--ink-3) !important;
+    margin-bottom: .3rem;
+}
+[data-testid="stSidebar"] .stMarkdown h4 {
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--ink-3) !important;
+}
+/* 侧边栏内部节奏：一组控件之间留 10px，分隔线上下各留 16px */
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: .62rem; }
+[data-testid="stSidebar"] hr { margin: var(--space-4) 0 !important; }
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+    line-height: 1.6;
+}
+[data-testid="stSidebar"] [data-testid^="stBaseButton"] {
+    min-height: 2.25rem;
+    font-size: var(--fs-xs);
+}
 
-/* ---------- 区块标题 ---------- */
-.section-title {
-    font-size: 1rem; font-weight: 700; color: var(--ink); margin: 1rem 0 .5rem 0;
-    padding-left: 11px; border-left: 4px solid transparent; line-height: 1.3;
-    border-image: var(--brand-grad) 1;
+/* ---------- 13. 动效：一次性淡入上移，尊重系统"减少动态效果" ---------- */
+@keyframes riseIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: no-preference) {
+    .hero { animation: riseIn var(--dur-slow) var(--ease-out) both; }
+    .section-title { animation: riseIn var(--dur-base) var(--ease-out) both; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .stApp *, .stApp *::before, .stApp *::after {
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .001ms !important;
+    }
 }
 
-/* ---------- 提示条（毛玻璃） ---------- */
-.notice {
-    border-radius: 1rem; padding: .8rem 1.05rem; font-size: .8125rem; line-height: 1.68;
-    margin: .5rem 0 .875rem 0;
-    border: 1px solid var(--card-border);
-    box-shadow: var(--card-shadow);
+/* ---------- 14. 响应式 ---------- */
+@media (max-width: 880px) {
+    .block-container { padding: var(--space-5) var(--space-4) var(--space-7); }
+    .hero { padding: 1.6rem 1.4rem 1.5rem; border-radius: var(--r-lg); }
+    .section-title { margin-top: var(--space-6); font-size: 1.1875rem; }
+    .metric-row { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
 }
-.notice-info { background: var(--notice-info-bg); border-left: 4px solid var(--brand-3); color: var(--notice-info-fg); }
-.notice-warn { background: var(--notice-warn-bg); border-left: 4px solid var(--warn-strong); color: var(--notice-warn-fg); }
-.notice-ok   { background: var(--notice-ok-bg); border-left: 4px solid var(--ok-strong); color: var(--notice-ok-fg); }
-.notice-bad  { background: var(--notice-bad-bg); border-left: 4px solid var(--bad-strong); color: var(--notice-bad-fg); }
-
-/* ---------- 设置面板 ---------- */
-.settings-card {
-    background: var(--card-bg); border: 1px solid var(--card-border);
-    border-radius: 1.1rem; padding: .9rem 1rem; margin: .4rem 0 .9rem 0;
-    box-shadow: var(--card-shadow);
-}
-.settings-card .k { font-size: .75rem; color: var(--muted); }
-.settings-hint { font-size: .75rem; color: var(--muted); line-height: 1.7; }
-
-/* ---------- 日历 ---------- */
-.cal-shell {
-    background: var(--card-bg-3);
-    border: 1px solid var(--card-border-2);
-    border-radius: 1.375rem; padding: .875rem 1rem .625rem 1rem;
-    box-shadow: var(--card-shadow-lg);
-}
-.cal-title {
-    text-align: center; font-size: 1rem; font-weight: 800; color: var(--ink);
-    letter-spacing: .2px; line-height: 2.2;
-}
-.cal-title span { font-size: .6875rem; font-weight: 600; color: var(--muted-2); margin-left: 6px; }
-.cal-wd { text-align: center; font-size: .6875rem; font-weight: 700; color: var(--muted-2);
-    letter-spacing: .5px; padding: 2px 0 4px 0; }
-.cal-side {
-    background: var(--card-bg-3);
-    border: 1px solid var(--card-border-2);
-    border-radius: 1.375rem; padding: 1rem 1.1rem;
-    box-shadow: var(--card-shadow-lg);
-    min-height: 100%;
-}
-.cal-side h4 { margin: 0 0 .625rem 0; font-size: .9375rem; font-weight: 800; color: var(--ink); }
-.cal-ev {
-    display: flex; gap: 10px; align-items: flex-start;
-    padding: .55rem .7rem; margin-bottom: .5rem; border-radius: .875rem;
-    background: var(--cal-ev-bg);
-    border: 1px solid var(--cal-ev-border);
-    box-shadow: var(--card-shadow);
-}
-.cal-ev .t { font-size: .6875rem; font-weight: 800; color: var(--cal-time-fg); min-width: 42px; }
-.cal-ev .m { font-size: .8125rem; color: var(--ink); font-weight: 600; line-height: 1.45; }
-.cal-ev .s { font-size: .6875rem; color: var(--muted); margin-top: 2px; }
-.cal-ev.bad { background: var(--cal-bad-bg); border-color: var(--cal-bad-bd); }
-.cal-ev.bad .t { color: var(--bad-strong); }
-.cal-ev.vague { background: var(--cal-vague-bg); border-color: var(--cal-vague-bd); }
-.cal-ev.vague .t { color: var(--warn-strong); }
-.cal-empty { font-size: .75rem; color: var(--muted-3); padding: .75rem 2px; }
-
-/* ---------- 页脚免责声明 ---------- */
-.disclaimer {
-    margin-top: 1.6rem; padding: 1.1rem 1.25rem; border-radius: 1.1rem;
-    background: var(--disc-bg); border: 1px dashed var(--disc-border);
-    color: var(--disc-text); font-size: .75rem; line-height: 1.8;
-    backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
-}
-.disclaimer strong { color: var(--ink-2); }
-.disclaimer .title { font-size: .8125rem; font-weight: 700; color: var(--ink-2); margin-bottom: 6px; }
-
-/* ---------- 页脚署名 ---------- */
-.app-footer {
-    margin: 1.1rem 0 1.4rem 0; padding-top: .9rem;
-    border-top: 1px solid var(--line);
-    text-align: center; color: var(--muted-2); font-size: .6875rem; line-height: 2;
-}
-.app-footer .fv { font-weight: 700; color: var(--ink-3); letter-spacing: .2px; }
-.app-footer .fsep { color: var(--muted-3); margin: 0 .45rem; }
-.app-footer .fcredit { color: var(--muted-2); }
-.app-footer .fcredit b { font-weight: 700; color: var(--ink-3); }
-.app-footer .fmodel {
-    display: inline-block; padding: .1rem .5rem; border-radius: 999px;
-    background: var(--chip-info-bg); color: var(--chip-info-fg);
-    border: 1px solid var(--chip-info-bd); font-weight: 700;
+@media (max-width: 640px) {
+    .block-container { padding: var(--space-4) var(--space-3) var(--space-6); }
+    /* 窄屏不横向滚动，直接折成两行，四个入口都看得见 */
+    .stTabs [data-baseweb="tab-list"], .stTabs [role="tablist"] {
+        flex-wrap: wrap;
+        overflow-x: visible;
+        row-gap: .4rem;
+    }
+    .stTabs [data-testid="stTab"], .stTabs [data-baseweb="tab"] {
+        flex: 1 1 calc(50% - .4rem);
+        justify-content: center;
+        padding: 0 .45rem !important;
+        font-size: var(--fs-xs);
+    }
+    .hero h1 { font-size: 1.625rem; }
+    .hero p { font-size: var(--fs-xs); }
+    .section-title { font-size: 1.125rem; margin: var(--space-5) 0 var(--space-3); }
+    .cal-side { padding: var(--space-4); }
+    .disclaimer { padding: var(--space-4); }
 }
 </style>
 """
@@ -3241,23 +3848,71 @@ FONT_HUGE = "特大"
 FONT_OPTIONS = [FONT_SMALL, FONT_NORMAL, FONT_LARGE, FONT_HUGE]
 FONT_SCALES = {FONT_SMALL: 0.92, FONT_NORMAL: 1.0, FONT_LARGE: 1.08, FONT_HUGE: 1.16}
 
+_TOKENS_COMMON = {
+    # ---------- 字体 ----------
+    # 只用系统字体，不打包任何专有字体；中文单独列一组回退
+    "font-sans": ("-apple-system, BlinkMacSystemFont, \"SF Pro Display\", \"SF Pro Text\", "
+                  "\"Segoe UI\", Roboto, \"Helvetica Neue\", \"PingFang SC\", "
+                  "\"Hiragino Sans GB\", \"Microsoft YaHei\", \"Source Han Sans SC\", "
+                  "Arial, sans-serif"),
+    "font-mono": ("ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, "
+                  "\"Liberation Mono\", monospace"),
+    # ---------- 字号阶梯（7 级，够用且不打架） ----------
+    "fs-display": "clamp(1.75rem, 1.05rem + 2.1vw, 2.5rem)",   # 首屏主标题 28→40
+    "fs-h1": "1.625rem",                                        # 26
+    "fs-h2": "1.3125rem",                                       # 21 区块标题
+    "fs-h3": "1.0625rem",                                       # 17 卡片标题
+    "fs-body": "1rem",                                          # 16 正文
+    "fs-sm": "0.9375rem",                                       # 15 控件 / 次要正文
+    "fs-xs": "0.8125rem",                                       # 13 说明文字
+    "fs-2xs": "0.75rem",                                        # 12 标签 / 徽标
+    # ---------- 行高与字距（中西文分开） ----------
+    "lh-tight": "1.2",
+    "lh-snug": "1.45",
+    "lh-body": "1.75",                                          # 中文正文舒适行高
+    "track-tight": "-0.02em",                                   # 大标题收紧
+    "track-snug": "-0.01em",
+    "track-wide": "0.14em",                                     # 全大写小标签放开
+    # ---------- 间距尺度 ----------
+    "space-1": "0.25rem",
+    "space-2": "0.5rem",
+    "space-3": "0.75rem",
+    "space-4": "1rem",
+    "space-5": "1.5rem",
+    "space-6": "2rem",
+    "space-7": "2.75rem",
+    "space-8": "3.5rem",
+    # ---------- 圆角 ----------
+    "r-sm": "8px",
+    "r-md": "12px",
+    "r-lg": "18px",
+    "r-xl": "26px",
+    "r-pill": "999px",
+    # ---------- 动效 ----------
+    "dur-fast": "150ms",
+    "dur-base": "320ms",
+    "dur-slow": "560ms",
+    "ease-out": "cubic-bezier(.22,.61,.36,1)",
+    # ---------- 版心 ----------
+    "content-max": "1080px",
+}
+
 _TOKENS_LIGHT = {
-    # ---------- 底色与文字 ----------
+    **_TOKENS_COMMON,
+    # ---------- 底色与文字（中性灰白体系，品牌色只做强调） ----------
     "app-bg": (
-        "radial-gradient(920px 540px at 6% -10%, rgba(255,178,196,.55), transparent 62%),"
-        "radial-gradient(780px 500px at 98% 2%, rgba(178,162,255,.50), transparent 60%),"
-        "radial-gradient(760px 540px at 52% 112%, rgba(150,206,255,.42), transparent 62%),"
-        "linear-gradient(158deg, #FFFAFC 0%, #F8F5FF 46%, #F3F8FF 100%)"
+        "radial-gradient(1100px 560px at 50% -18%, rgba(192,42,102,.06), transparent 62%),"
+        "linear-gradient(180deg, #F8F7FA 0%, #F5F5F7 44%, #F3F3F5 100%)"
     ),
-    "body-bg": "#FFFAFC",
+    "body-bg": "#F5F5F7",
     "img-brightness": "1",
-    "ink": "#2E2A3B",
-    "ink-2": "#453D57",
-    "ink-3": "#4E4761",
-    "muted": "#635B74",
-    "muted-2": "#6F6781",
-    "muted-3": "#746C86",
-    "line": "rgba(126,87,194,.14)",
+    "ink": "#1D1D1F",
+    "ink-2": "#333338",
+    "ink-3": "#48484E",
+    "muted": "#5F5F66",
+    "muted-2": "#6E6E73",
+    "muted-3": "#7A7A80",
+    "line": "rgba(0,0,0,.08)",
 
     # ---------- 品牌色（渐变四档，白字全部 ≥4.5:1） ----------
     "brand-1": "#BF5433",
@@ -3266,158 +3921,157 @@ _TOKENS_LIGHT = {
     "brand-4": "#5B62E0",
     "brand-grad": "linear-gradient(118deg,#BF5433 0%,#C02A66 34%,#8E3FBF 68%,#5B62E0 100%)",
     "brand-fg": "#FFFFFF",
-    "brand-glow": "rgba(192,42,102,.30)",
-    "brand-glow-hover": "rgba(192,42,102,.42)",
+    "brand-glow": "rgba(192,42,102,.28)",
+    "brand-glow-hover": "rgba(192,42,102,.38)",
     "accent": "#B01F5A",
     "accent-hover": "#8C1747",
     "logo": "#8E3D6B",
 
-    # ---------- 面 / 卡片 ----------
+    # ---------- 面 / 卡片（白卡片 + 细边框 + 极轻阴影） ----------
     "surface-1": "#FFFFFF",
     "surface-2": "#FFFFFF",
-    "card-bg": "rgba(255,255,255,.58)",
-    "card-bg-3": "rgba(255,255,255,.52)",
-    "card-border": "rgba(255,255,255,.9)",
-    "card-border-2": "rgba(255,255,255,.92)",
-    "card-shadow": "0 10px 30px rgba(126,87,194,.09)",
-    "card-shadow-lg": "0 12px 34px rgba(126,87,194,.10)",
-    "hero-shadow": "0 18px 44px rgba(160,60,140,.26)",
+    "card-bg": "#FFFFFF",
+    "card-bg-3": "#FFFFFF",
+    "card-border": "rgba(0,0,0,.07)",
+    "card-border-2": "rgba(0,0,0,.09)",
+    "card-shadow": "0 1px 2px rgba(0,0,0,.04), 0 6px 20px rgba(0,0,0,.045)",
+    "card-shadow-lg": "0 1px 2px rgba(0,0,0,.04), 0 14px 36px rgba(0,0,0,.07)",
+    "hero-shadow": "0 14px 36px rgba(140,25,75,.20)",
 
     # ---------- 表单控件 ----------
-    "input-bg": "rgba(255,255,255,.62)",
-    "input-border": "rgba(255,255,255,.95)",
-    "input-text": "#342E44",
-    "input-shadow": "0 4px 16px rgba(126,87,194,.07)",
-    "field-bg": "rgba(255,255,255,.72)",
-    "field-bd": "rgba(160,140,190,.35)",
-    "field-bd-hover": "rgba(160,140,190,.55)",
-    "field-ph": "#857D96",
-    "field-dis-fg": "#9C94AA",
-    "field-dis-bg": "rgba(240,238,245,.55)",
-    "focus-ring": "rgba(192,42,102,.22)",
+    "input-bg": "#FFFFFF",
+    "input-border": "rgba(0,0,0,.10)",
+    "input-text": "#1D1D1F",
+    "input-shadow": "0 1px 2px rgba(0,0,0,.03)",
+    "field-bg": "#FFFFFF",
+    "field-bd": "rgba(0,0,0,.12)",
+    "field-bd-hover": "rgba(0,0,0,.22)",
+    "field-ph": "#86868B",
+    "field-dis-fg": "#9A9AA0",
+    "field-dis-bg": "rgba(0,0,0,.035)",
+    "focus-ring": "rgba(192,42,102,.20)",
     "focus-bd": "#C02A66",
 
     # ---------- 按钮 ----------
-    "btn-bg": "rgba(255,255,255,.50)",
-    "btn-border": "rgba(255,255,255,.92)",
-    "btn-text": "#453D57",
-    "btn-hover-bg": "rgba(255,255,255,.74)",
-    "btn-hover-border": "rgba(192,42,102,.55)",
-    "btn-hover-text": "#8C1747",
-    "btn-shadow": "0 6px 20px rgba(126,87,194,.10), inset 0 1px 0 rgba(255,255,255,.95)",
-    "btn-hover-shadow": "0 10px 28px rgba(160,60,140,.16), inset 0 1px 0 rgba(255,255,255,1)",
-    "btn-dis-fg": "#9C94AA",
+    "btn-bg": "rgba(0,0,0,.045)",
+    "btn-border": "rgba(0,0,0,.08)",
+    "btn-text": "#1D1D1F",
+    "btn-hover-bg": "rgba(0,0,0,.075)",
+    "btn-hover-border": "rgba(0,0,0,.12)",
+    "btn-hover-text": "#000000",
+    "btn-shadow": "0 1px 2px rgba(0,0,0,.04)",
+    "btn-hover-shadow": "0 2px 8px rgba(0,0,0,.07)",
+    "btn-dis-fg": "#9A9AA0",
 
     # ---------- Tab ----------
-    "tab-bg": "rgba(255,255,255,.42)",
-    "tab-border": "rgba(255,255,255,.85)",
-    "tab-text": "#6F6781",
+    "tab-bg": "rgba(0,0,0,.035)",
+    "tab-border": "rgba(0,0,0,.05)",
+    "tab-text": "#5F5F66",
 
-    # ---------- 侧边栏 ----------
-    "sidebar-bg": "rgba(255,255,255,.46)",
-    "sidebar-border": "rgba(255,255,255,.85)",
+    # ---------- 侧边栏（唯一保留毛玻璃的地方） ----------
+    "sidebar-bg": "rgba(250,250,252,.78)",
+    "sidebar-border": "rgba(0,0,0,.06)",
 
-    # ---------- 语义色（标签 / 提示条） ----------
-    "chip-ok-bg": "rgba(224,250,240,.85)",
+    # ---------- 语义色 ----------
+    "chip-ok-bg": "rgba(43,168,124,.10)",
     "chip-ok-fg": "#0A6B54",
-    "chip-ok-bd": "rgba(150,225,203,.9)",
-    "chip-warn-bg": "rgba(255,247,226,.9)",
-    "chip-warn-fg": "#8A5409",
-    "chip-warn-bd": "rgba(245,205,130,.9)",
-    "chip-bad-bg": "rgba(255,235,238,.9)",
+    "chip-ok-bd": "rgba(43,168,124,.22)",
+    "chip-warn-bg": "rgba(206,132,20,.10)",
+    "chip-warn-fg": "#7E5208",
+    "chip-warn-bd": "rgba(206,132,20,.22)",
+    "chip-bad-bg": "rgba(206,42,78,.10)",
     "chip-bad-fg": "#9E1F3A",
-    "chip-bad-bd": "rgba(250,180,190,.9)",
-    "chip-info-bg": "rgba(240,238,255,.9)",
+    "chip-bad-bd": "rgba(206,42,78,.22)",
+    "chip-info-bg": "rgba(120,90,220,.10)",
     "chip-info-fg": "#4B33AE",
-    "chip-info-bd": "rgba(200,192,250,.9)",
+    "chip-info-bd": "rgba(120,90,220,.22)",
 
-    "notice-info-bg": "rgba(244,240,255,.72)",
+    "notice-info-bg": "rgba(120,90,220,.055)",
     "notice-info-fg": "#412F84",
-    "notice-warn-bg": "rgba(255,248,232,.78)",
-    "notice-warn-fg": "#7A4F0C",
-    "notice-ok-bg": "rgba(233,251,244,.78)",
+    "notice-warn-bg": "rgba(206,132,20,.06)",
+    "notice-warn-fg": "#6F4807",
+    "notice-ok-bg": "rgba(43,168,124,.06)",
     "notice-ok-fg": "#085C45",
-    "notice-bad-bg": "rgba(255,238,240,.78)",
+    "notice-bad-bg": "rgba(206,42,78,.06)",
     "notice-bad-fg": "#861B33",
 
-    "warn-strong": "#8A5409",
+    "warn-strong": "#7E5208",
     "bad-strong": "#B0233F",
     "ok-strong": "#0A6B54",
 
     # ---------- 日历 ----------
-    "cal-ev-bg": "rgba(255,255,255,.62)",
-    "cal-ev-border": "rgba(255,255,255,.95)",
-    "cal-bad-bg": "rgba(255,238,240,.8)",
-    "cal-bad-bd": "rgba(250,190,200,.95)",
-    "cal-vague-bg": "rgba(255,249,232,.8)",
-    "cal-vague-bd": "rgba(248,220,160,.95)",
+    "cal-ev-bg": "rgba(0,0,0,.025)",
+    "cal-ev-border": "rgba(0,0,0,.05)",
+    "cal-bad-bg": "rgba(206,42,78,.06)",
+    "cal-bad-bd": "rgba(206,42,78,.16)",
+    "cal-vague-bg": "rgba(206,132,20,.07)",
+    "cal-vague-bd": "rgba(206,132,20,.18)",
     "cal-time-fg": "#8E3FBF",
-    "cal-day-fg": "#4E4761",
-    "cal-day-muted": "#6F6781",
+    "cal-day-fg": "#333338",
+    "cal-day-muted": "#6E6E73",
     "cal-today-bg": "#C02A66",
     "cal-today-fg": "#FFFFFF",
-    "cal-day-hover": "rgba(192,42,102,.10)",
+    "cal-day-hover": "rgba(0,0,0,.05)",
 
     # ---------- 数据表行底色（Python 侧喂给 data_editor） ----------
-    "row-bad-bg": "#FFEEF1",
+    "row-bad-bg": "#FCEEF1",
     "row-bad-fg": "#9E1F3A",
-    "row-warn-bg": "#FFF9E8",
-    "row-warn-fg": "#7A4F0C",
+    "row-warn-bg": "#FCF5E6",
+    "row-warn-fg": "#7E5208",
 
     # ---------- 弹层 / 气泡 / Toast / 代码 ----------
     "pop-bg": "#FFFFFF",
-    "pop-bd": "rgba(126,87,194,.18)",
-    "pop-shadow": "0 18px 42px rgba(80,50,120,.18)",
-    "pop-item-hover": "rgba(192,42,102,.10)",
+    "pop-bd": "rgba(0,0,0,.08)",
+    "pop-shadow": "0 10px 34px rgba(0,0,0,.14)",
+    "pop-item-hover": "rgba(0,0,0,.05)",
     "tip-bg": "#FFFFFF",
-    "tip-fg": "#2E2A3B",
-    "tip-bd": "rgba(126,87,194,.18)",
+    "tip-fg": "#1D1D1F",
+    "tip-bd": "rgba(0,0,0,.08)",
     "toast-bg": "#FFFFFF",
-    "toast-fg": "#2E2A3B",
-    "toast-bd": "rgba(126,87,194,.18)",
-    "code-bg": "rgba(96,72,140,.07)",
-    "code-fg": "#4A3D6B",
-    "code-bd": "rgba(126,87,194,.18)",
+    "toast-fg": "#1D1D1F",
+    "toast-bd": "rgba(0,0,0,.08)",
+    "code-bg": "rgba(0,0,0,.045)",
+    "code-fg": "#3A2F55",
+    "code-bd": "rgba(0,0,0,.06)",
     "code-kw": "#8E3FBF",
     "code-str": "#086B52",
     "code-num": "#A8420F",
 
     # ---------- 表格外壳 / 选中 / 滚动条 ----------
     "grid-bg": "#FFFFFF",
-    "grid-bd": "rgba(126,87,194,.16)",
-    "grid-head-fg": "#4E4761",
-    "grid-toolbar": "rgba(255,255,255,.9)",
-    "sel-bg": "rgba(192,42,102,.20)",
-    "sel-fg": "#2E2A3B",
-    "scroll-thumb": "rgba(126,87,194,.28)",
-    "scroll-thumb-hover": "rgba(126,87,194,.46)",
+    "grid-bd": "rgba(0,0,0,.08)",
+    "grid-head-fg": "#48484E",
+    "grid-toolbar": "rgba(255,255,255,.94)",
+    "sel-bg": "rgba(192,42,102,.18)",
+    "sel-fg": "#1D1D1F",
+    "scroll-thumb": "rgba(0,0,0,.20)",
+    "scroll-thumb-hover": "rgba(0,0,0,.34)",
 
     # ---------- 杂项 ----------
-    "disc-bg": "rgba(255,255,255,.52)",
-    "disc-border": "rgba(180,168,210,.6)",
-    "disc-text": "#6F6781",
-    "stepper-bg": "rgba(255,242,248,.92)",
-    "stepper-bd": "rgba(250,205,228,.95)",
+    "disc-bg": "#FFFFFF",
+    "disc-border": "rgba(0,0,0,.07)",
+    "disc-text": "#5F5F66",
+    "stepper-bg": "rgba(192,42,102,.08)",
+    "stepper-bd": "rgba(192,42,102,.18)",
     "stepper-fg": "#B01F5A",
 }
 
 _TOKENS_DARK = {
+    **_TOKENS_COMMON,
     # ---------- 底色与文字 ----------
     "app-bg": (
-        "radial-gradient(900px 520px at 6% -10%, rgba(126,60,120,.45), transparent 62%),"
-        "radial-gradient(760px 480px at 98% 0%, rgba(86,72,200,.42), transparent 60%),"
-        "radial-gradient(720px 520px at 52% 112%, rgba(30,96,150,.34), transparent 62%),"
-        "linear-gradient(158deg, #14111C 0%, #171327 46%, #10141D 100%)"
+        "radial-gradient(1100px 560px at 50% -18%, rgba(192,42,102,.10), transparent 62%),"
+        "linear-gradient(180deg, #131315 0%, #0E0E10 44%, #0B0B0D 100%)"
     ),
-    "body-bg": "#14111C",
-    "img-brightness": ".88",
-    "ink": "#F1EDF9",
-    "ink-2": "#DCD5EC",
-    "ink-3": "#CAC2DC",
-    "muted": "#A79FB8",
-    "muted-2": "#9A92AC",
-    "muted-3": "#918AA4",
-    "line": "rgba(255,255,255,.12)",
+    "body-bg": "#0B0B0D",
+    "img-brightness": ".9",
+    "ink": "#F5F5F7",
+    "ink-2": "#DCDCE1",
+    "ink-3": "#C5C5CB",
+    "muted": "#A1A1A6",
+    "muted-2": "#9A9AA0",
+    "muted-3": "#8E8E94",
+    "line": "rgba(255,255,255,.10)",
 
     # ---------- 品牌色 ----------
     "brand-1": "#BF5433",
@@ -3426,78 +4080,78 @@ _TOKENS_DARK = {
     "brand-4": "#5B62E0",
     "brand-grad": "linear-gradient(118deg,#BF5433 0%,#C02A66 34%,#8E3FBF 68%,#5B62E0 100%)",
     "brand-fg": "#FFFFFF",
-    "brand-glow": "rgba(192,42,102,.30)",
-    "brand-glow-hover": "rgba(192,42,102,.42)",
+    "brand-glow": "rgba(192,42,102,.34)",
+    "brand-glow-hover": "rgba(192,42,102,.46)",
     "accent": "#F075A6",
     "accent-hover": "#FF9CC2",
     "logo": "#FFB3D9",
 
     # ---------- 面 / 卡片 ----------
-    "surface-1": "#1B1826",
-    "surface-2": "#221E2E",
-    "card-bg": "rgba(255,255,255,.055)",
-    "card-bg-3": "rgba(255,255,255,.045)",
-    "card-border": "rgba(255,255,255,.11)",
-    "card-border-2": "rgba(255,255,255,.12)",
-    "card-shadow": "0 10px 30px rgba(0,0,0,.34)",
-    "card-shadow-lg": "0 12px 34px rgba(0,0,0,.38)",
-    "hero-shadow": "0 18px 44px rgba(0,0,0,.42)",
+    "surface-1": "#1B1B1E",
+    "surface-2": "#202024",
+    "card-bg": "#1B1B1E",
+    "card-bg-3": "#18181B",
+    "card-border": "rgba(255,255,255,.08)",
+    "card-border-2": "rgba(255,255,255,.10)",
+    "card-shadow": "0 1px 2px rgba(0,0,0,.5)",
+    "card-shadow-lg": "0 12px 32px rgba(0,0,0,.5)",
+    "hero-shadow": "0 14px 36px rgba(0,0,0,.55)",
 
     # ---------- 表单控件 ----------
-    "input-bg": "rgba(255,255,255,.07)",
-    "input-border": "rgba(255,255,255,.13)",
-    "input-text": "#F2EFFA",
-    "input-shadow": "0 4px 16px rgba(0,0,0,.22)",
-    "field-bg": "rgba(255,255,255,.07)",
-    "field-bd": "rgba(255,255,255,.16)",
-    "field-bd-hover": "rgba(255,255,255,.26)",
-    "field-ph": "#9A92AC",
-    "field-dis-fg": "#7A7390",
-    "field-dis-bg": "rgba(255,255,255,.04)",
-    "focus-ring": "rgba(240,117,166,.28)",
+    "input-bg": "rgba(255,255,255,.06)",
+    "input-border": "rgba(255,255,255,.12)",
+    "input-text": "#F5F5F7",
+    "input-shadow": "0 1px 2px rgba(0,0,0,.3)",
+    "field-bg": "rgba(255,255,255,.06)",
+    "field-bd": "rgba(255,255,255,.14)",
+    "field-bd-hover": "rgba(255,255,255,.24)",
+    "field-ph": "#8E8E94",
+    "field-dis-fg": "#6E6E73",
+    "field-dis-bg": "rgba(255,255,255,.03)",
+    "focus-ring": "rgba(240,117,166,.26)",
     "focus-bd": "#F075A6",
 
     # ---------- 按钮 ----------
-    "btn-bg": "rgba(255,255,255,.07)",
-    "btn-border": "rgba(255,255,255,.13)",
-    "btn-text": "#EDE9F7",
-    "btn-hover-bg": "rgba(255,255,255,.13)",
-    "btn-hover-border": "rgba(240,117,166,.60)",
-    "btn-hover-text": "#FFD6E7",
-    "btn-shadow": "0 6px 20px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.07)",
-    "btn-hover-shadow": "0 10px 28px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.12)",
-    "btn-dis-fg": "#7A7390",
+    "btn-bg": "rgba(255,255,255,.08)",
+    "btn-border": "rgba(255,255,255,.12)",
+    "btn-text": "#F5F5F7",
+    "btn-hover-bg": "rgba(255,255,255,.14)",
+    "btn-hover-border": "rgba(255,255,255,.20)",
+    "btn-hover-text": "#FFFFFF",
+    "btn-shadow": "0 1px 2px rgba(0,0,0,.3)",
+    "btn-hover-shadow": "0 2px 10px rgba(0,0,0,.35)",
+    "btn-dis-fg": "#6E6E73",
 
     # ---------- Tab ----------
     "tab-bg": "rgba(255,255,255,.06)",
-    "tab-border": "rgba(255,255,255,.10)",
-    "tab-text": "#B9B2CB",
+    "tab-border": "rgba(255,255,255,.08)",
+    "tab-text": "#A1A1A6",
 
     # ---------- 侧边栏 ----------
-    "sidebar-bg": "rgba(16,13,24,.62)",
-    "sidebar-border": "rgba(255,255,255,.08)",
+    "sidebar-bg": "rgba(20,20,23,.72)",
+    "sidebar-border": "rgba(255,255,255,.07)",
 
     # ---------- 语义色 ----------
-    "chip-ok-bg": "rgba(53,192,143,.16)",
+    "chip-ok-bg": "rgba(63,196,150,.14)",
     "chip-ok-fg": "#7FE7C2",
-    "chip-ok-bd": "rgba(53,192,143,.35)",
-    "chip-warn-bg": "rgba(240,168,60,.16)",
+    "chip-ok-bd": "rgba(63,196,150,.26)",
+    "chip-warn-bg": "rgba(232,168,64,.14)",
     "chip-warn-fg": "#F5C97E",
-    "chip-warn-bd": "rgba(240,168,60,.36)",
-    "chip-bad-bg": "rgba(238,90,110,.16)",
+    "chip-warn-bd": "rgba(232,168,64,.26)",
+    "chip-bad-bg": "rgba(238,90,110,.14)",
     "chip-bad-fg": "#FF9DAE",
-    "chip-bad-bd": "rgba(238,90,110,.36)",
-    "chip-info-bg": "rgba(160,91,232,.18)",
+    "chip-bad-bd": "rgba(238,90,110,.26)",
+    "chip-info-bg": "rgba(160,120,255,.16)",
     "chip-info-fg": "#CBA8FF",
-    "chip-info-bd": "rgba(160,91,232,.42)",
+    "chip-info-bd": "rgba(160,120,255,.30)",
 
-    "notice-info-bg": "rgba(120,86,214,.14)",
+    "notice-info-bg": "rgba(160,120,255,.08)",
     "notice-info-fg": "#D3C2FF",
-    "notice-warn-bg": "rgba(240,168,60,.12)",
+    "notice-warn-bg": "rgba(232,168,64,.08)",
     "notice-warn-fg": "#F3CE8C",
-    "notice-ok-bg": "rgba(53,192,143,.12)",
+    "notice-ok-bg": "rgba(63,196,150,.08)",
     "notice-ok-fg": "#8FE8C7",
-    "notice-bad-bg": "rgba(238,90,110,.13)",
+    "notice-bad-bg": "rgba(238,90,110,.08)",
     "notice-bad-fg": "#FFA8B7",
 
     "warn-strong": "#F0B45C",
@@ -3506,69 +4160,62 @@ _TOKENS_DARK = {
 
     # ---------- 日历 ----------
     "cal-ev-bg": "rgba(255,255,255,.05)",
-    "cal-ev-border": "rgba(255,255,255,.10)",
-    "cal-bad-bg": "rgba(238,90,110,.13)",
-    "cal-bad-bd": "rgba(238,90,110,.30)",
-    "cal-vague-bg": "rgba(240,168,60,.12)",
-    "cal-vague-bd": "rgba(240,168,60,.28)",
+    "cal-ev-border": "rgba(255,255,255,.08)",
+    "cal-bad-bg": "rgba(238,90,110,.10)",
+    "cal-bad-bd": "rgba(238,90,110,.22)",
+    "cal-vague-bg": "rgba(232,168,64,.10)",
+    "cal-vague-bd": "rgba(232,168,64,.22)",
     "cal-time-fg": "#CBA8FF",
-    "cal-day-fg": "#CAC2DC",
-    "cal-day-muted": "#918AA4",
+    "cal-day-fg": "#DCDCE1",
+    "cal-day-muted": "#9A9AA0",
     "cal-today-bg": "#C02A66",
     "cal-today-fg": "#FFFFFF",
-    "cal-day-hover": "rgba(240,117,166,.16)",
+    "cal-day-hover": "rgba(255,255,255,.08)",
 
     # ---------- 数据表行底色（会被 canvas 滤镜翻成深色） ----------
-    "row-bad-bg": "#FFEEF1",
+    "row-bad-bg": "#FCEEF1",
     "row-bad-fg": "#9E1F3A",
-    "row-warn-bg": "#FFF9E8",
-    "row-warn-fg": "#7A4F0C",
+    "row-warn-bg": "#FCF5E6",
+    "row-warn-fg": "#7E5208",
 
     # ---------- 弹层 / 气泡 / Toast / 代码 ----------
-    "pop-bg": "#221E2E",
-    "pop-bd": "rgba(255,255,255,.12)",
-    "pop-shadow": "0 18px 42px rgba(0,0,0,.55)",
-    "pop-item-hover": "rgba(240,117,166,.16)",
-    "tip-bg": "#2A2536",
-    "tip-fg": "#EFEBF8",
-    "tip-bd": "rgba(255,255,255,.14)",
-    "toast-bg": "#2A2536",
-    "toast-fg": "#EFEBF8",
-    "toast-bd": "rgba(255,255,255,.14)",
+    "pop-bg": "#202024",
+    "pop-bd": "rgba(255,255,255,.10)",
+    "pop-shadow": "0 12px 36px rgba(0,0,0,.6)",
+    "pop-item-hover": "rgba(255,255,255,.08)",
+    "tip-bg": "#2A2A2E",
+    "tip-fg": "#F5F5F7",
+    "tip-bd": "rgba(255,255,255,.12)",
+    "toast-bg": "#2A2A2E",
+    "toast-fg": "#F5F5F7",
+    "toast-bd": "rgba(255,255,255,.12)",
     "code-bg": "rgba(255,255,255,.06)",
     "code-fg": "#E7E1F6",
-    "code-bd": "rgba(255,255,255,.10)",
+    "code-bd": "rgba(255,255,255,.08)",
     "code-kw": "#D9B4FF",
     "code-str": "#8FE8C7",
     "code-num": "#F5C97E",
 
     # ---------- 表格外壳 / 选中 / 滚动条 ----------
-    "grid-bg": "#14111C",
-    "grid-bd": "rgba(255,255,255,.12)",
-    "grid-head-fg": "#CAC2DC",
-    "grid-toolbar": "rgba(34,30,46,.92)",
-    "sel-bg": "rgba(240,117,166,.35)",
+    "grid-bg": "#131315",
+    "grid-bd": "rgba(255,255,255,.10)",
+    "grid-head-fg": "#C5C5CB",
+    "grid-toolbar": "rgba(32,32,36,.94)",
+    "sel-bg": "rgba(240,117,166,.32)",
     "sel-fg": "#FFF3FA",
-    "scroll-thumb": "rgba(255,255,255,.22)",
-    "scroll-thumb-hover": "rgba(255,255,255,.38)",
+    "scroll-thumb": "rgba(255,255,255,.20)",
+    "scroll-thumb-hover": "rgba(255,255,255,.34)",
 
     # ---------- 杂项 ----------
-    "disc-bg": "rgba(255,255,255,.035)",
-    "disc-border": "rgba(255,255,255,.12)",
-    "disc-text": "#A79FB8",
-    "stepper-bg": "rgba(238,90,146,.16)",
-    "stepper-bd": "rgba(238,90,146,.38)",
+    "disc-bg": "#18181B",
+    "disc-border": "rgba(255,255,255,.08)",
+    "disc-text": "#A1A1A6",
+    "stepper-bg": "rgba(238,90,146,.14)",
+    "stepper-bd": "rgba(238,90,146,.28)",
     "stepper-fg": "#FF8FB4",
 }
 
 
-# ---------------------------------------------------------------------------
-# Streamlit 原生组件的主题补丁
-#
-# 为什么需要这一层：Streamlit 1.66 的主题来自 .streamlit/config.toml，
-# 只在启动时读取一次，运行时切不了。所以「深色模式」的实现方式是——
-# 自有样式全走 :root 变量，原生组件则用下面这层 CSS 按变量重新上色。
-# 全部选择器都用 data-testid / role 这类稳定钩子，不碰 Emotion 的哈希类名。
 # ---------------------------------------------------------------------------
 _CSS_WIDGETS = """
 <style>
@@ -3598,7 +4245,7 @@ textarea:-webkit-autofill, select:-webkit-autofill {
 [data-testid="stSkipToContent"] a,
 [data-testid="stSkipToContent"] a:visited {
     background: var(--surface-1) !important; color: var(--accent) !important;
-    border: 1px solid var(--pop-bd); border-radius: .5rem; padding: 6px 12px;
+    border: 1px solid var(--pop-bd); border-radius: var(--r-sm); padding: 6px 12px;
 }
 [data-testid="stSkipToContent"] * { color: var(--accent) !important; }
 
@@ -3654,7 +4301,7 @@ textarea:-webkit-autofill, select:-webkit-autofill {
 .react-aria-ComboBox [role="group"] {
     background: var(--field-bg) !important;
     border: 1px solid var(--field-bd) !important;
-    border-radius: .9rem !important;
+    border-radius: var(--r-md) !important;
     color: var(--input-text) !important;
 }
 [data-testid="stSelectbox"] input,
@@ -3682,7 +4329,7 @@ textarea:-webkit-autofill, select:-webkit-autofill {
     background: var(--field-bg) !important;
     color: var(--input-text) !important;
     border: 1px solid var(--field-bd) !important;
-    border-radius: .9rem !important;
+    border-radius: var(--r-md) !important;
     padding: .35rem .6rem;
 }
 .stApp select option, .stApp [data-testid="stSelectbox"] option {
@@ -3724,7 +4371,7 @@ textarea:-webkit-autofill, select:-webkit-autofill {
 [data-testid="stToast"] {
     background: var(--toast-bg) !important; color: var(--toast-fg) !important;
     border: 1px solid var(--toast-bd) !important;
-    box-shadow: var(--pop-shadow) !important; border-radius: .9rem !important;
+    box-shadow: var(--pop-shadow) !important; border-radius: var(--r-md) !important;
 }
 [data-testid="stToast"] * { color: var(--toast-fg) !important; }
 [data-testid="stToast"] svg { fill: currentColor !important; }
@@ -3743,7 +4390,7 @@ textarea:-webkit-autofill, select:-webkit-autofill {
 [data-testid="stAlert"] {
     background: var(--notice-info-bg) !important;
     border: 1px solid var(--card-border) !important;
-    border-radius: 1rem !important;
+    border-radius: var(--r-md) !important;
 }
 [data-testid="stAlert"] [data-testid="stAlertContentInfo"],
 [data-testid="stAlert"] [data-testid="stAlertContentSuccess"],
@@ -3759,12 +4406,12 @@ textarea:-webkit-autofill, select:-webkit-autofill {
     background: var(--code-bg) !important;
     color: var(--code-fg) !important;
     border: 1px solid var(--code-bd) !important;
-    border-radius: .35rem; padding: .08em .38em;
+    border-radius: var(--r-sm); padding: .08em .38em;
 }
 .stApp pre, .stApp [data-testid="stCode"] pre {
     background: var(--code-bg) !important;
     border: 1px solid var(--code-bd) !important;
-    border-radius: .75rem !important;
+    border-radius: var(--r-md) !important;
 }
 .stApp pre code { background: transparent !important; border: none !important; }
 .stApp code, .stApp [data-testid="stCode"] code { color: var(--code-fg) !important; }
@@ -3784,11 +4431,11 @@ textarea:-webkit-autofill, select:-webkit-autofill {
 [data-testid="stExpander"] details {
     background: var(--card-bg-3) !important;
     border: 1px solid var(--card-border) !important;
-    border-radius: 1.1rem !important;
+    border-radius: var(--r-lg) !important;
 }
 [data-testid="stExpander"] summary {
     background: transparent !important;
-    border-radius: .9rem;
+    border-radius: var(--r-md);
 }
 [data-testid="stExpander"] summary:hover { background: var(--pop-item-hover) !important; }
 [data-testid="stExpander"] summary,
@@ -3809,7 +4456,7 @@ textarea:-webkit-autofill, select:-webkit-autofill {
     color: var(--btn-text) !important;
     background: var(--field-bg) !important;
     border: 1px solid var(--field-bd) !important;
-    border-radius: .7rem !important;
+    border-radius: var(--r-md) !important;
     box-shadow: none !important;
 }
 /* 按钮内部的图标底座自带浅色底，深色下像一块灰斑，统一清空 */
@@ -3833,7 +4480,7 @@ textarea:-webkit-autofill, select:-webkit-autofill {
 [data-testid="stDateInputFieldsScroller"] {
     background: var(--field-bg) !important;
     color: var(--input-text) !important;
-    border-radius: .9rem !important;
+    border-radius: var(--r-md) !important;
 }
 [data-testid="stDateInput"] input,
 [data-testid="stDateInputFieldsScroller"] input,
@@ -3854,11 +4501,11 @@ textarea:-webkit-autofill, select:-webkit-autofill {
 [data-testid="stDataFrame"], [data-testid="stDataEditor"] {
     background: var(--grid-bg) !important;
     border: 1px solid var(--grid-bd) !important;
-    border-radius: 16px !important; overflow: hidden;
+    border-radius: var(--r-lg) !important; overflow: hidden;
 }
 [data-testid="stElementToolbar"], [data-testid="stElementToolbarButtonContainer"] {
     background: var(--grid-toolbar) !important;
-    border: 1px solid var(--grid-bd) !important; border-radius: .6rem;
+    border: 1px solid var(--grid-bd) !important; border-radius: var(--r-sm);
 }
 [data-testid="stElementToolbar"] button,
 [data-testid="stIconMaterial"] { color: var(--grid-head-fg) !important; }
@@ -3867,10 +4514,8 @@ textarea:-webkit-autofill, select:-webkit-autofill {
 
 /* 主按钮 / 选中 Tab 内部的 markdown 段落会被 `.stApp p` 的正文色带走，
    必须把整棵子树钉成品牌前景色，否则浅色主题下是"深字压粉底"。 */
-.stButton > button[kind="primary"], .stButton > button[kind="primary"] *,
-.stDownloadButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] *,
-.stTabs [aria-selected="true"], .stTabs [aria-selected="true"] *,
-[data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primary"] * {
+[data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primary"] *,
+.stTabs [aria-selected="true"], .stTabs [aria-selected="true"] * {
     color: var(--brand-fg) !important;
     -webkit-text-fill-color: var(--brand-fg) !important;
 }
@@ -3880,16 +4525,18 @@ textarea:-webkit-autofill, select:-webkit-autofill {
 }
 
 /* ---------- 按钮禁用态：两种主题都要看得出"不能点" ---------- */
-.stButton > button:disabled, .stDownloadButton > button:disabled,
-[data-testid="stBaseButton-secondary"]:disabled {
+[data-testid="stBaseButton-secondary"]:disabled,
+[data-testid="stBaseButton-secondaryFormSubmit"]:disabled,
+[data-testid="stBaseButton-primary"]:disabled {
     color: var(--btn-dis-fg) !important;
     border-color: var(--field-bd) !important;
     background: var(--field-dis-bg) !important;
     opacity: 1 !important; cursor: not-allowed !important;
     transform: none !important; box-shadow: none !important;
 }
-.stButton > button:focus-visible,
-.stDownloadButton > button:focus-visible {
+[data-testid="stBaseButton-secondary"]:focus-visible,
+[data-testid="stBaseButton-secondaryFormSubmit"]:focus-visible,
+[data-testid="stBaseButton-primary"]:focus-visible {
     outline: none !important;
     box-shadow: 0 0 0 4px var(--focus-ring) !important;
 }
@@ -5120,7 +5767,7 @@ def _render_recur_panel() -> None:
             _html(
                 '<div style="height:38px;display:flex;align-items:center;'
                 'justify-content:center;background:var(--chip-info-bg);'
-                'border:1px solid var(--chip-info-bd);border-radius:14px;'
+                'border:1px solid var(--chip-info-bd);border-radius:var(--r-pill);'
                 'font-size:.8125rem;font-weight:700;color:var(--chip-info-fg);">'
                 f'周{"一二三四五六日"[start_pick.weekday()]}</div>'
             )
@@ -5150,7 +5797,7 @@ def _render_recur_panel() -> None:
                     '<div style="height:40px;display:flex;align-items:center;'
                     'justify-content:center;background:var(--stepper-bg);'
                     'border:1px solid var(--stepper-bd);'
-                    'border-radius:14px;">'
+                    'border-radius:var(--r-md);">'
                     f'<span style="font-size:1.5rem;font-weight:800;color:var(--stepper-fg);">{count}</span>'
                     '<span style="font-size:.8125rem;font-weight:600;color:var(--muted);'
                     'margin-left:4px;">次</span></div>'
@@ -5242,7 +5889,8 @@ def _render_calendar() -> None:
     left, right = st.columns([1, 1.05], gap="medium")
 
     with left:
-        with st.container(border=True):
+        # key 让整块日历拿到 .st-key-cal-grid 钩子，才能把 42 个按钮压成日历格子
+        with st.container(border=True, key="cal_grid"):
             head_prev, head_title, head_next = st.columns([1, 3.4, 1], gap="small")
             with head_prev:
                 st.button("‹", key="cal_prev", on_click=_cal_shift, args=(-1,),
@@ -5542,7 +6190,7 @@ def _render_week_view(events: list[Event]) -> None:
                 else:
                     bg, fg = "var(--chip-info-bg)", "var(--chip-info-fg)"
                 st.markdown(
-                    f'<div style="background:{bg};color:{fg};border-radius:8px;'
+                    f'<div style="background:{bg};color:{fg};border-radius:var(--r-sm);'
                     f'padding:6px 7px;margin-bottom:5px;font-size:.6875rem;line-height:1.35;">'
                     f'<b>{ev.start:%H:%M}</b><br>{_escape(ev.title[:12])}</div>',
                     unsafe_allow_html=True,
