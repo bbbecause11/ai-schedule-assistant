@@ -84,8 +84,9 @@ def test_time_parsing() -> None:
 
     # 课表第几节
     evs = app.parse_with_rules("每周二 第3-4节 数据结构 计算机楼C401")
-    ok = bool(evs) and evs[0].start.hour == 10 and evs[0].start.minute == 0
-    check("「第3-4节」换算为 10:00", ok, f"{evs[0].start:%H:%M}-{evs[0].end:%H:%M}" if evs else "")
+    ok = bool(evs) and evs[0].start.strftime("%H:%M") == "09:55"
+    check("「第3-4节」按默认作息表换算为 09:55",
+          ok, f"{evs[0].start:%H:%M}-{evs[0].end:%H:%M}" if evs else "")
 
     # 跨天
     evs = app.parse_with_rules("今晚22点到次日2点 通宵赶项目")
@@ -766,6 +767,101 @@ def test_course_cell() -> None:
           str(legacy[0]["title"]) if legacy else "")
 
 
+def test_period_table() -> None:
+    section("O. 自定义作息表（节次 → 绝对时间）")
+
+    # ---- 1. 默认模板：第6-7节 = 14:00-15:35 ---------------------------
+    app._set_period_rows([])
+    span = app._period_span(6, 7)
+    check("默认表第6-7节 = 14:00-15:35",
+          span[:2] == ((14, 0), (15, 35)) and span[2] is True, str(span))
+    check("默认表没有第 13 节 → 不瞎猜", app._period_lookup(13) is None)
+
+    # ---- 2. 自定义表：6-7节 = 14:50-16:25 ----------------------------
+    app._set_period_rows([
+        {"name": "第1节", "start": "08:00", "end": "08:45"},
+        {"name": "第2节", "start": "08:55", "end": "09:40"},
+        {"name": "第3节", "start": "10:00", "end": "10:45"},
+        {"name": "第4节", "start": "10:55", "end": "11:40"},
+        {"name": "第6节", "start": "14:50", "end": "15:35"},
+        {"name": "第7节", "start": "15:45", "end": "16:25"},
+        {"name": "晚修", "start": "19:00", "end": "21:30"},
+    ])
+    span = app._period_span(6, 7)
+    check("自定义表第6-7节 = 14:50-16:25",
+          span[:2] == ((14, 50), (16, 25)) and span[2] is True, str(span))
+    check("跨节 = 第6节开始 + 第7节结束",
+          span[0] == (14, 50) and span[1] == (16, 25), str(span))
+    check("没配置的第5节查不到", app._period_lookup(5) is None)
+
+    # 全表都没有「第X节」式名称时，按开始时间排序取行序号
+    app._set_period_rows([
+        {"name": "早读", "start": "07:30", "end": "07:55"},
+        {"name": "上午", "start": "08:00", "end": "11:40"},
+        {"name": "下午", "start": "14:00", "end": "17:00"},
+    ])
+    check("无「第X节」名称时按行序号回退",
+          app._period_lookup(2) == ((8, 0), (11, 40)), str(app._period_lookup(2)))
+    check("行序号越界 → None", app._period_lookup(4) is None)
+
+    # ---- 3. 解析路径：节次查表 ---------------------------------------
+    app._set_period_rows([
+        {"name": "第1节", "start": "08:00", "end": "08:45"},
+        {"name": "第2节", "start": "08:55", "end": "09:40"},
+        {"name": "第6节", "start": "14:50", "end": "15:35"},
+        {"name": "第7节", "start": "15:45", "end": "16:25"},
+        {"name": "晚修", "start": "19:00", "end": "21:30"},
+    ])
+    evs = app.parse_with_rules(
+        "2026年10月29日 周四\n第6-7节\n高等数学\n场地：回龙2311\n每周四 · 共 16 次\n")
+    check("第6-7节 → 14:50-16:25",
+          bool(evs) and evs[0].start.strftime("%H:%M") == "14:50"
+          and evs[0].end.strftime("%H:%M") == "16:25",
+          f"{evs[0].start:%H:%M}-{evs[0].end:%H:%M}" if evs else "")
+
+    # 「晚修」别名也能当时间节点
+    evs2 = app.parse_with_rules(
+        "2026年10月28日 周二\n晚修\n程序设计实训\n场地：计算机楼301\n每周二 · 共 12 次\n")
+    check("「晚修」按作息表换算",
+          bool(evs2) and evs2[0].start.strftime("%H:%M") == "19:00"
+          and evs2[0].end.strftime("%H:%M") == "21:30",
+          f"{evs2[0].start:%H:%M}-{evs2[0].end:%H:%M}" if evs2 else "")
+
+    # 未配置的节次：标记待确认，绝不瞎猜
+    evs3 = app.parse_with_rules(
+        "2026年10月30日 周五\n第12节\n晚自习\n场地：三江楼201\n")
+    check("未配置节次标记待确认",
+          bool(evs3) and evs3[0].vague and "作息表" in evs3[0].vague_reason,
+          evs3[0].vague_reason if evs3 else "")
+
+    # ---- 4. 绝对时间优先于节次 ---------------------------------------
+    app._set_period_rows([
+        {"name": "第3节", "start": "10:00", "end": "10:45"},
+        {"name": "第4节", "start": "10:55", "end": "11:40"},
+    ])
+    evs4 = app.parse_with_rules(
+        "2026年10月30日 周五\n10:45 第3-4节 习题课\n场地：三江楼101\n")
+    check("「10:45 第3-4节」开始用绝对时间",
+          bool(evs4) and evs4[0].start.strftime("%H:%M") == "10:45",
+          f"{evs4[0].start:%H:%M}" if evs4 else "")
+    check("结束时间用第 4 节下课补齐",
+          bool(evs4) and evs4[0].end.strftime("%H:%M") == "11:40",
+          f"{evs4[0].end:%H:%M}" if evs4 else "")
+
+    # ---- 5. AI 提示词注入 ---------------------------------------------
+    app._set_period_rows([
+        {"name": "第1节", "start": "08:00", "end": "08:45"},
+        {"name": "第2节", "start": "08:55", "end": "09:40"},
+    ])
+    text = app._period_table_text()
+    check("作息表注入成一行文本", "第1节 08:00-08:45" in text, text[:60])
+    check("AI 提示词包含作息表占位符与查表规则",
+          "{period_table}" in app.AI_SYSTEM_PROMPT
+          and "必须用它换算" in app.AI_SYSTEM_PROMPT)
+
+    app._set_period_rows([])          # 还原默认，避免影响后续用例
+
+
 def test_theme_guard() -> None:
     section("K. 主题令牌一致性（防硬编码 / 防漏定义）")
     import re
@@ -955,7 +1051,7 @@ def main() -> int:
     for fn in (test_text_only, test_time_parsing, test_structure_fields,
                test_dedup_conflict, test_export, test_recurrence,
                test_calendar_and_sample, test_ocr,
-               test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_security, test_theme_guard):
+               test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_period_table, test_security, test_theme_guard):
         try:
             fn()
         except Exception:  # noqa: BLE001

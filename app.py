@@ -59,7 +59,8 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   1.6.0  时间块归并：字段列表型截图按时间节点合并，属性词不再当作日程标题
 #   1.7.0  重复规则引擎：图片里的「每周四/1-16周/单双周/共N次」直出 RRULE
 #   1.8.0  教务单元格解析：课程名/地点/教师严格分离，属性词绝不进标题
-APP_VERSION = "1.8.0"
+#   1.9.0  自定义作息表：「第X节 / 晚修」按用户作息换算成绝对时间，注入 AI 提示词
+APP_VERSION = "1.9.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -962,7 +963,20 @@ def parse_section_range(text: str) -> tuple[datetime | None, datetime | None, st
         return None, None, ""
     a = cn_number(m.group("a"))
     b = cn_number(m.group("b")) if m.group("b") else a
-    if a is None or a not in SECTION_MAP:
+    if a is None:
+        return None, None, ""
+    # 优先查用户配置的作息表（设置里可改）；查不到再退回内置 SECTION_MAP
+    hit_a = _period_lookup(a) if a else None
+    hit_b = _period_lookup(b) if (b and b != a) else hit_a
+    if hit_a and hit_b:
+        return (
+            datetime.combine(date.today(), datetime.min.time()).replace(
+                hour=hit_a[0][0], minute=hit_a[0][1]),
+            datetime.combine(date.today(), datetime.min.time()).replace(
+                hour=hit_b[1][0], minute=hit_b[1][1]),
+            m.group(0),
+        )
+    if a not in SECTION_MAP:
         return None, None, ""
     start_h, start_m = SECTION_MAP[a]
     end_h, end_m = SECTION_MAP.get(b or a, (start_h + 1, start_m))
@@ -1406,14 +1420,6 @@ def _extract_time_blocks(text: str, anchor_day: date) -> tuple[list[Event], set[
     """
     raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     lines = [ln.strip() for ln in raw_lines]
-    field_rows = sum(1 for ln in lines if _field_of(ln) is not None)
-    recur_rows = sum(1 for ln in lines
-                     if ln and _BLOCK_RECUR_RE.search(ln) and len(ln) <= 24)
-    # 门槛：至少 2 行字段，或「1 行字段 + 1 行循环说明」。
-    # 后者对应「场地：回龙2311 / 每周四共16次」这种精简版的课程详情，
-    # 它同样是「时间 -> 多个属性」结构，不该退化成逐行解析。
-    if field_rows < 2 and not (field_rows >= 1 and recur_rows >= 1):
-        return [], set()
 
     # --- 1. 按时间节点切块 ------------------------------------------------
     blocks: list[dict[str, Any]] = []
@@ -1424,9 +1430,10 @@ def _extract_time_blocks(text: str, anchor_day: date) -> tuple[list[Event], set[
             continue
         clock = _time_block_start(ln)
         period = None if clock else _period_block_start(ln)
-        if clock or period:
-            current = {"clock": clock, "period": period, "lines": [],
-                       "head": ln}
+        alias = None if (clock or period) else _period_alias_start(ln)
+        if clock or period or alias:
+            current = {"clock": clock, "period": period, "alias": alias,
+                       "lines": [], "head": ln}
             blocks.append(current)
             # 「10:45 场地：回龙2311」这种时间与首行黏在一起的情况，拆出剩余部分
             if clock:
@@ -1440,6 +1447,15 @@ def _extract_time_blocks(text: str, anchor_day: date) -> tuple[list[Event], set[
         current["lines"].append(ln)
 
     if not blocks:
+        return [], set()
+
+    # 门槛：块里至少有 1 行字段或循环说明。「第6-7节 + 场地：回龙2311」
+    # 就是课程详情的最小形态，也该归并；纯「10:45 开会」没有字段行，
+    # 仍走逐行解析，普通备忘完全不受影响。
+    field_rows = sum(1 for ln in lines if _field_of(ln) is not None)
+    recur_rows = sum(1 for ln in lines
+                     if ln and _BLOCK_RECUR_RE.search(ln) and len(ln) <= 24)
+    if field_rows < 1 and recur_rows < 1:
         return [], set()
 
     flat = "\n".join(lines)
@@ -1512,14 +1528,26 @@ def _block_to_event(blk: dict[str, Any], day: date,
     # --- 时间 -------------------------------------------------------------
     start_dt: datetime | None = None
     end_dt: datetime | None = None
-    if blk["clock"]:
+    period_missed = False
+    if blk.get("alias"):
+        (h0, m0), (h1, m1) = blk["alias"]
+        start_dt = datetime.combine(day, dt_time(h0, m0))
+        end_dt = datetime.combine(day, dt_time(h1, m1))
+    elif blk["clock"]:
         h, m = blk["clock"]
         start_dt = datetime.combine(day, dt_time(h, m))
         end_dt = start_dt + timedelta(minutes=45)
+        # 「10:45 第3-4节 习题课」：开始用钟点（绝对时间优先），
+        # 结束用节次的下课时间（查用户作息表）。
+        for _ln in blk["lines"]:
+            _s, _e, _ = parse_section_range(_ln)
+            if _s:
+                end_dt = datetime.combine(day, _e.time())
+                break
     elif blk["period"]:
         p0, p1 = blk["period"]
-        h0, m0 = _period_clock(p0, 0)
-        h1, m1 = _period_clock(p1, 1)
+        (h0, m0), (h1, m1), hit = _period_span(p0, p1)
+        period_missed = not hit
         start_dt = datetime.combine(day, dt_time(h0, m0))
         end_dt = datetime.combine(day, dt_time(h1, m1))
     if start_dt is None:
@@ -1575,6 +1603,9 @@ def _block_to_event(blk: dict[str, Any], day: date,
             end_dt += timedelta(days=7)
     rrule = recur_info.rrule(start_dt)
     vague_reason = "从截图的字段列表按时间归并得出，请核对标题与时间"
+    if period_missed:
+        vague_reason += (f"；作息表里没有第 {blk['period'][0]}-{blk['period'][1]} 节，"
+                         "时间按默认表推算，请到设置里补充")
     if title == fallback:
         vague_reason = "该时间块没有找到明确的日程名，标题按时间自动生成，请补充"
 
@@ -1699,9 +1730,15 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
         end_dt: datetime | None = None
         time_explicit = False
 
-        # 课表「第X-Y节」优先
+        # 课表「第X-Y节」：只有没写钟点时才查表换算；
+        # 「10:45 第3-4节」这种混杂写法，绝对时间优先，节次只用来补结束时间。
         sec_start, sec_end, sec_text = parse_section_range(line)
-        if sec_start and sec_start.date() == date.today():
+        sec_hit = False
+        if sec_start:
+            m_sec = _SECTION_RE.search(line)
+            na = cn_number(m_sec.group("a")) if m_sec else None
+            sec_hit = na is not None and _period_lookup(na) is not None
+        if sec_start and not tokens and sec_start.date() == date.today():
             start_dt = datetime.combine(day, sec_start.time())
             end_dt = datetime.combine(day, sec_end.time())
             if end_dt <= start_dt:
@@ -1745,6 +1782,9 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
                     end_dt = start_dt + timedelta(minutes=float(dur.group(1)) * 60)
                 elif dur_min:
                     end_dt = start_dt + timedelta(minutes=int(dur_min.group(1)))
+            # 「10:45 第3-4节」：开始用钟点，结束用第 4 节的下课时间
+            if end_dt is None and sec_start and sec_start.date() == date.today():
+                end_dt = datetime.combine(day, sec_end.time())
 
         # 「全天 / 整天」：识别为整日事件（00:00–23:59），
         # 必须放在时间点解析之后，否则会覆盖显式时刻
@@ -1770,6 +1810,9 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
                 if time_explicit:
                     vague_reasons.append("未写结束时间，默认持续 1 小时")
 
+        if sec_start and not sec_hit and time_explicit:
+            vague_reasons.append("作息表里查不到该节次，时间按内置默认表推算，"
+                                 "请到设置里补充")
         # 跨天修正：结束早于开始 → 视为次日（如 22:00-02:00）
         if end_dt < start_dt:
             end_dt = end_dt + timedelta(days=1)
@@ -3036,7 +3079,7 @@ COURSE_PERIOD_TIMES: dict[int, tuple[int, int, int, int]] = {
 
 
 def _period_clock(period: int, which: int) -> tuple[int, int]:
-    """取第 period 节的开始（which=0）或结束（which=1）时刻；超出表格就顺延。"""
+    """内置默认表的兜底换算：第 period 节的开始/结束；超出就顺延。"""
     times = COURSE_PERIOD_TIMES.get(period)
     if times:
         return (times[0], times[1]) if which == 0 else (times[2], times[3])
@@ -3045,6 +3088,138 @@ def _period_clock(period: int, which: int) -> tuple[int, int]:
     start = datetime(2000, 1, 1, base[2], base[3]) + timedelta(minutes=5 + extra * 50)
     end = start + timedelta(minutes=45)
     return (start.hour, start.minute) if which == 0 else (end.hour, end.minute)
+
+
+# 自定义作息表：用户配置「第X节 = 几点到几点」，节次按表换算成绝对时间。
+
+
+# 默认作息模板（与 COURSE_PERIOD_TIMES 对齐），用户在设置里改完即生效。
+def _default_period_rows() -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for p, (h0, m0, h1, m1) in COURSE_PERIOD_TIMES.items():
+        rows.append({"name": f"第{p}节",
+                     "start": f"{h0:02d}:{m0:02d}",
+                     "end": f"{h1:02d}:{m1:02d}"})
+    return rows
+
+
+_PERIOD_NAME_RE = re.compile(r"^第\s*(\d{1,2})\s*节$")
+
+
+def _parse_hhmm(text: Any) -> tuple[int, int] | None:
+    """「08:00」「8:05」「08：00」→ (8, 0)；解析失败返回 None。"""
+    m = re.match(r"^\s*(\d{1,2})\s*[:：]\s*(\d{1,2})\s*$", str(text or ""))
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if 0 <= h <= 23 and 0 <= mi <= 59:
+        return (h, mi)
+    return None
+
+
+# 进程内的自定义作息表缓存：UI 与解析都在同一次运行里，改完立即生效；
+# 同时也让 selfcheck 这类无 Streamlit 会话的环境能直接注入配置做测试。
+_CUSTOM_PERIOD_ROWS: list[dict[str, str]] | None = None
+
+
+def _set_period_rows(rows: list[dict[str, str]]) -> None:
+    """保存用户配置的作息表（UI 编辑器与测试都用它）。"""
+    global _CUSTOM_PERIOD_ROWS
+    _CUSTOM_PERIOD_ROWS = [dict(r) for r in rows]
+    try:
+        st.session_state.period_rows = _CUSTOM_PERIOD_ROWS
+        st.session_state.period_editor_sync = _CUSTOM_PERIOD_ROWS
+    except Exception:  # noqa: BLE001 - 无 Streamlit 会话时跳过
+        pass
+
+
+def _period_rows() -> list[dict[str, str]]:
+    """当前生效的作息表：进程内配置 > 会话状态 > 默认模板。"""
+    rows = _CUSTOM_PERIOD_ROWS
+    if not rows:
+        try:
+            rows = st.session_state.get("period_rows")
+        except Exception:  # noqa: BLE001 - 裸模式没有会话
+            rows = None
+    if isinstance(rows, list) and rows:
+        cleaned: list[dict[str, str]] = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            name = str(r.get("name") or "").strip()
+            s, e = _parse_hhmm(r.get("start")), _parse_hhmm(r.get("end"))
+            if name and s and e:
+                cleaned.append({"name": name,
+                                "start": f"{s[0]:02d}:{s[1]:02d}",
+                                "end": f"{e[0]:02d}:{e[1]:02d}"})
+        if cleaned:
+            return cleaned
+    return _default_period_rows()
+
+
+def _period_lookup(period: int) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """
+    第 period 节 → ((时,分), (时,分))；作息表里没有就返回 None。
+
+    匹配顺序：先按名称「第N节」精确匹配；整个表都没有「第X节」这种
+    名称时（用户可能写成「早读 / 上午第一节」），再按开始时间排序
+    的行序号回退。
+    """
+    rows = _period_rows()
+    by_name: tuple | None = None
+    named = 0
+    for row in rows:
+        m = _PERIOD_NAME_RE.match(row["name"])
+        if not m:
+            continue
+        named += 1
+        if int(m.group(1)) == period:
+            by_name = (_parse_hhmm(row["start"]), _parse_hhmm(row["end"]))
+            break
+    if by_name:
+        return by_name
+    if named == 0:                       # 表里根本没有「第X节」式名称
+        ordered = sorted(rows, key=lambda r: _parse_hhmm(r["start"]))
+        if 1 <= period <= len(ordered):
+            row = ordered[period - 1]
+            return (_parse_hhmm(row["start"]), _parse_hhmm(row["end"]))
+    return None
+
+
+def _period_alias_start(line: str) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """
+    「晚修」「早读」这类非数字节次名：整行就是作息表里的某个名称时，
+    作为时间节点开块，时间直接取该行配置。
+    """
+    t = line.strip()
+    if not t or len(t) > 8 or _PERIOD_NAME_RE.match(t):
+        return None
+    for row in _period_rows():
+        if row["name"] == t:
+            return _parse_hhmm(row["start"]), _parse_hhmm(row["end"])
+    return None
+
+
+def _period_span(p0: int, p1: int) -> tuple[tuple[int, int], tuple[int, int], bool]:
+    """
+    「第 p0-p1 节」→ (开始时刻, 结束时刻, 是否命中作息表)。
+
+    跨节 = 第 p0 节的开始 + 第 p1 节的结束；两个都查不到才判定未配置。
+    """
+    head = _period_lookup(p0)
+    tail = _period_lookup(p1) if p1 != p0 else head
+    if head and tail:
+        return head[0], tail[1], True
+    # 只要有一头没查到，就退回默认表兜底（调用方会标记待核对）
+    h0, m0 = _period_clock(p0, 0)
+    h1, m1 = _period_clock(p1, 1)
+    return (h0, m0), (h1, m1), False
+
+
+def _period_table_text() -> str:
+    """把作息表压成一行文本，注入 AI 提示词：「第1节 08:00-08:45；第2节 …」。"""
+    return "；".join(f"{r['name']} {r['start']}-{r['end']}"
+                     for r in _period_rows())
 
 
 def _this_monday(today: "date | None" = None) -> "date":
@@ -3070,16 +3245,14 @@ def timetable_to_events(cells: list[dict[str, Any]],
     for cell in cells:
         wd: int = cell["weekday"]
         p0, p1 = cell["periods"]
-        h0, m0 = _period_clock(p0, 0)
-        h1, m1 = _period_clock(p1, 1)
+        (h0, m0), (h1, m1), hit = _period_span(p0, p1)
 
         for info in cell.get("courses") or _split_cell_courses(cell["text"]):
             # 单元格文字里写了「(3-4节)」时，比网格按文字位置推断的更准：
             # 合并单元格的文字垂直居中，靠坐标只会落在中间那一节上。
             if info.get("periods"):
                 p0, p1 = info["periods"]
-                h0, m0 = _period_clock(p0, 0)
-                h1, m1 = _period_clock(p1, 1)
+                (h0, m0), (h1, m1), hit = _period_span(p0, p1)
             title = info["title"].strip()
             if len(title) < 2 or re.fullmatch(r"[\d\s()（）.．·、/\\-]+", title):
                 continue                     # 表格里的空壳、噪声
@@ -3112,7 +3285,9 @@ def timetable_to_events(cells: list[dict[str, Any]],
             start_week = first_week + shift_week
             skips = [g - start_week for g in _weeks_gaps(weeks) if g - start_week >= 0]
 
-            bits = ["课表导入 · 按默认作息表推算时间"]
+            bits = ["课表导入 · "
+                    + ("时间按用户作息表换算" if hit
+                       else f"作息表里没有第 {p0}-{p1} 节，时间按默认表推算")]
             if weeks:
                 bits.append(f"第 {_weeks_label(weeks)} 周")
             if odd_even:
@@ -3134,7 +3309,9 @@ def timetable_to_events(cells: list[dict[str, Any]],
                 + (f" {odd_even}" if odd_even else ""),
                 recur_source="image" if rrule else "",
                 vague=True,
-                vague_reason="课程时间与首周日期由课表推算，请核对",
+                vague_reason=("课程时间与首周日期由课表推算，请核对"
+                              + ("" if hit else
+                                 f"；作息表里没有第 {p0}-{p1} 节，请到设置里补充")),
                 source="ocr",
                 raw=cell["text"],
             ))
@@ -3203,8 +3380,14 @@ AI_SYSTEM_PROMPT = """你是一个严谨的日程结构化引擎，负责把用�
 4. 没写具体时间但能确定日期：默认 09:00 开始，并置 vague=true。
 5. 完全无法判断时间的条目：跳过，不要编造。
 6. 同一件事在多处重复出现，只保留一条。
-7. 「第1-2节」这类课表表达，第1节=08:00，第2节=08:55，第3节=10:00，第4节=10:55，
-   第5节=14:00，第6节=14:55，第7节=16:00，第8节=16:55，第9节=19:00，第10节=19:55。
+7. 【作息表】用户学校的作息表如下（必须用它换算，不许用你记忆里的时间）：
+   {period_table}
+   - 「第6-7节」= 第6节的开始时间 ~ 第7节的结束时间（例如表中第6节 14:50 起、
+     第7节 16:25 止，则事件为 14:50-16:25）。
+   - 「晚修」「早读」这类非数字节次名，直接查表里的同名行。
+   - 图片里直接写了「14:50」这类绝对时间时，绝对时间优先，不要查表覆盖。
+   - 节次在表里查不到：start/end 都留空串并置 vague=true，
+     绝不可以用默认时间凑数。
 8. 跨天活动（如 22:00 到次日 02:00）的 end 必须写次日日期。
 9. 已过期的日程不要输出。
 10. 时间有歧义（如只写「3点」）必须置 vague=true。
@@ -3367,7 +3550,7 @@ def parse_with_ai(text: str, config: dict[str, Any],
     weekday_cn = "一二三四五六日"[now.weekday()]
     system = AI_SYSTEM_PROMPT.replace("{today}", now.strftime("%Y-%m-%d")).replace(
         "{weekday}", weekday_cn
-    )
+    ).replace("{period_table}", _period_table_text())
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": f"请整理以下日程文本：\n\n{text}"},
@@ -5412,6 +5595,8 @@ def init_state() -> None:
         # course_anchor 由设置面板的 date_input 自己维护（widget key），
         # 这里只记录「用户是否手动指定过」，决定导入后是否提示日期为推算值。
         "course_anchor_set": False,
+        "period_rows": None,             # None = 未自定义，用默认作息模板
+        "period_editor_sync": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -5753,6 +5938,51 @@ def _cb_course_anchor() -> None:
     st.session_state.course_anchor_set = True
 
 
+def _cb_reset_periods() -> None:
+    """恢复默认作息模板。"""
+    _set_period_rows(_default_period_rows())
+    st.session_state.pending_toast = "已恢复默认作息模板（12 节）"
+
+
+def _render_period_editor() -> None:
+    """作息表编辑器：直接在表格里改名字和时间，回车即保存。"""
+    import pandas as pd
+
+    rows = st.session_state.get("period_rows") or _default_period_rows()
+    if not st.session_state.get("period_editor_sync"):
+        st.session_state.period_editor_sync = rows
+    st.caption("一行一节。改完立即生效：解析「第6-7节」会用第 6 节的开始时间到"
+               "第 7 节的结束时间；最下一行的空白框可以批量添加。")
+    edited = st.data_editor(
+        pd.DataFrame(rows, columns=["name", "start", "end"]),
+        column_config={
+            "name": st.column_config.TextColumn("节次名称"),
+            "start": st.column_config.TextColumn("开始 (HH:MM)"),
+            "end": st.column_config.TextColumn("结束 (HH:MM)"),
+        },
+        num_rows="dynamic",                     # 底部直接拉出新行，批量添加
+        width="stretch",
+        hide_index=True,
+        key="period_editor",
+    )
+    # data_editor 每次交互都返回全量数据，同步进状态即可，不需要「保存」按钮
+    records = edited.to_dict("records") if hasattr(edited, "to_dict") else []
+    _set_period_rows(records)
+
+    hit = _period_lookup(1)
+    if hit:
+        st.caption(f"当前生效：第 1 节 {hit[0][0]:02d}:{hit[0][1]:02d} 起，"
+                   f"共 {len(st.session_state.period_rows)} 节。")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.button("↺ 恢复默认模板", key="period_reset", on_click=_cb_reset_periods,
+                  help=_tip("恢复默认模板",
+                            "把作息表重置成内置的 12 节通用模板"
+                            "（第 1 节 08:00-08:45 起）。"))
+    with c2:
+        st.caption(f"注入 AI 的话：{_period_table_text()[:40]}…")
+
+
 def render_settings_panel() -> None:
     """侧边栏设置面板：外观 → AI 解析 → OCR 识别 → 课表识别 → 默认提醒。"""
     # ---------- 外观 ----------
@@ -5831,8 +6061,14 @@ def render_settings_panel() -> None:
                   "要从这个日期往后推算成具体哪天。填对了日期就准；"
                   "不填则按本周一算，导入的课程会标「待核对」。"),
     )
-    st.caption("课表截图里的周次按这个日期换算；上课时间按默认作息表推算"
-               "（第 1 节 08:00 起、每节 45 分钟），导入后可在日程表里逐条微调。")
+    st.caption("课表截图里的周次按这个日期换算；上课时间按下面的作息表换算，"
+               "导入后可在日程表里逐条微调。")
+
+    # ---------- 作息时间表 ----------
+    st.markdown("#### ⏰ 作息时间表")
+    st.caption("课表上写的「第6-7节」「晚修」按这张表换算成具体时间。"
+               "改成你学校的作息后再解析，时间就是准的。")
+    _render_period_editor()
 
     # ---------- 默认提醒 ----------
     st.markdown("#### 🔔 默认提醒")
