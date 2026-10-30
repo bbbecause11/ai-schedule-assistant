@@ -4562,6 +4562,27 @@ _CSS = """
 }
 
 /* ---------- 10. 输入框 ---------- */
+/* 新版 Streamlit（1.4x+）把浅色底写在「根元素」上，只改内层 textarea/input
+   会透出白底。根元素统一按令牌着色，内层置透明。 */
+[data-testid="stTextAreaRootElement"],
+[data-testid="stTextInputRootElement"],
+[data-testid="stNumberInputRootElement"],
+[data-testid="stTimeInputField"] {
+    background: var(--field-bg) !important;
+    border: 1px solid var(--field-bd) !important;
+    border-radius: var(--r-md) !important;
+    overflow: hidden;
+}
+[data-testid="stTextAreaRootElement"] textarea,
+[data-testid="stTextInputRootElement"] input,
+[data-testid="stNumberInputRootElement"] input,
+[data-testid="stTimeInputField"] input {
+    background: transparent !important;
+    border: none !important;
+    color: var(--input-text) !important;
+    -webkit-text-fill-color: var(--input-text) !important;
+}
+
 .stTextArea textarea, .stTextInput input, .stNumberInput input, .stDateInput input {
     background: var(--input-bg) !important;
     border: 1px solid var(--input-border) !important;
@@ -4659,6 +4680,14 @@ _CSS = """
     .hero { animation: riseIn var(--dur-slow) var(--ease-out) both; }
     .section-title { animation: riseIn var(--dur-base) var(--ease-out) both; }
 }
+/* ---------- 7.5 深色下顶栏给实色底 ---------- */
+[data-testid="stHeader"] {
+    background: var(--body-bg) !important;
+    border-bottom: 1px solid var(--line);
+}
+[data-testid="stHeader"] button,
+[data-testid="stHeader"] svg { color: var(--ink-2) !important; fill: currentColor !important; }
+
 @media (prefers-reduced-motion: reduce) {
     .stApp *, .stApp *::before, .stApp *::after {
         animation-duration: .001ms !important;
@@ -5084,7 +5113,9 @@ _TOKENS_DARK = {
 # ---------------------------------------------------------------------------
 _CSS_WIDGETS = """
 <style>
-/* ---------- 全局：选中文本、原生控件配色、滚动条 ----------
+/* ---------- 全局：选中文本、原生控件配色、滚动条 ---------- */
+/* 深色下滚动到顶/底再回弹，露出的浏览器回弹区是白的——直接禁掉回弹显示 */
+html { overscroll-behavior-y: none; overscroll-behavior-x: none; }
    color-scheme 由 _css_tokens() 按主题写入 :root，这里不要再覆盖，
    否则深色模式下浏览器原生滚动条 / 日期面板仍是亮色。 */
 ::selection { background: var(--sel-bg) !important; color: var(--sel-fg) !important; }
