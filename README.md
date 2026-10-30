@@ -3,7 +3,7 @@
 > 把散落在聊天记录、课表截图、备忘录里的碎片化日程，一键整理成可视化日程表，
 > 并导出为标准 `.ics` 日历文件，直接导入手机、电脑、Outlook、Google 日历。
 
-由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.3.1**。
+由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.3.2**。
 
 **仓库地址**：<https://github.com/bbbecause11/ai-schedule-assistant>（公开，可直接访问）
 

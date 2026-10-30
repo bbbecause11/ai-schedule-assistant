@@ -84,7 +84,10 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #          「圆角+渐变」的背景按容器坐标绘制，渐变首尾色标从圆角缺口漏出。
 #          渐变改由 inset:0 伪元素承载 + overflow:hidden 强制圆角裁剪；
 #          手机端按 UA 自动折叠侧边栏，避免浮层压住正文
-APP_VERSION = "2.3.1"
+#   2.3.2  占位符不再像「已输入内容」：field-ph 压暗（深 #6E6E73 /
+#          浅 #9A9AA0），并补上 -webkit-text-fill-color —— 它优先级高于
+#          color，不覆盖的话占位符仍会被输入框正文色刷白
+APP_VERSION = "2.3.2"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -5140,7 +5143,9 @@ _CSS = """
 .stApp small,
 .stApp [data-testid="stCaptionContainer"],
 .stApp [data-testid="stCaptionContainer"] p {
-    color: var(--muted-2);
+    /* 说明文字退到背景层：它是「补充信息」不是「正文」，
+       太亮会跟真正的内容抢注意力 */
+    color: var(--muted-3);
     font-size: var(--fs-xs);
     line-height: var(--lh-snug);
     letter-spacing: 0;
@@ -5610,8 +5615,20 @@ _CSS = """
                 box-shadow var(--dur-fast) var(--ease-out);
 }
 .stTextArea textarea { padding: .7rem .85rem !important; }
-.stTextArea textarea::placeholder, .stTextInput input::placeholder {
+/* 占位符颜色：刻意压得比正文暗一大截 —— 占位符太亮会被误认成
+   "已经输入了内容"，用户就会以为不用再打字。数值框 / 日期框也一并覆盖。
+
+   注意必须同时改 -webkit-text-fill-color：它在 WebKit / Blink 里
+   优先级高于 color，输入框的正文样式用它把整块文字刷成 --input-text，
+   不覆盖的话占位符会被强制渲染成正文白 / 黑，color 改了也没用。 */
+.stTextArea textarea::placeholder,
+.stTextInput input::placeholder,
+.stNumberInput input::placeholder,
+.stDateInput input::placeholder,
+.stTimeInput input::placeholder {
     color: var(--field-ph) !important;
+    -webkit-text-fill-color: var(--field-ph) !important;
+    opacity: 1 !important;
 }
 .stTextArea textarea:focus, .stTextInput input:focus,
 .stNumberInput input:focus, .stDateInput input:focus {
@@ -6005,7 +6022,7 @@ _TOKENS_LIGHT = {
     "field-bg": "#FFFFFF",
     "field-bd": "rgba(0,0,0,.12)",
     "field-bd-hover": "rgba(0,0,0,.22)",
-    "field-ph": "#86868B",
+    "field-ph": "#9A9AA0",
     "field-dis-fg": "#9A9AA0",
     "field-dis-bg": "rgba(0,0,0,.035)",
     "focus-ring": "rgba(192,42,102,.20)",
@@ -6167,7 +6184,7 @@ _TOKENS_DARK = {
     "field-bg": "rgba(255,255,255,.06)",
     "field-bd": "rgba(255,255,255,.14)",
     "field-bd-hover": "rgba(255,255,255,.24)",
-    "field-ph": "#8E8E94",
+    "field-ph": "#6E6E73",
     "field-dis-fg": "#6E6E73",
     "field-dis-bg": "rgba(255,255,255,.03)",
     "focus-ring": "rgba(240,117,166,.26)",
@@ -6375,7 +6392,10 @@ textarea:-webkit-autofill, select:-webkit-autofill {
     -webkit-text-fill-color: var(--input-text) !important;
 }
 [data-testid="stSelectbox"] input::placeholder,
-[data-testid="stMultiSelect"] input::placeholder { color: var(--field-ph) !important; }
+[data-testid="stMultiSelect"] input::placeholder {
+    color: var(--field-ph) !important;
+    -webkit-text-fill-color: var(--field-ph) !important;
+}
 [data-testid="stSelectbox"] button,
 [data-testid="stMultiSelect"] button { background: transparent !important; color: var(--muted) !important; }
 [data-testid="stSelectbox"] svg,

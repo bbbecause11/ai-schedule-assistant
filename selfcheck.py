@@ -1042,6 +1042,61 @@ def test_security() -> None:
           "st.data_editor" in src)
 
 
+def test_placeholder_style() -> None:
+    """占位符颜色：必须同时压 color 和 -webkit-text-fill-color。
+
+    输入框正文样式用 -webkit-text-fill-color 把整块文字刷成正文色，
+    它在 WebKit / Blink 里优先级高于 color —— 只改 color 的话
+    占位符仍会被渲染成正文白/黑，看起来像「已经输入了内容」。
+    """
+    src = open("app.py", encoding="utf-8").read()
+    # 取占位符规则块（含 textarea / input 的 ::placeholder）
+    block = ""
+    for marker in ("::placeholder",):
+        idx = 0
+        while True:
+            i = src.find(marker, idx)
+            if i < 0:
+                break
+            start = src.rfind("}", 0, i) + 1
+            end = src.find("}", i) + 1
+            block += src[start:end] + "\n"
+            idx = end
+    check("占位符样式存在", "::placeholder" in block, block[:160])
+    check("占位符压暗了 color（区别于正文，避免被误认成已输入）",
+          "var(--field-ph)" in block and "color:" in block,
+          block[:200])
+    check("占位符同时覆盖 -webkit-text-fill-color（否则改 color 无效）",
+          "-webkit-text-fill-color" in block,
+          "只设 color 会被输入框的 -webkit-text-fill-color 覆盖")
+
+    # 深浅两套主题的 field-ph 都要比 input-text 弱
+    import app as _app
+    dark = _app._TOKENS_DARK["field-ph"]
+    light = _app._TOKENS_LIGHT["field-ph"]
+
+    def _lum(hexv: str) -> float:
+        r, g, b = (int(hexv[i:i + 2], 16) / 255 for i in (1, 3, 5))
+
+        def f(c: float) -> float:
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+
+    def _cr(a: str, b: str) -> float:
+        l1, l2 = _lum(a), _lum(b)
+        hi, lo = max(l1, l2), min(l1, l2)
+        return (hi + 0.05) / (lo + 0.05)
+
+    # 深色主题：占位符对输入框底色对比度 1.8~3.2（明显弱但可读）
+    d = _cr(dark, "#3F3E40")
+    check("深色占位符对比度在 1.8~3.2（既弱又可读）",
+          1.8 <= d <= 3.2, f"{dark} → {d:.2f}:1")
+    # 浅色主题：占位符对白底对比度 2.4~3.2
+    l = _cr(light, "#FFFFFF")
+    check("浅色占位符对比度在 2.4~3.2（既弱又可读）",
+          2.4 <= l <= 3.2, f"{light} → {l:.2f}:1")
+
+
 def main() -> int:
     print("=" * 68)
     print(" AI 智能日程收纳工具 · 自动化自查")
@@ -1051,7 +1106,8 @@ def main() -> int:
     for fn in (test_text_only, test_time_parsing, test_structure_fields,
                test_dedup_conflict, test_export, test_recurrence,
                test_calendar_and_sample, test_ocr,
-               test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_period_table, test_security, test_theme_guard):
+               test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_period_table, test_security, test_theme_guard,
+               test_placeholder_style):
         try:
             fn()
         except Exception:  # noqa: BLE001
