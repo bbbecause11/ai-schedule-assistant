@@ -3,7 +3,7 @@
 > 把散落在聊天记录、课表截图、备忘录里的碎片化日程，一键整理成可视化日程表，
 > 并导出为标准 `.ics` 日历文件，直接导入手机、电脑、Outlook、Google 日历。
 
-由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.2.4**。
+由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.3.0**。
 
 **仓库地址**：<https://github.com/bbbecause11/ai-schedule-assistant>（公开，可直接访问）
 
@@ -79,8 +79,16 @@
 ├── run.bat                      Windows 一键启动
 ├── run.sh                       macOS / Linux 一键启动
 ├── .gitignore
-└── .streamlit/
-    └── secrets.toml.example     密钥配置模板（复制为 secrets.toml 使用）
+├── .streamlit/
+│   ├── config.toml              运行配置（主题 / 静态服务 / 上传限制）
+│   └── secrets.toml.example     密钥配置模板（复制为 secrets.toml 使用）
+└── static/
+    └── fonts/                   思源黑体子集（18 片 woff2 + 许可证）
+        ├── SourceHanSansSC-hot-*.woff2     界面高频字（首屏加载）
+        ├── SourceHanSansSC-cjk-*.woff2     常用字按需加载
+        ├── SourceHanSansSC-ext-*.woff2     生僻字按需加载
+        ├── manifest.json                   分片清单（@font-face 来源）
+        └── LICENSE.txt                     思源黑体 SIL OFL 1.1 授权
 ```
 
 ### 第 1 步：安装依赖
@@ -468,6 +476,35 @@ AI_MODEL = "deepseek-chat"
 
 > 已知差异：页面首次加载时，Streamlit 自己的骨架屏（应用挂载前的空白）仍是浏览器默认白底，
 > 只有几百毫秒。要彻底消除得改 Streamlit 的 `index.html`，超出本项目的可控范围。
+
+### 字体：思源黑体（v2.3.0 新增）
+
+全站中文与数字统一使用 **思源黑体**（Source Han Sans / Noto Sans SC，Adobe 出品，
+SIL OFL 1.1 授权，可自由商用），不再依赖系统字体 —— 这样 macOS、Windows、
+手机、局域网访问的观感完全一致，不会出现「苹果上是苹方、Windows 上是雅黑」的割裂。
+
+**字体从哪来？** 仓库里的 `static/fonts/` 是从系统已安装的思源黑体可变字体
+（`NotoSansSC-VF.ttf`，wght 100–900 可变轴）子集化生成的，不是从网上下载的。
+构建脚本在 `tools/build_font.py`（需 `fonttools` + `brotli`，仅生成字体时用到，运行应用不需要）。
+
+**怎么做到只花几百 KB？** 完整字体 17.7MB 直接加载会把首屏拖垮，所以做了三层处理：
+
+| 手段 | 效果 |
+| --- | --- |
+| **子集化** | 只保留应用界面 + 江大 100 条语料里实际出现的 1268 个汉字 + 拉丁标点 |
+| **静态字重实例化** | 把可变字体烘焙成 400 / 700 两个静态字重，丢弃 gvar 差分数据（体积减半） |
+| **unicode-range 分片** | 切成 18 片（hot / cjk-1..5 / ext-1..3），浏览器**只下载页面真正用到的片** |
+
+首屏只拉 `hot` 片（约 190KB）；生僻字片几乎不会触发。字体文件以
+`server.enableStaticServing = true` 托管在 `/app/static/fonts/`，`app.py` 里的
+`_font_face_css()` 读 `manifest.json` 动态生成 `@font-face` 声明。
+
+**emoji 怎么办？** 思源黑体不含彩色 emoji 字形，字体栈末尾挂了
+`Apple Color Emoji` / `Segoe UI Emoji` / `Noto Color Emoji` —— CSS 按字符逐个回退，
+所以 📅 ⏰ 🔔 这类图标在 Windows / macOS / 手机上依然是彩色的。
+
+> 想换成别的字体：改 `tools/build_font.py` 里的 `SRC` 指向字体文件，
+> 重新生成 `static/fonts/`，再改 `_TOKENS_COMMON["font-sans"]` 的字体名即可。
 
 ### 关于「⚙️ 设置与外观」面板
 

@@ -18,7 +18,7 @@ maxUploadSize = 30
 # 云端部署必须开启；本地开启也能避免自动弹浏览器
 headless = true
 # 长文本 + OCR 可能耗时较久，放宽到 300 秒，避免云端网关提前断开
-enableStaticServing = false
+enableStaticServing = true
 
 [browser]
 gatherUsageStats = false          # 关闭匿名统计，符合隐私合规要求
