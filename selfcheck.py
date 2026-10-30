@@ -695,6 +695,77 @@ def test_time_blocks() -> None:
           str(len(app.parse_with_rules(single))))
 
 
+def test_course_cell() -> None:
+    section("N. 教务系统单元格解析（课程名/地点/教师分离）")
+
+    # 教务单元格的标准形状：课程名 + (节次)周次 + 一串「字段:值」
+    sample = ("高等数学D (3-4节)3-18周/校区：回龙校区/场地：回龙1303(多)/"
+              "教师:徐秀丽/课程性质简称:必修/选课备注:/学分:4.0/重修标记:")
+    entries = app.parse_timetable_cell(sample)
+    check("单元格解析出 1 条", len(entries) == 1, str(len(entries)))
+    if entries:
+        e = entries[0]
+        check("课程名进标题", e["title"] == "高等数学D", e["title"])
+        check("教师进教师字段", e["teacher"] == "徐秀丽", e["teacher"])
+        check("场地进地点", "回龙1303" in e["location"], e["location"])
+        check("校区并入地点", "回龙校区" in e["location"], e["location"])
+        check("周次区间", e["weeks"] == [(3, 18)], str(e["weeks"]))
+        check("节次范围", e["periods"] == (3, 4), str(e["periods"]))
+
+    # 「/」是字段分隔符，绝不是课程分隔符
+    check("字段不会被当成独立课程",
+          all("场地" not in e["title"] and "教师" not in e["title"]
+              and "校区" not in e["title"] and "必修" not in e["title"]
+              for e in entries),
+          str([e["title"] for e in entries]))
+
+    # 一格多课：同一格里上下排两门
+    two = ("马克思主义基本原理 (1-2节)2-16周/校区:回龙校区/场地:三江楼0501/"
+           "教师:陈静/课程性质简称:必修/学分:4.0/重修标记:\n"
+           "大学生心理健康教育 (1-2节)2-16周/校区:回龙校区/场地:三江楼0502/"
+           "教师:杨倩婧/课程性质简称:必修/学分:4.0/重修标记:")
+    entries = app.parse_timetable_cell(two)
+    check("一格两门课拆成 2 条", len(entries) == 2, str([e["title"] for e in entries]))
+    check("各自的地点不串", entries and
+          "0501" in entries[0]["location"] and "0502" in entries[1]["location"],
+          str([e["location"] for e in entries]))
+
+    # 多区间周次：「3-7,10-12,15-18周」只会在最后一段带「周」
+    multi = "思想道德与法治 (6-8节)3-7,10-12,15-18周/场地:回龙1113(多)/教师:陈盈诺"
+    entries = app.parse_timetable_cell(multi)
+    check("多区间周次全部保留",
+          bool(entries) and entries[0]["weeks"] == [(3, 7), (10, 12), (15, 18)],
+          str(entries[0]["weeks"]) if entries else "")
+
+    # OCR 把「4-10周」读成「410周」（连字符丢了）
+    entries = app.parse_timetable_cell(
+        "职业生涯发展与规划 (6-7节)410周(双)/场地:回龙1212(多)/教师:范珈祯")
+    check("三位数周次拆回区间",
+          bool(entries) and entries[0]["weeks"] == [(4, 10)],
+          str(entries[0]["weeks"]) if entries else "")
+    check("双周标记", bool(entries) and entries[0]["odd_even"] == "双周",
+          entries[0]["odd_even"] if entries else "")
+
+    # OCR 的形近误读：「救师」「数师」也要认
+    entries = app.parse_timetable_cell("数据结构 (1-2节)1-16周/救师:王强/场地:三江楼0301")
+    check("OCR 形近「救师」→ 教师", bool(entries) and entries[0]["teacher"] == "王强",
+          entries[0]["teacher"] if entries else "")
+
+    # 上一门课的字段值粘在下一门课名前面
+    entries = app.parse_timetable_cell(
+        "管理学原理 (5-6节)1-16周/场地:经济楼201/教师:周涛/学分:4.0\n"
+        "会计学原理 (5-6节)1-16周/场地:经济楼202/教师:吴敏/学分:4.0")
+    check("上一门的学分不会粘在下一门标题前",
+          bool(entries) and all("4.0" not in e["title"] for e in entries),
+          str([e["title"] for e in entries]))
+
+    # 旧的 W 前缀格式（无字段前缀）不受影响
+    legacy = app._split_cell_courses("高等数学(一)(上)卜 庆刚 W9阶 2-6,9-18, /")
+    check("旧 W 前缀格式仍兼容",
+          bool(legacy) and legacy[0]["title"] == "高等数学(一)(上)",
+          str(legacy[0]["title"]) if legacy else "")
+
+
 def test_theme_guard() -> None:
     section("K. 主题令牌一致性（防硬编码 / 防漏定义）")
     import re
@@ -884,7 +955,7 @@ def main() -> int:
     for fn in (test_text_only, test_time_parsing, test_structure_fields,
                test_dedup_conflict, test_export, test_recurrence,
                test_calendar_and_sample, test_ocr,
-               test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_security, test_theme_guard):
+               test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_security, test_theme_guard):
         try:
             fn()
         except Exception:  # noqa: BLE001

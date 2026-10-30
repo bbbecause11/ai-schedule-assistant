@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import calendar
 import csv
+from collections import deque
 import hashlib
 import io
 import json
@@ -57,7 +58,8 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   1.5.0  配色体系重构：设计令牌全覆盖、原生组件深色适配、主题持久化与系统偏好
 #   1.6.0  时间块归并：字段列表型截图按时间节点合并，属性词不再当作日程标题
 #   1.7.0  重复规则引擎：图片里的「每周四/1-16周/单双周/共N次」直出 RRULE
-APP_VERSION = "1.7.0"
+#   1.8.0  教务单元格解析：课程名/地点/教师严格分离，属性词绝不进标题
+APP_VERSION = "1.8.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -518,10 +520,10 @@ _RECUR_WORKDAY_RE = re.compile(r"(?:每)?工作日|周一至周五|周一到周�
 _RECUR_MONTHLY_RE = re.compile(r"每(?:个)?月")
 
 
-"""重复规则引擎：把图片里的自然语言描述转成标准 RRULE。
-
-原则：图片写了什么就导出什么。网站设置不参与生成。
-"""
+# 重复规则引擎：把图片里的自然语言描述转成标准 RRULE。
+#
+# 原则：图片写了什么就导出什么。网站设置不参与生成。
+#
 
 # ---------------------------------------------------------------------------
 # 重复规则引擎：图片里写了什么，就导出什么
@@ -1243,8 +1245,11 @@ _FIELD_ALIASES: dict[str, str] = {
     "上课校区": "campus", "校区": "campus",
     "授课教师": "teacher", "任课教师": "teacher", "主讲教师": "teacher",
     "主讲": "teacher", "教师": "teacher", "老师": "teacher",
+    # OCR 形近误读：小字号的「教」很容易被认成「数 / 救 / 枚」
+    "数师": "teacher", "救师": "teacher", "枚师": "teacher", "教帅": "teacher",
     "课程性质简称": "nature", "课程性质": "nature", "课程类型": "nature", "性质": "nature",
-    "选课备注": "note", "重修标": "note", "重修": "note", "备注": "note",
+    "选课备注": "note", "重修标记": "note", "重修标": "note", "重修": "note",
+    "备注": "note", "课程名称": "title", "课程名": "title",
     "上课周次": "weeks", "周次": "weeks", "节次": "period", "上课时间": "time",
     "学分": "credit", "学时": "hours", "课程号": "code", "课程代码": "code",
     "教学班": "cls", "班级": "cls", "考核方式": "assess",
@@ -1936,12 +1941,16 @@ def _prepare_image(data: bytes) -> tuple[Any, list[str]]:
     elif min(img.size) < OCR_UPSCALE_BELOW:
         # 小图放大：课表 / 聊天记录截图经常只有几百像素宽，
         # 文字笔画不到 8px，检测模型会直接漏掉整行。放大到能认出笔画为止。
-        ratio = min(OCR_UPSCALE_MAX, OCR_UPSCALE_BELOW / max(1, min(img.size)))
+        # 宽而扁的截图（整页课表）按短边算倍率会长边超限，
+        # 旧写法直接放弃放大，导致整页缩略图完全识别不出来。
+        # 现在把「长边不超 MAX_IMAGE_EDGE」也作为约束一起算，能放大多少算多少。
+        ratio = min(OCR_UPSCALE_MAX,
+                    OCR_UPSCALE_BELOW / max(1, min(img.size)),
+                    MAX_IMAGE_EDGE / max(1, max(img.size)))
         if ratio > 1.05:
             new_size = (int(img.width * ratio), int(img.height * ratio))
-            if max(new_size) <= MAX_IMAGE_EDGE:
-                img = img.resize(new_size, Image.LANCZOS)
-                warnings.append(f"图片偏小，已放大至 {new_size[0]}×{new_size[1]} 以提升识别率。")
+            img = img.resize(new_size, Image.LANCZOS)
+            warnings.append(f"图片偏小，已放大至 {new_size[0]}×{new_size[1]} 以提升识别率。")
 
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
@@ -2323,17 +2332,291 @@ def _detect_timetable_grid(blocks: list[OcrBlock]) -> TimetableGrid | None:
                          cols=cols, rows=rows)
 
 
+# 教务系统单元格解析：一门课 = 课程名 + (节次)周次 + 一串「字段:值」。
+#
+# 真实单元格（江苏大学 / 强智 / 正方 / 青果 都是这个形状）：
+#
+# 高等数学D (3-4节)3-18周/校区:回龙校区/场地:回龙1303(多)/教师:徐秀丽/
+# 课程性质简称:必修/选课备注:/学分:4.0/重修标记:
+#
+# 关键点：这里的分隔符「/」既分隔字段，也可能分隔课程。
+# 旧实现一律按「/」切开，结果「场地:回龙1303」「教师」全被当成独立课程，
+# 标题就变成了「场地:回龙1414(多)」。正确做法是**以「课程名 + (节次)周次」
+# 作为条目边界**，其后的字段都归属这个条目。
+#
+
+# OCR 会在中文词中间插空格：「回龙校 区」「重修标 记」「必 修」。
+# 只合并「中文 + 空格 + 中文」，不碰「课程名D (3-4节)」这种字母/括号边界。
+_CJK_GAP_RE = re.compile(r"(?<=[\u4e00-\u9fff])[ \t]+(?=[\u4e00-\u9fff])")
+
+# 单元格里的节次：(3-4节) / （3-4节） / 3-4节
+_CELL_PERIOD_RE = re.compile(
+    r"[（(]?\s*(\d{1,2})\s*[-–—~～至]\s*(\d{1,2})\s*节\s*[)）]?")
+# 单元格里的周次：3-18周 / 3-7周,10-12周,15-18周 / 第1周 / 4-10周
+_CELL_WEEK_RE = re.compile(
+    r"(?:第\s*)?(\d{1,2})\s*(?:[-–—~～至]\s*(\d{1,2}))?\s*周")
+# 周次后面紧跟的单双周：(单) / (双) / 单周 / 双周
+_CELL_ODD_RE = re.compile(
+    r"[（(]?\s*(单|双)\s*[)）]?|(单周|双周)")
+
+# 字段名前后的空格也常被 OCR 打散：「教师 :徐秀丽」「学分 :3.0」
+_FIELD_COLON_FIX = re.compile(
+    rf"(?P<key>{_FIELD_KEYS})\s*[:：]\s*")
+
+
+def _clean_cell_text(text: str) -> str:
+    """OCR 后处理：合并中文词内空格、统一冒号、清掉折行留下的断字。"""
+    t = (text or "").replace("\r", " ").replace("\n", " ")
+    t = t.replace("：", ":")
+    t = _CJK_GAP_RE.sub("", t)
+    # 字段名与冒号之间的空格
+    t = re.sub(r"(?<=[\u4e00-\u9fff])\s*:\s*", ":", t)
+    # 折行把数字拆开：「15- 18周」→「15-18周」
+    t = re.sub(r"(\d)\s*-\s*(\d)", r"\1-\2", t)
+    t = re.sub(r"\s{2,}", " ", t)
+    return t.strip()
+
+
+def _cell_weeks(fragment: str) -> tuple[list[tuple[int, int]], str]:
+    """从「3-18周」「第1周」「4-10周(双)」里抽周次与单双周。"""
+    weeks: list[tuple[int, int]] = []
+    odd = ""
+    # OCR 常把「4-10周」读成「410周」（连字符整个丢掉）。
+    # 教学周最多 30，三位数不可能是合法周次，所以按「1 位 + 2 位」拆回去。
+    for m in re.finditer(r"(?<![\d-])(\d)(\d{2})\s*周", fragment):
+        a, b = int(m.group(1)), int(m.group(2))
+        if 1 <= a <= 9 and 10 <= b <= 30:
+            weeks.append((a, b))
+    if weeks:
+        om = _CELL_ODD_RE.search(fragment)
+        if om:
+            word = om.group(1) or om.group(2) or ""
+            if word in ("单", "单周"):
+                odd = "单周"
+            elif word in ("双", "双周"):
+                odd = "双周"
+        return weeks, odd
+    # 「3-7,10-12,15-18周」只有最后一段带「周」字，
+    # 逐段匹配会只剩 15-18，所以先按逗号切开再解析（_parse_week_ranges 就干这个）。
+    span = re.search(r"(?:第\s*)?\d{1,2}(?:\s*[-–—~～至]\s*\d{1,2})?"
+                     r"(?:\s*[,，、]\s*(?:第\s*)?\d{1,2}"
+                     r"(?:\s*[-–—~～至]\s*\d{1,2})?)+\s*周", fragment)
+    if span:
+        weeks = _parse_week_ranges(span.group(0).replace("周", ""))
+    if not weeks:
+        for m in _CELL_WEEK_RE.finditer(fragment):
+            a = int(m.group(1))
+            b = int(m.group(2)) if m.group(2) else a
+            if a > b:
+                a, b = b, a
+            if 1 <= a <= 30 and 1 <= b <= 30:
+                weeks.append((a, b))
+    om = _CELL_ODD_RE.search(fragment)
+    if om:
+        word = om.group(1) or om.group(2) or ""
+        if word in ("单", "单周"):
+            odd = "单周"
+        elif word in ("双", "双周"):
+            odd = "双周"
+    return weeks, odd
+
+
+def _new_cell_entry(title: str = "") -> dict[str, Any]:
+    return {"title": title, "teacher": "", "location": "", "campus": "",
+            "weeks": [], "odd_even": "", "nature": "", "credit": "",
+            "note": "", "periods": None}
+
+
+def _apply_cell_field(entry: dict[str, Any], key: str, val: str) -> None:
+    """把一个「字段:值」写进条目。值里的空格一律去掉（校区名/教师名都是紧凑词）。"""
+    v = re.sub(r"\s+", "", val or "").strip(" ,，、;；")
+    if not v:
+        return
+    if key == "location":
+        entry["location"] = entry["location"] or v
+    elif key == "campus":
+        entry["campus"] = entry["campus"] or v
+    elif key == "teacher":
+        entry["teacher"] = entry["teacher"] or v
+    elif key == "nature":
+        entry["nature"] = entry["nature"] or v
+    elif key == "credit":
+        entry["credit"] = entry["credit"] or v
+    elif key == "note":
+        entry["note"] = entry["note"] or v
+    elif key == "weeks":
+        w, odd = _cell_weeks(v)
+        if w:
+            entry["weeks"] = entry["weeks"] or w
+        if odd and not entry["odd_even"]:
+            entry["odd_even"] = odd
+    # 其余（课程号/学时/教学班/考核方式）暂不参与标题与地点
+
+
+def _flush_cell_entry(entry: dict[str, Any] | None) -> dict[str, Any] | None:
+    """收尾：拼接地点（场地 + 校区）、过滤噪声标题。"""
+    if entry is None:
+        return None
+    title = re.sub(r"\s+", " ", entry["title"]).strip(" ,，、;；.-")
+    if not title or len(title) < 2:
+        return None
+    if re.fullmatch(r"[\d\s()（）.．·、/\\:：\-]+", title):
+        return None
+    loc = entry["location"]
+    campus = entry["campus"]
+    if loc and campus and campus not in loc:
+        loc = f"{loc}（{campus}）"
+    elif not loc and campus:
+        loc = campus
+    bits: list[str] = []
+    if entry["nature"]:
+        bits.append(f"课程性质 {entry['nature']}")
+    if entry["credit"]:
+        bits.append(f"学分 {entry['credit']}")
+    if entry["note"]:
+        bits.append(f"备注 {entry['note']}")
+    return {
+        "title": title,
+        "teacher": entry["teacher"],
+        "location": loc,
+        "weeks": entry["weeks"],
+        "odd_even": entry["odd_even"],
+        "nature": entry["nature"],
+        "note": " · ".join(bits),
+        "periods": entry["periods"],
+    }
+
+
+def parse_timetable_cell(text: str) -> list[dict[str, Any]]:
+    """
+    把单元格文本拆成若干「课程条目」。
+
+    一条的起止由「课程名 + (节次)周次」决定：
+        「高等数学D (3-4节)3-18周/…/教师:徐秀丽」→ 一个条目
+        「(6-7节)3-9周(单)/…」              → 上一个条目的第二个时间段
+        「体育与健康1 (8-9节)3-18周/…」      → 新条目
+
+    返回的每条都带 title / teacher / location / weeks / odd_even / periods。
+    """
+    raw = _clean_cell_text(text)
+    if not raw:
+        return []
+
+    segments = [s.strip() for s in re.split(r"[/／]", raw)]
+    entries: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+    queue = deque(segments)
+
+    def start(title: str) -> dict[str, Any]:
+        e = _new_cell_entry(title)
+        entries.append(e)
+        return e
+
+    while queue:
+        seg = queue.popleft()
+        if not seg:
+            continue
+
+        # --- 字段段（「场地:回龙1303(多)」）→ 归入当前条目 ---
+        hit = _field_of(seg)
+        if hit:
+            key, val = hit
+            if cur is None:
+                cur = start("")
+            # OCR 会把下一条的开头也塞进这个字段的值里：
+            # 「重修标记： 人工智能基础及应用A (3-4节)3-18周」。
+            # 看到「(X-Y节)」就说明该切了，之前那段可能是下一门课的课程名。
+            m_next = _CELL_PERIOD_RE.search(val or "")
+            if m_next:
+                before = val[:m_next.start()].strip(" ,，、;；.-")
+                # 上一门课的字段值会粘在下一门课名前面（「4.0 大学生心理健康教育」），
+                # 取末尾那段连续的中文/字母作为课程名。
+                m_cn = re.search(r"[\u4e00-\u9fff][\u4e00-\u9fffA-Za-z0-9()（）]*$", before)
+                cand = m_cn.group(0) if m_cn else ""
+                if len(cand) >= 4:
+                    cur = start(cand)
+                queue.appendleft(val[m_next.start():])
+                continue
+            _apply_cell_field(cur, key, val)
+            continue
+
+        # --- 带节次的段：「课程名 (3-4节)3-18周」或「(6-7节)3-9周(单)」---
+        m = _CELL_PERIOD_RE.search(seg)
+        if m:
+            title = seg[:m.start()].strip(" ,，、;；.-")
+            tail = seg[m.end():]
+            weeks, odd = _cell_weeks(tail)
+            if title and re.search(r"[\u4e00-\u9fff]{2,}", title):
+                cur = start(title)                    # 新课程
+            elif cur is None:
+                cur = start("")
+            elif weeks and cur["location"] and cur["weeks"]:
+                # 同一门课的第二个时间段（地点/周次都变了）也算独立一条，
+                # 否则两条不同周次不同地点的课会被合并掉一条。
+                cur = start(cur["title"])
+            cur["periods"] = (int(m.group(1)), int(m.group(2)))
+            if weeks:
+                cur["weeks"] = weeks
+            if odd:
+                cur["odd_even"] = odd
+            continue
+
+        # --- 纯周次段：「3-18周」「第1周」 ---
+        weeks, odd = _cell_weeks(seg)
+        if weeks and len(seg) <= 24 and not re.search(r"[\u4e00-\u9fff]{2,}", seg.replace("周", "")):
+            if cur is None:
+                cur = start("")
+            cur["weeks"] = weeks
+            if odd:
+                cur["odd_even"] = odd
+            continue
+
+        # --- 其余：只有中文且不像字段值的，当课程名 ---
+        if cur is not None and not cur["title"] and re.search(r"[\u4e00-\u9fff]{2,}", seg):
+            cur["title"] = seg
+            continue
+
+    out: list[dict[str, Any]] = []
+    for e in entries:
+        item = _flush_cell_entry(e)
+        if item:
+            out.append(item)
+    # 同一门课、同一节次、同一地点、同一周次的重复条目去重
+    dedup: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+    for item in out:
+        key = (item["title"], item["periods"], item["location"],
+               tuple(item["weeks"]), item["odd_even"])
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(item)
+    return dedup
+
+
 def _split_cell_courses(text: str) -> list[dict[str, Any]]:
     """
     拆一个单元格里的全部课程。
 
-    教务系统的导出一格可能塞两门课，每条以「/」收尾：
-    「形势与政策(1) 冯慧 W1111 17~18, / 俄罗斯历史 Okhotnikov Egor W9 阶 9-12, /」
+    **优先走教务系统格式**：单元格里带「场地/校区/教师/课程性质」这类字段前缀时，
+    说明它是「课程名 + (节次)周次 + 一串字段」，字段之间的「/」不是课程分隔符。
+    旧实现一律按「/」切，结果「场地:回龙1303」「教师」全被当成独立课程，
+    标题自然就成了「场地:回龙1414(多)」。
+
+    只有不带字段前缀的旧格式（「形势与政策(1) 冯慧 W1111 17~18, / …」）
+    才按「/」拆多门课。
     """
+    raw = text or ""
+    field_rows = sum(1 for seg in re.split(r"[/／]", raw) if _field_of(seg.strip()))
+    if field_rows >= 2:
+        parsed = parse_timetable_cell(raw)
+        if parsed:
+            return parsed
+
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
     seen_titles: list[str] = []
-    for piece in re.split(r"[/／]", text or ""):
+    for piece in re.split(r"[/／]", raw):
         if not piece.strip(" ,，、;；"):
             continue
         info = _split_course_cell(piece)
@@ -2356,6 +2639,7 @@ def _split_cell_courses(text: str) -> list[dict[str, Any]]:
         seen_titles.append(title)
         entries.append(info)
     return entries
+
 
 
 def _course_key(info: dict[str, Any]) -> str:
@@ -2790,6 +3074,12 @@ def timetable_to_events(cells: list[dict[str, Any]],
         h1, m1 = _period_clock(p1, 1)
 
         for info in cell.get("courses") or _split_cell_courses(cell["text"]):
+            # 单元格文字里写了「(3-4节)」时，比网格按文字位置推断的更准：
+            # 合并单元格的文字垂直居中，靠坐标只会落在中间那一节上。
+            if info.get("periods"):
+                p0, p1 = info["periods"]
+                h0, m0 = _period_clock(p0, 0)
+                h1, m1 = _period_clock(p1, 1)
             title = info["title"].strip()
             if len(title) < 2 or re.fullmatch(r"[\d\s()（）.．·、/\\-]+", title):
                 continue                     # 表格里的空壳、噪声
