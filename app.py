@@ -56,7 +56,8 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   1.4.0  课表版面重建（识别课表截图并还原成逐节日程）、图片自动放大与增强
 #   1.5.0  配色体系重构：设计令牌全覆盖、原生组件深色适配、主题持久化与系统偏好
 #   1.6.0  时间块归并：字段列表型截图按时间节点合并，属性词不再当作日程标题
-APP_VERSION = "1.6.0"
+#   1.7.0  重复规则引擎：图片里的「每周四/1-16周/单双周/共N次」直出 RRULE
+APP_VERSION = "1.7.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -139,6 +140,9 @@ class Event:
     note: str = ""
     priority: str = "中"
     rrule: str = ""                 # 不含 "RRULE:" 前缀，如 "FREQ=WEEKLY;BYDAY=MO"
+    recur_skip: str = ""            # 需要 EXDATE 排掉的相对周偏移，如 "5,6"
+    recur_label: str = ""           # 重复规则的原文描述，展示给用户核对
+    recur_source: str = ""          # image=图片里读到的 / setting=用户手动改的
     vague: bool = False             # 时间是否由程序推测
     vague_reason: str = ""          # 推测原因，展示给用户核对
     source: str = "text"            # text / ocr / llm / manual / sample
@@ -514,31 +518,316 @@ _RECUR_WORKDAY_RE = re.compile(r"(?:每)?工作日|周一至周五|周一到周�
 _RECUR_MONTHLY_RE = re.compile(r"每(?:个)?月")
 
 
+"""重复规则引擎：把图片里的自然语言描述转成标准 RRULE。
+
+原则：图片写了什么就导出什么。网站设置不参与生成。
+"""
+
+# ---------------------------------------------------------------------------
+# 重复规则引擎：图片里写了什么，就导出什么
+# ---------------------------------------------------------------------------
+# 优先级铁律：**图片解析出的规则 > 网站设置**。
+# 网站里那套「是否重复 / 频率 / 次数」只服务于用户事后逐条手动修改，
+# 解析管线一行代码都不读它，避免一张写着「1-5周」的课表被导成 16 次。
+
+_CN2ICS = {"一": "MO", "二": "TU", "三": "WE", "四": "TH", "五": "FR",
+           "六": "SA", "日": "SU", "天": "SU",
+           "1": "MO", "2": "TU", "3": "WE", "4": "TH", "5": "FR",
+           "6": "SA", "7": "SU"}
+
+# 周次区间：1-5周 / 第1-16周 / 3~16周 / 2—6 周
+_RANGE_PAIR = r"(\d{1,2})\s*[-–—~～至]\s*(\d{1,2})"
+# 「1-5周」「第3-16周」：区间后面必须跟「周」，否则「10:45-11:30」也会被当成周次
+_WEEK_SPAN_RE = re.compile(
+    r"(?:第\s*)?(?P<lhs>" + _RANGE_PAIR +
+    r"(?:\s*[,，、]\s*" + _RANGE_PAIR + r")*)\s*(?:周|星期|教学周)"
+)
+# 「共16次」「连续8周」「16次课」「共 16 课时」
+_COUNT_RE = re.compile(
+    r"(?:共|合计|一共|总计|连续)\s*(\d{1,2})\s*(?:次|周|回|讲)"
+    r"|(?<!\d)(\d{1,2})\s*(?:次课|次课|讲)"
+)
+# 单双周
+_ODD_EVEN_RE = re.compile(r"(单双周|单周|双周|单数周|双数周|隔周|每隔一周)")
+# 频率
+_FREQ_BIWEEK_RE = re.compile(r"每\s*两\s*(?:周|星期|礼拜)|每\s*2\s*周|隔周")
+_FREQ_DAILY_RE = re.compile(r"每\s*(?:天|日)|每日")
+_FREQ_MONTHLY_RE = re.compile(r"每\s*(?:个)?\s*月|每月")
+_FREQ_WEEKLY_RE = re.compile(r"每\s*(?:周|星期|礼拜)|每周|周周")
+# 「工作日」「周一至周五」本身就是重复信号，不带「每」也成立
+_FREQ_WORKDAY_RE = re.compile(r"工作日|周[一1]\s*[至到\-–—~～]\s*(?:周|星期)?\s*[五5]")
+
+
+def _norm_recur_text(text: str) -> str:
+    """归一化：全角转半角、去掉干扰词、合并空白。"""
+    t = (text or "").strip()
+    t = t.replace("：", ":").replace("，", ",").replace("、", ",")
+    t = re.sub(r"[（(]\s*[)）]", " ", t)
+    # 「每每周四·共16次」——重复的「每」是 OCR 常见的叠字
+    t = re.sub(r"每\s*每\s*(?:周|星期|礼拜)", "每周", t)
+    t = re.sub(r"[·•・]", " ", t)
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+def _parse_week_spans(text: str) -> list[tuple[int, int]]:
+    """抽出所有「1-5周」「3-16周」「2-6,9-18 周」这样的周次区间。"""
+    out: list[tuple[int, int]] = []
+    for m in _WEEK_SPAN_RE.finditer(text):
+        lhs = m.group("lhs")
+        for pair in re.finditer(_RANGE_PAIR, lhs):
+            a, b = int(pair.group(1)), int(pair.group(2))
+            if a > b:
+                a, b = b, a
+            if 1 <= a <= 30 and 1 <= b <= 30:
+                out.append((a, b))
+        # 单个「第5周」也要认
+    for m in re.finditer(r"第\s*(\d{1,2})\s*周", text):
+        w = int(m.group(1))
+        if 1 <= w <= 30 and not any(a <= w <= b for a, b in out):
+            out.append((w, w))
+    # 合并重叠 / 相邻区间，保证后续计数不重复
+    merged: list[tuple[int, int]] = []
+    for a, b in sorted(out):
+        if merged and a <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _parse_byday(text: str) -> list[str]:
+    """抽出星期几。支持「每周四」「周一、周三」「周一至周五」「周一至周五」。"""
+    days: list[str] = []
+    # 「周一至周五」先按区间展开
+    span = re.search(r"(?:周|星期|礼拜)\s*([一二三四五六日天])\s*[-–—~～至到]\s*"
+                     r"(?:周|星期|礼拜)?\s*([一二三四五六日天])", text)
+    if span:
+        order = ["一", "二", "三", "四", "五", "六", "日"]
+        a, b = span.group(1), span.group(2)
+        if a in order and b in order:
+            i, j = order.index(a), order.index(b)
+            if i <= j:
+                return [_CN2ICS[c] for c in order[i:j + 1]]
+    # 中文星期与阿拉伯数字要分开匹配：「每周四1-8周」里紧跟的 1 是周次，
+    # 不能被当成星期一；而「每周一三五」要逐字拆成三次。
+    pattern = (r"(?:周|星期|礼拜)\s*(?:"
+               r"([一二三四五六日天]{1,7})"              # 每周一三五
+               r"|([1-7](?:[,，、]?[1-7])*)"             # 每周1,3,5 / 每周135
+               r")")
+    for m in re.finditer(pattern, text):
+        chunk = m.group(1) or m.group(2) or ""
+        for ch in re.findall(r"[一二三四五六日天1-7]", chunk):
+            code = _CN2ICS.get(ch)
+            if code and code not in days:
+                days.append(code)
+    return days
+
+
+def _weeks_count(weeks: list[tuple[int, int]], odd_even: str) -> int:
+    """区间内的**实际上课次数**，单双周要折算。"""
+    if not weeks:
+        return 0
+    total = 0
+    for a, b in weeks:
+        nums = list(range(a, b + 1))
+        if odd_even == "单周":
+            nums = [n for n in nums if n % 2 == 1]
+        elif odd_even == "双周":
+            nums = [n for n in nums if n % 2 == 0]
+        total += len(nums)
+    return total
+
+
+def _weeks_gaps(weeks: list[tuple[int, int]]) -> list[int]:
+    """
+    区间之间的空档周（如 2-6,9-18 → [7,8]）。
+
+    这些周不上课，但 FREQ=WEEKLY 会一路排下去，必须在 ICS 里用 EXDATE 排掉。
+    """
+    if len(weeks) < 2:
+        return []
+    gaps: list[int] = []
+    for i in range(len(weeks) - 1):
+        start = weeks[i][1] + 1
+        end = weeks[i + 1][0] - 1
+        gaps.extend(range(start, end + 1))
+    return [g for g in gaps if g >= 1]
+
+
+@dataclass
+class RecurrenceInfo:
+    """一段文字里抽出的重复信息。这是 RRULE 的唯一来源。"""
+
+    freq: str = ""                       # WEEKLY / DAILY / MONTHLY
+    interval: int = 1
+    byday: list[str] = field(default_factory=list)
+    count: int = 0                       # 「共 16 次」这类显式次数
+    weeks: list[tuple[int, int]] = field(default_factory=list)
+    odd_even: str = ""                   # "" / "单周" / "双周"
+    label: str = ""                      # 命中的原文，展示给用户核对
+    source: str = "image"                # image / text / setting
+
+    @property
+    def has_rule(self) -> bool:
+        return bool(self.freq or self.weeks or self.count or self.odd_even
+                    or self.byday)
+
+    @property
+    def effective_count(self) -> int:
+        """最终要写进 COUNT 的次数。"""
+        if self.weeks:
+            n = _weeks_count(self.weeks, self.odd_even)
+            if n:
+                return n
+        if self.count:
+            return self.count
+        if self.odd_even and self.count == 0:
+            return 0                     # 只有「单周」没有范围，交给调用方推算
+        return 0
+
+    @property
+    def skip_weeks(self) -> list[int]:
+        """需要 EXDATE 排掉的相对周偏移（0 基，相对第一个上课周）。"""
+        if not self.weeks or len(self.weeks) < 2:
+            return []
+        first = self.weeks[0][0]
+        return [g - first for g in _weeks_gaps(self.weeks)]
+
+    def rrule(self, start: datetime | None = None) -> str:
+        """
+        生成不含 "RRULE:" 前缀的标准 RFC 5545 字符串。
+
+        - 「每周四 · 共16次」   → FREQ=WEEKLY;BYDAY=TH;COUNT=16
+        - 「每周一，1-5周」     → FREQ=WEEKLY;BYDAY=MO;COUNT=5
+        - 「单周」             → FREQ=WEEKLY;INTERVAL=2
+        - 「周一至周五」        → FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR
+        - 没识别到任何规则      → ""（单次事件）
+        """
+        parts: list[str] = []
+        freq = self.freq
+        if not freq:
+            # 「连续 8 周」「共 16 次」已经隐含了「每周一次」，
+            # 只有次数、没有周期词时按周循环处理，否则会退化成单次事件。
+            if self.weeks or self.byday or self.odd_even or self.count:
+                freq = "WEEKLY"
+        if not freq:
+            return ""
+        parts.append(f"FREQ={freq}")
+
+        interval = self.interval
+        if self.odd_even in ("单周", "双周", "单双周"):
+            interval = 2
+        if interval > 1:
+            parts.append(f"INTERVAL={interval}")
+
+        byday = list(self.byday)
+        if not byday and start is not None and freq == "WEEKLY":
+            byday = [_WEEKDAY_ICS[start.weekday()]]
+        if byday and freq == "WEEKLY":
+            parts.append(f"BYDAY={','.join(byday)}")
+
+        count = self.effective_count
+        if count:
+            parts.append(f"COUNT={count}")
+        return ";".join(parts)
+
+
+def extract_recurrence(text: str, start: datetime | None = None,
+                       source: str = "image") -> RecurrenceInfo:
+    """
+    从一段文字里抽取完整的重复规则。
+
+    覆盖的写法：
+      周期   每周 / 每两周 / 每天 / 每月 / 隔周
+      星期   每周四 / 周一、周三 / 周一至周五
+      周次   1-5周 / 第1-16周 / 3~16周 / 2-6,9-18周
+      单双   单周 / 双周 / 单双周交替
+      次数   共16次 / 连续8周 / 16次课
+    """
+    raw = text or ""
+    t = _norm_recur_text(raw)
+    info = RecurrenceInfo(source=source)
+    if not t:
+        return info
+
+    odd = _ODD_EVEN_RE.search(t)
+    if odd:
+        word = odd.group(1)
+        if word in ("单双周", "单双周交替", "隔周", "每隔一周"):
+            info.odd_even = "单双周"
+        elif word in ("单周", "单数周"):
+            info.odd_even = "单周"
+        elif word in ("双周", "双数周"):
+            info.odd_even = "双周"
+
+    info.weeks = _parse_week_spans(t)
+    info.byday = _parse_byday(t)
+
+    m = _COUNT_RE.search(t)
+    if m:
+        info.count = int(m.group(1) or m.group(2) or 0)
+
+    biweek = _FREQ_BIWEEK_RE.search(t)
+    daily = _FREQ_DAILY_RE.search(t)
+    monthly = _FREQ_MONTHLY_RE.search(t)
+    weekly = _FREQ_WEEKLY_RE.search(t)
+    workday = _FREQ_WORKDAY_RE.search(t)
+
+    # 孤立的「第 3 周」是日期描述，不是重复规则（「第3周开会」只开一次）。
+    # 只有配合「每周 / 单双周 / 共X次」时才算周次区间。
+    if info.weeks and all(a == b for a, b in info.weeks):
+        if not (biweek or weekly or workday or info.odd_even or info.count):
+            info.weeks = []
+
+    # 必须有明确的重复信号。只出现「周三」「周四」这类日期词时不算循环——
+    # 「下周三下午2点开班会」是一件单次日程，不是每周三。
+    explicit = bool(biweek or daily or monthly or weekly or workday
+                    or info.weeks or info.odd_even or info.count)
+    if not explicit:
+        info.byday = []
+        return info
+
+    if biweek:
+        info.freq, info.interval = "WEEKLY", 2
+    elif daily:
+        info.freq = "DAILY"
+    elif monthly:
+        info.freq = "MONTHLY"
+    else:
+        info.freq = "WEEKLY"
+
+    if workday and not info.byday:
+        info.byday = ["MO", "TU", "WE", "TH", "FR"]
+
+    # 「1-5周」里的 5 不能被当成「共 5 次」再叠一次；
+    # 但「共16次」与周次区间可以共存（如「1-16周 共16次」），此时以周次为准。
+    if info.weeks and info.count:
+        info.count = 0
+
+    label_bits: list[str] = []
+    if info.byday:
+        label_bits.append("周" + "、".join(
+            _BYDAY_ICS_TO_CN.get(d, d) for d in info.byday))
+    if info.weeks:
+        label_bits.append(_weeks_label(info.weeks) + "周")
+    if info.odd_even:
+        label_bits.append(info.odd_even)
+    if info.count:
+        label_bits.append(f"共{info.count}次")
+    info.label = " ".join(label_bits)
+    return info
+
+
 def parse_recurrence(text: str) -> tuple[str, str]:
     """
-    识别循环规则。
+    兼容旧签名：返回 (rrule, 命中的原文片段)。
 
-    返回 (rrule 字符串, 已匹配的原文片段)。rrule 为空表示不循环。
+    内部已改为走 extract_recurrence()，因此「1-5周」「共16次」「单周」
+    这些以前识别不到的写法现在都能转成 RRULE。
     """
-    m = _RECUR_WORKDAY_RE.search(text)
-    if m:
-        return "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR", m.group(0)
-    m = _RECUR_WEEKLY_RE.search(text)
-    if m:
-        days: list[str] = []
-        for ch in re.findall(r"[一二三四五六日天1-7]", m.group("wds")):
-            wd = _WEEKDAY_CN.get(ch)
-            if wd is not None and _WEEKDAY_ICS[wd] not in days:
-                days.append(_WEEKDAY_ICS[wd])
-        if days:
-            return f"FREQ=WEEKLY;BYDAY={','.join(days)}", m.group(0)
-    m = _RECUR_DAILY_RE.search(text)
-    if m:
-        return "FREQ=DAILY", m.group(0)
-    m = _RECUR_MONTHLY_RE.search(text)
-    if m:
-        return "FREQ=MONTHLY", m.group(0)
-    return "", ""
+    info = extract_recurrence(text)
+    return info.rrule(), info.label
 
 
 # ---------------------------- 循环规则工具 --------------------------------
@@ -772,6 +1061,11 @@ def _clean_title(text: str) -> str:
     cleaned = re.sub(r"(?:到|至|~|～|—)?\s*(?:次日|翌日|第二天)", " ", cleaned)
     cleaned = re.sub(r"[（(【\[]?\s*(?:周|星期|礼拜)[一二三四五六日天]\s*[)）】\]]?", " ", cleaned)
     cleaned = re.sub(r"(?:上午|下午|晚上|早上|中午|凌晨|傍晚|晚)\s*(?=$|\s)", " ", cleaned)
+    # 循环描述被删掉后残留的次数 / 周次（「每周四 共16次」→「共16次」）
+    cleaned = re.sub(r"(?:共|合计|连续)\s*\d{1,2}\s*(?:次|周)", " ", cleaned)
+    cleaned = re.sub(r"(?:第\s*)?\d{1,2}\s*[-–—~～至]\s*\d{1,2}\s*周", " ", cleaned)
+    cleaned = re.sub(r"第\s*\d{1,2}\s*周", " ", cleaned)
+    cleaned = re.sub(r"(?:单双周|单周|双周|单数周|双数周)", " ", cleaned)
     # 时间被删掉后残留的孤立连接词：「3点 到 5点」→ 中间的「到」
     cleaned = re.sub(r"(?<!\S)(?:到|至|在|从|每|前)(?!\S)", " ", cleaned)
     # 「23:59 前提交」中时间被删掉后残留的「前」，仅在其后接提交类动词时清理
@@ -968,7 +1262,15 @@ _FIELD_BARE_RE = re.compile(rf"^\s*(?P<key>{_FIELD_KEYS})\s*[:：]?\s*$")
 _BLOCK_TIME_RE = re.compile(r"^\s*(?P<h>\d{1,2})\s*[:：]\s*(?P<m>\d{2})(?:\s|$)")
 _BLOCK_PERIOD_RE = re.compile(r"^\s*第\s*(\d{1,2})(?:\s*[-–—~]\s*(\d{1,2}))?\s*节\s*[:：]?\s*$")
 # 「每周四 · 共 16 次」「每周 1 次」这类循环说明
-_BLOCK_RECUR_RE = re.compile(r"(每\s*[周天日]|每周|\d+\s*次\s*/?\s*周)")
+# 循环说明行：每周四 / 1-16周 / 单双周 / 共16次。
+# 这些行在字段列表里既不是标题也不是地点，只提供重复规则。
+_BLOCK_RECUR_RE = re.compile(
+    r"(每\s*[周天日]|每周|每周|\d+\s*次\s*/?\s*周"
+    r"|(?:第\s*)?\d{1,2}\s*[-–—~～至]\s*\d{1,2}\s*周"
+    r"|第\s*\d{1,2}\s*周|单双周|单周|双周|共\s*\d{1,2}\s*次"
+    r"|周[一二三四五六日天]\s*[至到\-–—~～]\s*(?:周|星期)?[一二三四五六日天]"
+    r"|每\s*两\s*周|每\s*2\s*周|隔周|每\s*天|每\s*月)"
+)
 
 # 课程性质、考核方式这类"值"，单独成行时绝不是标题
 _NATURE_VALUES = {
@@ -1009,12 +1311,37 @@ def _looks_like_place(text: str) -> bool:
     return bool(_PLACE_RE.search(t))
 
 
+# 学科 / 机构词尾：命中就说明是课程名或单位名，不是人名
+_NAME_STOP_RE = re.compile(
+    r"(学|论|课|语|法|育|术|理|化|史|计|设计|原理|导论|概论|分析|训练|实验|"
+    r"技术|管理|经济|心理|数学|英语|物理|化学|政治|思想|体育|教育|工程|"
+    r"学院|大学|中心|部|处|室|组)"
+)
+# 复姓：4 字姓名只有以这些开头才可能是人名
+_COMPOUND_SURNAME_RE = re.compile(
+    r"^(欧阳|司马|上官|诸葛|东方|皇甫|尉迟|公孙|慕容|长孙|宇文|司徒|司空|"
+    r"令狐|夏侯|端木|独孤|南宫|西门)"
+)
+
+
 def _looks_like_person(text: str) -> bool:
-    """2~4 个汉字、且首字是常见姓氏 → 当人名。"""
+    """
+    像不像一个人名。
+
+    只按「2~4 个汉字 + 首字是常见姓氏」判断会误伤大量课程名——
+    「高等数学」的首字「高」、「体育」的「体」都在姓氏表里，结果整门课
+    被当成教师名丢掉。所以再加两道闸：词尾不能是学科词，4 字必须是复姓。
+    """
     t = text.strip()
     if not re.fullmatch(r"[\u4e00-\u9fa5]{2,4}", t):
         return False
-    return t[0] in _CN_SURNAMES
+    if t[0] not in _CN_SURNAMES:
+        return False
+    if _NAME_STOP_RE.search(t[1:]):
+        return False
+    if len(t) == 4 and not _COMPOUND_SURNAME_RE.match(t):
+        return False
+    return True
 
 
 def _is_meta_only(text: str) -> bool:
@@ -1074,7 +1401,13 @@ def _extract_time_blocks(text: str, anchor_day: date) -> tuple[list[Event], set[
     """
     raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     lines = [ln.strip() for ln in raw_lines]
-    if sum(1 for ln in lines if _field_of(ln) is not None) < 2:
+    field_rows = sum(1 for ln in lines if _field_of(ln) is not None)
+    recur_rows = sum(1 for ln in lines
+                     if ln and _BLOCK_RECUR_RE.search(ln) and len(ln) <= 24)
+    # 门槛：至少 2 行字段，或「1 行字段 + 1 行循环说明」。
+    # 后者对应「场地：回龙2311 / 每周四共16次」这种精简版的课程详情，
+    # 它同样是「时间 -> 多个属性」结构，不该退化成逐行解析。
+    if field_rows < 2 and not (field_rows >= 1 and recur_rows >= 1):
         return [], set()
 
     # --- 1. 按时间节点切块 ------------------------------------------------
@@ -1107,6 +1440,10 @@ def _extract_time_blocks(text: str, anchor_day: date) -> tuple[list[Event], set[
     flat = "\n".join(lines)
     day, _, _, _ = parse_date_in_text(flat, anchor_day)
     day = day or anchor_day
+    # 「第 44 周」决定这一天是单周还是双周——没有它，单周课和双周课
+    # 会一起从同一天开始，日历里就变成"每周都有课"。
+    m_week = re.search(r"第\s*(\d{1,2})\s*周", flat)
+    week_no = int(m_week.group(1)) if m_week else 0
 
     events: list[Event] = []
     consumed: set[str] = set()
@@ -1115,7 +1452,7 @@ def _extract_time_blocks(text: str, anchor_day: date) -> tuple[list[Event], set[
         if re.search(r"20\d{2}\s*年|星期[一二三四五六日天]|周[一二三四五六日天]|第\s*\d+\s*周", ln):
             consumed.add(ln)
     for blk in blocks:
-        ev = _block_to_event(blk, day)
+        ev = _block_to_event(blk, day, week_no)
         if ev is None:
             continue
         events.append(ev)
@@ -1126,7 +1463,8 @@ def _extract_time_blocks(text: str, anchor_day: date) -> tuple[list[Event], set[
     return events, consumed
 
 
-def _block_to_event(blk: dict[str, Any], day: date) -> Event | None:
+def _block_to_event(blk: dict[str, Any], day: date,
+                    week_no: int = 0) -> Event | None:
     """把一个时间块里的若干行，拆成 标题 / 地点 / 备注 / 循环，合成一条日程。"""
     attrs: dict[str, list[str]] = {"location": [], "campus": [], "teacher": [],
                                    "nature": [], "note": [], "weeks": [],
@@ -1218,11 +1556,19 @@ def _block_to_event(blk: dict[str, Any], day: date) -> Event | None:
         bits.append(recur_note)
     note = " · ".join(bits)
 
-    # --- 循环 -------------------------------------------------------------
-    rrule, _label = parse_recurrence(recur_note or "")
-    m_count = re.search(r"共\s*(\d{1,2})\s*次", recur_note or "")
-    if rrule and m_count:
-        rrule = f"{rrule};COUNT={int(m_count.group(1))}"
+    # --- 循环：只认图片里写的内容，绝不读网站设置 ------------------------
+    # 循环信息可能出现在「每周四 · 共16次」这类独立说明行，
+    # 也可能写成「周次：1-16周」这样的字段，两处都要参与抽取。
+    recur_text = " ".join([recur_note] + attrs.get("weeks", []))
+    recur_info = extract_recurrence(recur_text, start_dt, source="image")
+    # 单双周必须对齐到「第 N 周」的奇偶：第 44 周（偶数）上的双周课本周就上，
+    # 单周课要顺延一周；否则两门课会从同一天开始，在日历里挤成同一周。
+    if week_no and recur_info.odd_even in ("单周", "双周"):
+        want_odd = recur_info.odd_even == "单周"
+        if (week_no % 2 == 1) != want_odd:
+            start_dt += timedelta(days=7)
+            end_dt += timedelta(days=7)
+    rrule = recur_info.rrule(start_dt)
     vague_reason = "从截图的字段列表按时间归并得出，请核对标题与时间"
     if title == fallback:
         vague_reason = "该时间块没有找到明确的日程名，标题按时间自动生成，请补充"
@@ -1235,6 +1581,9 @@ def _block_to_event(blk: dict[str, Any], day: date) -> Event | None:
         note=note,
         priority="中",
         rrule=rrule,
+        recur_skip=",".join(str(w) for w in recur_info.skip_weeks),
+        recur_label=recur_info.label,
+        recur_source="image" if rrule else "",
         vague=True,
         vague_reason=vague_reason,
         source="ocr",
@@ -1456,6 +1805,7 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
             note=note,
             priority=extract_priority(line),
             rrule=rrule,
+            recur_source="image" if rrule else "",
             vague=vague,
             vague_reason="；".join(vague_reasons),
             source="text",
@@ -2248,6 +2598,8 @@ def _split_course_cell(text: str) -> dict[str, Any]:
     raw = re.sub(rf"\s*{_WEEK_RANGE_SEP}\s*", "-", raw)
     # 左侧「上午/下午」的标记偶尔会和第一格内容被识别成同一块
     raw = re.sub(r"(上午|下午|晚上|中午|下年|上年)\s*", " ", raw).strip()
+    # 「1-16 周, 单周」：逗号把单双周和周次拆开了，先粘回去
+    raw = re.sub(r"(\d{1,2}\s*-\s*\d{1,2})\s*[,，]\s*(单|双)\s*周", r"\1\2周", raw)
     # 末尾的分隔符（「/」被读成「1」时，尾巴上会多一个孤零零的数字）
     raw = re.sub(r"[\s,，、;；/·•。.]+$", "", raw)
     raw = re.sub(r"\s*[.·•]\s*\d{1,2}$", "", raw)
@@ -2446,16 +2798,29 @@ def timetable_to_events(cells: list[dict[str, Any]],
             first_week = weeks[0][0] if weeks else 1
             day = anchor_monday + timedelta(days=(first_week - 1) * 7 + wd)
 
-            byday = _WEEKDAY_ICS[wd]
-            total = sum(b - a + 1 for a, b in weeks) if weeks else 16
             odd_even = info["odd_even"]
-            if odd_even == "单周":
-                rrule = f"FREQ=WEEKLY;INTERVAL=2;BYDAY={byday};COUNT={max(1, (total + 1) // 2)}"
-            elif odd_even == "双周":
-                day += timedelta(days=7)
-                rrule = f"FREQ=WEEKLY;INTERVAL=2;BYDAY={byday};COUNT={max(1, total // 2)}"
-            else:
-                rrule = f"FREQ=WEEKLY;BYDAY={byday};COUNT={max(1, total)}"
+            # 单双周要对齐：第一周是单周、课又是「双周」，就顺延一周开始。
+            # 反过来「第一周是双周、课是单周」同理，不能无条件 +7。
+            shift_week = 0
+            if weeks and odd_even in ("单周", "双周"):
+                want_odd = odd_even == "单周"
+                if (first_week % 2 == 1) != want_odd:
+                    shift_week = 1
+                    day += timedelta(days=7)
+
+            # 重复规则全部来自课表单元格里写的周次 / 单双周，不读网站设置。
+            recur = RecurrenceInfo(
+                freq="WEEKLY",
+                byday=[_WEEKDAY_ICS[wd]],
+                weeks=weeks,
+                odd_even=odd_even,
+                source="image",
+            )
+            rrule = recur.rrule(day)
+            # 2-6,9-18 这种不连续周次：7、8 周不上课，要用 EXDATE 排掉，
+            # 否则 COUNT=15 会一路排到第 16 周，把中间的假课上进日历。
+            start_week = first_week + shift_week
+            skips = [g - start_week for g in _weeks_gaps(weeks) if g - start_week >= 0]
 
             bits = ["课表导入 · 按默认作息表推算时间"]
             if weeks:
@@ -2474,6 +2839,10 @@ def timetable_to_events(cells: list[dict[str, Any]],
                 note=" · ".join(bits),
                 priority="中",
                 rrule=rrule,
+                recur_skip=",".join(str(v) for v in skips),
+                recur_label=(f"第 {_weeks_label(weeks)} 周" if weeks else "")
+                + (f" {odd_even}" if odd_even else ""),
+                recur_source="image" if rrule else "",
                 vague=True,
                 vague_reason="课程时间与首周日期由课表推算，请核对",
                 source="ocr",
@@ -2522,8 +2891,18 @@ AI_SYSTEM_PROMPT = """你是一个严谨的日程结构化引擎，负责把用�
 - location: 字符串，没有则空串
 - note: 字符串，补充说明，没有则空串
 - priority: "高" | "中" | "低"（DDL、考试、面试、答辩、必须参加 → 高）
-- rrule: 字符串，循环规则。每周固定 → "FREQ=WEEKLY;BYDAY=MO,WE"；
-         每天 → "FREQ=DAILY"；工作日 → "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"；不循环 → ""
+- recurrence_info: 对象，从图片里读到的重复规则（没有就所有字段留空）：
+    {"freq": "WEEKLY|DAILY|MONTHLY", "byday": ["MO"], "interval": 1,
+     "count": 0, "weeks": "1-16", "odd_even": "单周|双周|", "raw": "原文片段"}
+- rrule: 字符串，由 recurrence_info 换算出的 RFC 5545 规则（不含「RRULE:」前缀）：
+    「每周四 共16次」→ "FREQ=WEEKLY;BYDAY=TH;COUNT=16"
+    「每周一 1-5周」→ "FREQ=WEEKLY;BYDAY=MO;COUNT=5"
+    「单周」        → "FREQ=WEEKLY;INTERVAL=2"
+    「周一至周五」   → "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"
+    「每天」        → "FREQ=DAILY"；「每月」→ "FREQ=MONTHLY"
+    图片没有任何重复信息 → ""
+  **重要**：COUNT 只能来自图片里写的次数或周数，不允许自己编一个（比如 16）。
+  图片只写了「每周四」没写次数时，rrule 就写 "FREQ=WEEKLY;BYDAY=TH"，不带 COUNT。
 - vague: 布尔值，时间是否为推测得出
 - vague_reason: 字符串，若 vague 为 true，用中文简短说明推测依据
 
@@ -2802,6 +3181,9 @@ def merge_ai_and_rules(ai_events: list[Event], rule_events: list[Event]) -> list
                 ai_ev.note = r_ev.note
             if not ai_ev.rrule and r_ev.rrule:
                 ai_ev.rrule = r_ev.rrule
+                ai_ev.recur_skip = r_ev.recur_skip
+                ai_ev.recur_label = r_ev.recur_label
+                ai_ev.recur_source = r_ev.recur_source or "image"
             if ai_ev.priority == "中" and r_ev.priority != "中":
                 ai_ev.priority = r_ev.priority
             if not ai_ev.vague and r_ev.vague:
@@ -2849,16 +3231,18 @@ def normalize_events(events: list[Event], now: datetime | None = None) -> tuple[
     now = now or datetime.now()
     report = {"expired": 0, "duplicated": 0, "conflicts": 0}
 
-    # --- 7.0 循环日程补齐结束条件 -------------------------------------
-    # 界面上已取消全局「兜底周数」，改由这一处统一给「没有结束条件」的循环
-    # 日程写入默认次数（COUNT）。这样导出的 .ics 一定能在第 N 次后自动停止，
-    # 既不会变成永久重复，用户也能在日程表里逐条改成自己想要的数量。
+    # --- 7.0 循环日程：只标注来源，绝不改写规则 ------------------------
+    # 旧实现在这里给所有「没有 COUNT」的循环日程硬补 COUNT=16，
+    # 等于拿网站的默认值覆盖图片里写的「1-5 周」「共 8 次」——
+    # 这正是「图片规则被忽略」的根因之一。现在一律不再补：
+    #   图片写了次数 → RRULE 里已经有 COUNT
+    #   图片只写了频率 → 保持无结束条件，导出时由 build_ics 用 UNTIL 兜底
     for ev in events:
         if not ev.is_recurring:
             continue
-        if get_recur_count(ev.rrule) or "UNTIL" in ev.rrule.upper():
-            continue
-        ev.rrule = set_recur_count(ev.rrule, RECUR_COUNT_DEFAULT)
+        if not ev.recur_source:
+            # 没有来源标记的是旧数据 / 手工补的规则，标成 image 以便展示「按图片」
+            ev.recur_source = "image" if ev.rrule else ""
 
     # --- 7.1 过滤过期（循环日程保留，因为未来仍会发生） ---------------
     fresh: list[Event] = []
@@ -3052,6 +3436,14 @@ def build_ics(events: list[Event], calendar_name: str = "AI 智能日程",
         lines.append(f"PRIORITY:{PRIORITY_ICS.get(ev.priority, 5)}")
         if ev.rrule:
             lines.append(f"RRULE:{_rrule_with_until(ev.rrule, ev.start, recur_weeks)}")
+            # 「2-6,9-18 周」这种不连续周次：RRULE 会一路排下去，
+            # 中间的 7、8 周必须用 EXDATE 排掉，否则日历里会凭空多出两次课。
+            skip_weeks = sorted({int(w) for w in (ev.recur_skip or "").split(",")
+                                 if w.strip().isdigit()})
+            if skip_weeks:
+                exds = ",".join(_ics_dt(ev.start + timedelta(weeks=w))
+                                for w in skip_weeks)
+                lines.append(f"EXDATE:{exds}")
         # 分类便于在日历中按来源筛选
         lines.append(f"CATEGORIES:{_ics_escape('AI日程')}")
         lines.append("STATUS:CONFIRMED")
@@ -5030,6 +5422,10 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
     report["warnings"] = warnings
     report["ocr_count"] = ocr_ok
     report["timetable_cells"] = len(tt_cells)
+    # 带循环规则的事件，全部来自图片里写的「每周四 / 1-16周 / 单双周 / 共N次」
+    report["image_rules"] = sum(
+        1 for ev in final_events
+        if ev.rrule and ev.recur_source in ("image", ""))
     report["vague"] = sum(1 for ev in st.session_state.events if ev.vague)
     st.session_state.last_report = report
 
@@ -5419,6 +5815,8 @@ def _render_parse_report(report: dict[str, Any]) -> None:
         chips.append(_chip(f"OCR 识别 {report['ocr_count']} 张", "ok"))
     if report.get("timetable_cells"):
         chips.append(_chip(f"课表 {report['timetable_cells']} 格", "info"))
+    if report.get("image_rules"):
+        chips.append(_chip(f"按图片重复规则 {report['image_rules']} 条", "ok"))
     if report.get("all_duplicate"):
         chips.append(_chip("全部为重复日程，未新增", "warn"))
     if chips:
@@ -5716,6 +6114,9 @@ def _render_recur_panel() -> None:
     if st.session_state.get("recur_pick_label") not in options:
         st.session_state.pop("recur_pick_label", None)
 
+    st.caption("这里的调整**只作用于选中的那一条**，改完点「应用重复设置」才生效；"
+               "解析图片时不会读取这里的设置——图片里写了「每周四 共16次」「1-16周」"
+               "「单双周」，导出就是那个规则。")
     picked_label = st.selectbox(
         "选择要设置重复的日程",
         labels,

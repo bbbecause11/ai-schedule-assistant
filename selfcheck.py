@@ -370,10 +370,23 @@ def test_calendar_and_sample() -> None:
     check("默认不循环：单次日程 rrule 为空",
           any(not e.is_recurring for e in norm),
           "示例里应同时存在单次与循环日程")
-    check("循环日程自动补上默认次数",
-          all(app.get_recur_count(e.rrule) == app.RECUR_COUNT_DEFAULT
-              for e in norm if e.is_recurring),
-          str([e.rrule for e in norm if e.is_recurring]))
+    # 旧行为：所有循环日程被强塞 COUNT=16，等于用网站默认值覆盖图片规则。
+    # 新行为：图片写了多少次就是多少次，没写就不虚构。
+    base = app.Event(title="课", start=datetime(2026, 11, 2, 8, 0),
+                     end=datetime(2026, 11, 2, 9, 30))
+    keep8 = app.Event(title="课", start=datetime(2026, 11, 2, 8, 0),
+                      end=datetime(2026, 11, 2, 9, 30),
+                      rrule="FREQ=WEEKLY;BYDAY=MO;COUNT=8")
+    n2, _ = app.normalize_events([keep8])
+    check("图片写了 8 次就保留 8 次，不被全局默认 16 覆盖",
+          app.get_recur_count(n2[0].rrule) == 8, n2[0].rrule)
+
+    no_count = app.Event(title="课", start=datetime(2026, 11, 2, 8, 0),
+                         end=datetime(2026, 11, 2, 9, 30),
+                         rrule="FREQ=WEEKLY;BYDAY=MO")
+    n3, _ = app.normalize_events([no_count])
+    check("图片没写次数时不虚构 COUNT",
+          app.get_recur_count(n3[0].rrule) == 0, n3[0].rrule)
 
 
 def test_ocr() -> None:
@@ -744,6 +757,103 @@ def test_theme_guard() -> None:
     check("全站样式中没有兜底式的 filter:invert", not stray, str(stray[:3]))
 
 
+def test_recurrence() -> None:
+    section("M. 重复规则：图片写什么就导出什么")
+
+    # ---- 1. 自然语言 -> RRULE 的精确映射 ------------------------------
+    cases = [
+        # 原文、期望 RRULE
+        ("每周四 · 共 16 次", "FREQ=WEEKLY;BYDAY=TH;COUNT=16"),
+        ("每每周四·共16次", "FREQ=WEEKLY;BYDAY=TH;COUNT=16"),      # OCR 叠字
+        ("每周一，1-5周", "FREQ=WEEKLY;BYDAY=MO;COUNT=5"),
+        ("第1-16周", "FREQ=WEEKLY;COUNT=16"),
+        ("1-16周 单周", "FREQ=WEEKLY;INTERVAL=2;COUNT=8"),
+        ("1-16周 双周", "FREQ=WEEKLY;INTERVAL=2;COUNT=8"),
+        ("单双周交替", "FREQ=WEEKLY;INTERVAL=2"),
+        ("周一至周五", "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"),
+        ("每周一三五", "FREQ=WEEKLY;BYDAY=MO,WE,FR"),
+        ("每两周的周三", "FREQ=WEEKLY;INTERVAL=2;BYDAY=WE"),
+        ("每天 · 共 30 次", "FREQ=DAILY;COUNT=30"),
+        ("每月", "FREQ=MONTHLY"),
+        ("连续8周", "FREQ=WEEKLY;COUNT=8"),
+        ("每周四 1-8周", "FREQ=WEEKLY;BYDAY=TH;COUNT=8"),
+        ("每周四 9-16周", "FREQ=WEEKLY;BYDAY=TH;COUNT=8"),
+        ("2-6,9-18周", "FREQ=WEEKLY;COUNT=15"),
+    ]
+    for text, want in cases:
+        got = app.extract_recurrence(text, datetime(2026, 10, 29, 10, 45)).rrule()
+        check(f"「{text}」→ {want}", got == want, got or "(空)")
+
+    # ---- 2. 不该被误判成循环的写法 -----------------------------------
+    for text in ("下周三下午2点 开班会", "第3周开会", "10:45-11:30 上课", "教室 A201"):
+        got = app.extract_recurrence(text)
+        check(f"「{text}」不产生重复规则", got.rrule() == "", got.rrule())
+
+    # ---- 3. 不连续周次要生成 EXDATE 跳过空档 --------------------------
+    info = app.extract_recurrence("2-6,9-18周")
+    check("2-6,9-18 之间跳 2 周", info.skip_weeks == [5, 6], str(info.skip_weeks))
+
+    cells = [{"weekday": 3, "period": 1, "periods": (1, 2),
+              "text": "高等数学 王老师 W9阶 2-6,9-18, /"}]
+    evs = app.timetable_to_events(cells, date(2026, 9, 7))
+    check("课表 2-6,9-18 周 → COUNT=15",
+          bool(evs) and evs[0].rrule == "FREQ=WEEKLY;BYDAY=TH;COUNT=15",
+          evs[0].rrule if evs else "")
+    ics = app.build_ics(evs)
+    check("ICS 里写了 EXDATE 排掉空档周",
+          "EXDATE:" in ics and "COUNT=15" in ics,
+          [l for l in ics.split("\r\n") if "EXDATE" in l][:1])
+
+    # ---- 4. 网站设置不能覆盖图片规则 ---------------------------------
+    with_count = app.Event(title="课", start=datetime(2026, 11, 2, 8, 0),
+                           end=datetime(2026, 11, 2, 9, 30),
+                           rrule="FREQ=WEEKLY;BYDAY=MO;COUNT=5")
+    norm, _ = app.normalize_events([with_count])
+    check("图片写 5 次就保留 5 次（不被默认 16 覆盖）",
+          app.get_recur_count(norm[0].rrule) == 5, norm[0].rrule)
+
+    bare = app.Event(title="课", start=datetime(2026, 11, 2, 8, 0),
+                     end=datetime(2026, 11, 2, 9, 30),
+                     rrule="FREQ=WEEKLY;BYDAY=MO")
+    norm2, _ = app.normalize_events([bare])
+    check("图片没写次数就不虚构 COUNT",
+          app.get_recur_count(norm2[0].rrule) == 0, norm2[0].rrule)
+
+    # ---- 5. 字段列表型截图：整块只用一套规则 -------------------------
+    text = (
+        "2026 年 10 月 29 日 · 周四 第 44 周\n"
+        "10:45\n职业生涯发展与规划(6-7节)\n"
+        "场地：回龙2311(多)\n校区：回龙\n教师：张伟\n"
+        "课程性质简称：必修\n每周四 · 共 16 次\n"
+        "14:50\n大学生心理健康教育\n场地：回龙1212(多)\n每每周四 · 共 16 次\n"
+    )
+    block_events = app.parse_with_rules(text)
+    check("两个时间块 → 两条日程", len(block_events) == 2, str(len(block_events)))
+    check("每条都带同一套图片规则",
+          all(e.rrule == "FREQ=WEEKLY;BYDAY=TH;COUNT=16" for e in block_events),
+          str([e.rrule for e in block_events]))
+    check("地点/属性没有各自带一套规则",
+          len({e.rrule for e in block_events}) == 1,
+          str({e.rrule for e in block_events}))
+    check("规则标记为来自图片",
+          all(e.recur_source == "image" for e in block_events),
+          str([e.recur_source for e in block_events]))
+
+    # ---- 6. 单双周按「第 N 周」的奇偶对齐 ---------------------------
+    odd = app.parse_with_rules(
+        "2026 年 10 月 26 日 · 周一 第 44 周\n"
+        "08:00\n物理实验\n场地：实验楼A201\n1-16周 单周\n"
+        "14:00\n体育(1)\n场地：科教城体育场\n1-16周 双周\n"
+    )
+    by_time = {e.start.strftime("%H:%M"): e for e in odd}
+    check("偶数周里的单周课顺延一周",
+          by_time.get("08:00") and by_time["08:00"].start.date() == date(2026, 11, 2),
+          str(by_time["08:00"].start.date()) if by_time.get("08:00") else "")
+    check("偶数周里的双周课本周就上",
+          by_time.get("14:00") and by_time["14:00"].start.date() == date(2026, 10, 26),
+          str(by_time["14:00"].start.date()) if by_time.get("14:00") else "")
+
+
 def test_security() -> None:
     section("I. 安全与合规静态检查")
     src = open("app.py", encoding="utf-8").read()
@@ -774,7 +884,7 @@ def main() -> int:
     for fn in (test_text_only, test_time_parsing, test_structure_fields,
                test_dedup_conflict, test_export, test_recurrence,
                test_calendar_and_sample, test_ocr,
-               test_ai_layer, test_merge, test_timetable, test_time_blocks, test_security, test_theme_guard):
+               test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_security, test_theme_guard):
         try:
             fn()
         except Exception:  # noqa: BLE001
