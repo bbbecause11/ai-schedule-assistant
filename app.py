@@ -60,7 +60,8 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   1.7.0  重复规则引擎：图片里的「每周四/1-16周/单双周/共N次」直出 RRULE
 #   1.8.0  教务单元格解析：课程名/地点/教师严格分离，属性词绝不进标题
 #   1.9.0  自定义作息表：「第X节 / 晚修」按用户作息换算成绝对时间，注入 AI 提示词
-APP_VERSION = "1.9.0"
+#   2.0.0  江大 100 条语料打磨：分号多事件切分、车次防误判、「，地点」后缀收编
+APP_VERSION = "2.0.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -1046,10 +1047,28 @@ def extract_location(text: str) -> tuple[str, str]:
     m = _LOCATION_AT_RE.search(text)
     if m:
         return m.group("loc").strip(" ，,。;；"), m.group(0)
-    m = _LOCATION_KEYWORD_RE.search(text)
-    if m:
-        loc = re.sub(r"^(?:在|于|从|到|去)", "", m.group(0).strip())
-        return loc.strip(), m.group(0)
+    cands = list(_LOCATION_KEYWORD_RE.finditer(text))
+    if cands:
+        # 「校医院牙科预约，江苏大学校医院3楼」：标题里的「校医院」也会命中
+        # 关键词。行内有逗号时，优先取最后一个逗号之后的命中——
+        # 那才是真地点；逗号后没有（或全是祈使句）再回退逗号前。
+        last_comma = max(text.rfind("，"), text.rfind(","))
+        after = ([m for m in cands if m.start() > last_comma]
+                 if last_comma >= 0 else [])
+        # 先试「最后一个逗号之后」的命中，全被排除再回退逗号前（标题词）。
+        pools = [after, cands] if after else [cands]
+        for pool in pools:
+          for m in pool:
+            loc = re.sub(r"^(?:在|于|从|到|去)", "", m.group(0).strip())
+            # 「参观实验室」「修改论文」：关键词吞了动词前缀，说明这串是日程名
+            if re.sub(
+                    r"^(?:参观|走访|巡查|检查|修改|撰写|召开|举行|参加|进行|筹备|准备|安排|"
+                    r"负责|提交|整理|沟通|对接|面试|答辩)", "", loc) != loc:
+                continue
+            # 「务必到场」的「场」会像「操场」一样命中，排除祈使/要求语气
+            if re.search(r"务必|必须|记得|准时|参加|到场|重要|紧急|不要|别忘", loc):
+                continue
+            return loc.strip(), m.group(0)
     return "", ""
 
 
@@ -1103,13 +1122,19 @@ def _split_candidates(text: str) -> list[str]:
         line = raw_line.strip()
         if not line:
             continue
-        # 形如「1. 」「2、」「3) 」的列表项各自成行。
-        # 注意：点号后必须跟空白，否则 "11.5 交报告" 会被误拆成 "11." + "5 交报告"。
-        parts = re.split(r"(?:^|\s)(?=\d{1,2}[、)）]\s+|\d{1,2}\.\s+)", line)
-        for part in parts:
-            part = part.strip()
-            if part:
-                lines.append(part)
+        # 分号是用户粘贴文本里最常见的事件分隔符：
+        # 「08:00 高数，三江楼301；10:00 英语，三山楼205」必须拆成两条。
+        for seg in re.split(r"\s*[；;]\s*", line):
+            seg = seg.strip()
+            if not seg:
+                continue
+            # 形如「1. 」「2、」「3) 」的列表项各自成行。
+            # 注意：点号后必须跟空白，否则 "11.5 交报告" 会被误拆成 "11." + "5 交报告"。
+            parts = re.split(r"(?:^|\s)(?=\d{1,2}[、)）]\s+|\d{1,2}\.\s+)", seg)
+            for part in parts:
+                part = part.strip()
+                if part:
+                    lines.append(part)
     # 剔除纯符号行（如 "!@#$"）与空行：它们不可能包含日程信息
     return [ln for ln in lines if len(ln) >= 2 and re.search(r"[\u4e00-\u9fa5A-Za-z0-9]", ln)]
 
@@ -1128,6 +1153,21 @@ def _looks_like_date_only(line: str) -> bool:
 # 逐行解析会产出一堆「未命名日程」。这里先用整体视角识别一段行程，
 # 合成一条事件，并把用掉的行标记出来，避免重复入库。
 _TRIP_TRAIN_RE = re.compile(r"(?<![A-Za-z0-9])([GDCKZT]\d{1,4})(?!\d)")
+
+
+def _train_like(m: "re.Match", flat: str) -> bool:
+    r"""
+    候选车次像不像真的车次。
+
+    「计算机楼C102」「实验楼D区」这类教室/楼栋编号也会命中 [GDCKZT]\d，
+    必须用上下文排除：车次后面跟建筑词、或前后都没有「乘/站」字样的，不算。
+    """
+    after = flat[m.end():m.end() + 4]
+    if re.match(r"[楼室馆层区幢栋房]", after):
+        return False
+    before = flat[max(0, m.start() - 4):m.start()]
+    ctx = flat[m.start():m.end() + 10]
+    return ("乘" in before or "站" in ctx)
 _BARE_CLOCK_RE = re.compile(r"^\s*(\d{1,2})\s*[:：]\s*(\d{2})\s*$")
 _CITY_LINE_RE = re.compile(r"^[\u4e00-\u9fa5]{2,6}$")
 # 车票界面上大量非日程文案，识别站名时要排除
@@ -1150,7 +1190,11 @@ def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[
     lines = [ln.strip() for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
     flat = "\n".join(lines)
 
-    train_m = _TRIP_TRAIN_RE.search(flat)
+    train_m = None
+    for cand in _TRIP_TRAIN_RE.finditer(flat):
+        if _train_like(cand, flat):
+            train_m = cand
+            break
     if not train_m:
         return [], set()
 
@@ -1229,6 +1273,7 @@ def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[
     consumed: set[str] = set()
     for offset in (s1, s2, train_m.start()):
         consumed.add(lines[flat.count("\n", 0, offset)])
+    consumed.add(f"@train:{train_m.group(1)}")   # 分号切分会改写行文本，按车次兜底
     consumed.update(c for c in (from_city, to_city) if c)
     return [ev], consumed
 
@@ -1657,9 +1702,13 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
     events.extend(block_events)
     has_blocks = bool(block_events)
 
+    consumed_trains = {c[7:] for c in trip_consumed if c.startswith("@train:")}
     for line in _split_candidates(text):
         line = line[:400]
-        if line.strip() in trip_consumed or line.strip() in block_consumed:
+        if (line.strip() in trip_consumed or line.strip() in block_consumed
+                or (consumed_trains and re.search(
+                    r"(?<![A-Za-z0-9])(?:%s)(?!\d)" % "|".join(
+                        re.escape(t) for t in consumed_trains), line))):
             continue
         # 已按时间块归并过的文档，字段行一律不再单独成条
         if has_blocks and _field_of(line) is not None:
@@ -1821,7 +1870,21 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
             end_dt = start_dt + timedelta(minutes=DEFAULT_EVENT_MINUTES)
 
         # --- 标题 / 地点 / 优先级 -------------------------------------
-        location, loc_raw = extract_location(line)
+        # 「看电影，万达影城」「提交课程周报，宿舍B区」：行尾「，XX」是用户
+        # 手写的地点后缀，最可靠的信号——优先于关键词提取，并从行里剥掉
+        # （否则 _clean_title 会把逗号清成空格，地点混进标题）。
+        pre_tail_line = line                # 优先级等仍要看完整行（「，务必到场」）
+        m_tail = re.search(r"[，,]\s*([^，,；;。]{2,20})\s*。?\s*$", line)
+        tail_txt = m_tail.group(1) if m_tail else ""
+        if (m_tail and tail_txt
+                and not re.fullmatch(r"[\d\s:：.-]+", tail_txt)
+                and not re.search(r"\d{1,2}[:：]\d{2}", tail_txt)
+                and not re.search(r"务必|必须|记得|重要|紧急|准时|参加|到场|带齐|准备",
+                                  tail_txt)):
+            location, loc_raw = tail_txt.strip(), ""
+            line = line[:m_tail.start()]
+        else:
+            location, loc_raw = extract_location(line)
         note_m = _NOTE_LABEL_RE.search(line)
         note = note_m.group("note").strip() if note_m else ""
         # 聊天记录形如「班长：下周三下午2点开会」——把说话人记为备注，便于溯源
@@ -1851,7 +1914,7 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
             end=end_dt,
             location=location,
             note=note,
-            priority=extract_priority(line),
+            priority=extract_priority(pre_tail_line),
             rrule=rrule,
             recur_source="image" if rrule else "",
             vague=vague,
