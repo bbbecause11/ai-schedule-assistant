@@ -64,7 +64,9 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   2.1.0  五种新课表格式：竖排教务（星期为行）、日历App彩块（@地点）、
 #          手机课表（淡彩块+周次后缀）、研究生课表（第X节+逐行拷贝切分）、
 #          南航教务（教学班噪声字段）；27 张合成变体 + 5 张真实图，错误率 1.53%
-APP_VERSION = "2.1.0"
+#   2.2.0  学期起始周：侧边栏选开学第一周任意一天自动对齐周一，
+#          显示第 1 周区间与当前教学周数，日历逐日标注教学第 N 周
+APP_VERSION = "2.2.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -6573,11 +6575,13 @@ def init_state() -> None:
         "recur_start_date": datetime.now().date(),  # 循环开始日期
         "recur_advanced_open": False,  # 高级：手写 RRULE 展开状态
         # --- 课表识别 ---
-        # course_anchor 由设置面板的 date_input 自己维护（widget key），
+        # course_anchor 由侧边栏「📅 学期起始周」的 date_input 自己维护
+        # （widget key，回调里会把任意一天对齐到所在周的周一），
         # 这里只记录「用户是否手动指定过」，决定导入后是否提示日期为推算值。
         "course_anchor_set": False,
         "period_rows": None,             # None = 未自定义，用默认作息模板
         "period_open": False,            # 侧边栏作息表编辑器是否展开
+        "anchor_open": False,            # 侧边栏学期起始周是否展开
         "remind_open": False,            # 侧边栏默认提醒是否展开
         "period_editor_sync": None,
     }
@@ -6939,9 +6943,62 @@ def _cb_toggle_period() -> None:
     st.session_state.period_open = not bool(st.session_state.get("period_open"))
 
 
+def _cb_toggle_anchor() -> None:
+    """侧边栏学期起始周入口的开合回调。"""
+    st.session_state.anchor_open = not bool(st.session_state.get("anchor_open"))
+
+
 def _cb_course_anchor() -> None:
-    """用户手动指定了学期首周，之后的课表导入就不再提示「日期为推算值」。"""
+    """
+    起始周选件变更：用户选的是开学第一周里的**任意一天**，
+    这里对齐到那一周的周一存回，后续按「第 1 周 = 该周周一」推算。
+    """
+    d = st.session_state.get("course_anchor")
+    if d is not None and hasattr(d, "weekday"):
+        st.session_state.course_anchor = _this_monday(d)
     st.session_state.course_anchor_set = True
+
+
+def _cb_anchor_this_week() -> None:
+    """快捷键：把今天所在的这一周设为第一周。"""
+    st.session_state.course_anchor = _this_monday()
+    st.session_state.course_anchor_set = True
+
+
+def _render_anchor_editor() -> None:
+    """学期起始周编辑器：选第一周内任意一天，自动对齐到那一周的周一。"""
+    st.caption("课表上的「4-19周」是相对周次：从第 4 周的周一开始上课，"
+               "一直重复到第 19 周。在下面选开学第一周里的**任意一天**"
+               "（例如 8 月 31 日 ~ 9 月 6 日里的任何一天），会自动对齐到"
+               "那一周的周一。")
+    st.date_input(
+        "开学第一周（选其中任意一天）",
+        value=_this_monday(),
+        key="course_anchor",
+        on_change=_cb_course_anchor,
+        format="YYYY/MM/DD",
+        help=_tip("开学第一周", "学期第 1 周里随便选哪一天都行，"
+                  "应用会自动取那一周的周一作为起始周。"),
+    )
+    anchor = _this_monday(st.session_state.get("course_anchor")
+                          or datetime.now().date())
+    sun = anchor + timedelta(days=6)
+    st.markdown(f"**第 1 周：{anchor.month} 月 {anchor.day} 日 ~ "
+                f"{sun.month} 月 {sun.day} 日**")
+    today = datetime.now().date()
+    delta_weeks = (_this_monday(today) - anchor).days // 7
+    if delta_weeks < 0:
+        st.caption(f"学期尚未开始（{-delta_weeks} 周后开学）。")
+    else:
+        st.caption(f"今天在教学第 {delta_weeks + 1} 周。")
+    st.button(
+        "把本周设为第一周", key="anchor_this_week", width="stretch",
+        on_click=_cb_anchor_this_week,
+        help=_tip("把本周设为第一周",
+                  "快速把起始周设为今天所在的这一周。"),
+    )
+    st.caption("改完起始周后，**重新上传/解析课表**即可按新日期对齐；"
+               "上课时间按侧边栏「⏰ 作息时间表」换算。")
 
 
 def _cb_reset_periods() -> None:
@@ -7057,17 +7114,11 @@ def render_settings_panel() -> None:
 
     # ---------- 课表识别 ----------
     st.markdown("#### 📅 课表识别")
-    st.date_input(
-        "学期第 1 周的周一",
-        value=_this_monday(),
-        key="course_anchor",
-        on_change=_cb_course_anchor,
-        help=_tip("学期第 1 周的周一",
-                  "课表上写的是「第 9 周」「2-6,9-18 周」这种相对周次，"
-                  "要从这个日期往后推算成具体哪天。填对了日期就准；"
-                  "不填则按本周一算，导入的课程会标「待核对」。"),
-    )
-    st.caption("课表截图里的周次按这个日期换算；上课时间按侧边栏"
+    anchor = _this_monday(st.session_state.get("course_anchor")
+                          or datetime.now().date())
+    st.caption(f"学期起始周在侧边栏「📅 学期起始周」里设置（当前第 1 周："
+               f"{anchor.month} 月 {anchor.day} 日起）。")
+    st.caption("课表截图里的周次按起始周换算；上课时间按侧边栏"
                "「⏰ 作息时间表」换算，导入后可在日程表里逐条微调。")
 
     st.caption("🔁 循环日程的**开始日期与重复次数**在「日程表 → 重复设置」里逐条调整，"
@@ -7118,6 +7169,31 @@ def render_sidebar() -> None:
             ocr_name, _ = get_ocr_engine()
             st.caption(f"{'AI 已连接' if ai_ok else 'AI 未配置'}"
                        f" · {'OCR 就绪' if ocr_name else 'OCR 未安装'}")
+
+        # --- 学期起始周：独立入口，选第一周任意一天自动对齐周一 ---
+        anchor_open = bool(st.session_state.get("anchor_open"))
+        st.button(
+            "✕ 收起起始周" if anchor_open else "📅 学期起始周",
+            key="anchor_toggle",
+            width="stretch",
+            on_click=_cb_toggle_anchor,
+            help=_tip(
+                "收起起始周" if anchor_open else "学期起始周",
+                "收起学期起始周设置。" if anchor_open else
+                "课表上的「4-19周」从起始周往后推算成具体日期。"
+                "选开学第一周里的任意一天即可，自动对齐到那一周的周一。",
+            ),
+        )
+        if anchor_open:
+            with st.container(border=True):
+                _render_anchor_editor()
+        else:
+            anchor = _this_monday(st.session_state.get("course_anchor")
+                                  or datetime.now().date())
+            wk = (_this_monday(datetime.now().date()) - anchor).days // 7 + 1
+            st.caption(f"第 1 周 {anchor.month}/{anchor.day} 起 · "
+                       + (f"本周是第 {wk} 周" if wk >= 1 else "学期未开始")
+                       + " · 点开设置")
 
         # --- 作息时间表：独立入口，不塞在设置面板里 ---
         period_open = bool(st.session_state.get("period_open"))
@@ -7385,8 +7461,8 @@ def _render_parse_report(report: dict[str, Any]) -> None:
             '<div class="notice notice-info">📅 识别为课表并按行列还原。'
             '上课时间按默认作息表推算（第 1 节 08:00、每节 45 分钟），'
             '周次日期按<b>本周为第 1 周</b>换算——'
-            '如果不对，到左侧「⚙️ 设置与外观 → 📅 课表识别」填上'
-            '<b>学期第 1 周的周一</b>，重新解析即可对齐。</div>'
+            '如果不对，到左侧<b>「📅 学期起始周」</b>选开学第一周里的任意一天'
+            '（自动对齐那一周的周一），重新解析即可对齐。</div>'
         )
 
     if report.get("ai_error"):
@@ -7870,6 +7946,22 @@ def _render_calendar() -> None:
                     _html(f'<div class="cal-wd">{"一二三四五六日"[idx]}</div>')
 
             today = datetime.now().date()
+            # 学期起始周：设置后在日历上标注每周是教学第几周
+            anchor = _this_monday(st.session_state.get("course_anchor")
+                                  or datetime.now().date())
+            month_days = [d for wk in _calendar_matrix(year, month)
+                          for d in wk if d is not None]
+            if month_days:
+                wk_first = (_this_monday(month_days[0]) - anchor).days // 7 + 1
+                wk_last = (_this_monday(month_days[-1]) - anchor).days // 7 + 1
+                if wk_last >= 1:
+                    lo = max(wk_first, 1)
+                    span = (f"教学第 {lo} 周" if lo == wk_last
+                            else f"教学第 {lo} ~ {wk_last} 周")
+                    _html(f'<div style="font-size:.72rem;color:var(--muted-2);'
+                          f'margin:2px 0 4px 2px;">📅 学期起始周 '
+                          f'{anchor.month}/{anchor.day} · 本页 {span}</div>')
+
             for week in _calendar_matrix(year, month):
                 row_cols = st.columns(7, gap="small")
                 for col, day in zip(row_cols, week):
@@ -7885,6 +7977,9 @@ def _render_calendar() -> None:
                                else f"{day:%m月%d日} 暂无安排")
                         if day == today:
                             tip += "（今天）"
+                        wk_no = (_this_monday(day) - anchor).days // 7 + 1
+                        tip += (f" · 教学第 {wk_no} 周" if wk_no >= 1
+                                else " · 开学前")
                         st.button(
                             label,
                             key=f"cal_day_{day:%Y%m%d}",
