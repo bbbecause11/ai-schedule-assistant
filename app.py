@@ -5596,6 +5596,8 @@ def init_state() -> None:
         # 这里只记录「用户是否手动指定过」，决定导入后是否提示日期为推算值。
         "course_anchor_set": False,
         "period_rows": None,             # None = 未自定义，用默认作息模板
+        "period_open": False,            # 侧边栏作息表编辑器是否展开
+        "remind_open": False,            # 侧边栏默认提醒是否展开
         "period_editor_sync": None,
     }
     for key, value in defaults.items():
@@ -5933,6 +5935,29 @@ def _cb_font_pick() -> None:
     st.session_state.ui_font = st.session_state.ui_font_pick
 
 
+def _render_remind_picker() -> None:
+    """默认提醒下拉框：侧边栏独立入口与别处共用。"""
+    remind_labels = list(REMIND_OPTIONS.keys())
+    current_label = _remind_label(st.session_state.default_remind)
+    idx = remind_labels.index(current_label) if current_label in remind_labels else 1
+    chosen = st.selectbox(
+        "新日程默认提前多久提醒", remind_labels, index=idx,
+        help=_tip("默认提醒", "导出 .ics 时写入 VALARM；单条日程可以在"
+                              "表格的「提醒」列里单独改。"),
+    )
+    st.session_state.default_remind = REMIND_OPTIONS[chosen]
+
+
+def _cb_toggle_remind() -> None:
+    """侧边栏默认提醒入口的开合回调。"""
+    st.session_state.remind_open = not bool(st.session_state.get("remind_open"))
+
+
+def _cb_toggle_period() -> None:
+    """侧边栏作息表入口的开合回调。"""
+    st.session_state.period_open = not bool(st.session_state.get("period_open"))
+
+
 def _cb_course_anchor() -> None:
     """用户手动指定了学期首周，之后的课表导入就不再提示「日期为推算值」。"""
     st.session_state.course_anchor_set = True
@@ -6061,29 +6086,12 @@ def render_settings_panel() -> None:
                   "要从这个日期往后推算成具体哪天。填对了日期就准；"
                   "不填则按本周一算，导入的课程会标「待核对」。"),
     )
-    st.caption("课表截图里的周次按这个日期换算；上课时间按下面的作息表换算，"
-               "导入后可在日程表里逐条微调。")
-
-    # ---------- 作息时间表 ----------
-    st.markdown("#### ⏰ 作息时间表")
-    st.caption("课表上写的「第6-7节」「晚修」按这张表换算成具体时间。"
-               "改成你学校的作息后再解析，时间就是准的。")
-    _render_period_editor()
-
-    # ---------- 默认提醒 ----------
-    st.markdown("#### 🔔 默认提醒")
-    remind_labels = list(REMIND_OPTIONS.keys())
-    current_label = _remind_label(st.session_state.default_remind)
-    idx = remind_labels.index(current_label) if current_label in remind_labels else 1
-    chosen = st.selectbox(
-        "默认提醒", remind_labels, index=idx,
-        help=_tip("默认提醒", "新日程默认提前多久提醒，导出 .ics 时写入 VALARM；"
-                              "单条日程可以在表格的「提醒」列里单独改。"),
-    )
-    st.session_state.default_remind = REMIND_OPTIONS[chosen]
+    st.caption("课表截图里的周次按这个日期换算；上课时间按侧边栏"
+               "「⏰ 作息时间表」换算，导入后可在日程表里逐条微调。")
 
     st.caption("🔁 循环日程的**开始日期与重复次数**在「日程表 → 重复设置」里逐条调整，"
-               "默认不循环，只有出现「每周一」「每天」这类字眼才会自动循环。")
+               "默认不循环，只有出现「每周一」「每天」这类字眼才会自动循环。"
+               "默认提醒时间在侧边栏「🔔 默认提醒」里调。")
 
     st.markdown("")
     st.button(
@@ -6129,6 +6137,49 @@ def render_sidebar() -> None:
             ocr_name, _ = get_ocr_engine()
             st.caption(f"{'AI 已连接' if ai_ok else 'AI 未配置'}"
                        f" · {'OCR 就绪' if ocr_name else 'OCR 未安装'}")
+
+        # --- 作息时间表：独立入口，不塞在设置面板里 ---
+        period_open = bool(st.session_state.get("period_open"))
+        st.button(
+            "✕ 收著作息表" if period_open else "⏰ 作息时间表",
+            key="period_toggle",
+            width="stretch",
+            on_click=_cb_toggle_period,
+            help=_tip(
+                "收著作息表" if period_open else "作息时间表",
+                "收起作息表编辑器。" if period_open else
+                "课表上写的「第6-7节」「晚修」按这张表换算成具体上课时间。"
+                "改成你学校的作息后再解析，时间就是准的。",
+            ),
+        )
+        if period_open:
+            with st.container(border=True):
+                _render_period_editor()
+        else:
+            rows = _period_rows()
+            first = rows[0] if rows else {"name": "第1节", "start": "08:00", "end": "08:45"}
+            st.caption(f"共 {len(rows)} 节 · {first['name']} {first['start']} 起 · "
+                       f"点开编辑你学校的作息")
+
+        # --- 默认提醒：独立入口 ---
+        remind_open = bool(st.session_state.get("remind_open"))
+        st.button(
+            "✕ 收起默认提醒" if remind_open else "🔔 默认提醒",
+            key="remind_toggle",
+            width="stretch",
+            on_click=_cb_toggle_remind,
+            help=_tip(
+                "收起默认提醒" if remind_open else "默认提醒",
+                "收起默认提醒设置。" if remind_open else
+                "新日程默认提前多久提醒，导出 .ics 时写入 VALARM；"
+                "单条日程可以在表格的「提醒」列里单独改。",
+            ),
+        )
+        if remind_open:
+            with st.container(border=True):
+                _render_remind_picker()
+        else:
+            st.caption(f"当前：提前 {_remind_label(st.session_state.default_remind)}")
 
         st.markdown("---")
 
