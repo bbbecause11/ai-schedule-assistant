@@ -1192,6 +1192,28 @@ def test_ai_key_dialog() -> None:
           "AI_PROVIDERS" in src and "def _cb_pick_provider" in src)
     check("服务商下拉用 on_change 回调自动填充",
           "ai_provider_pick" in src and "_cb_pick_provider" in src)
+    # 默认必须是「-」（未选择），不能默认 DeepSeek ——
+    # 否则会出现「下拉显示 DeepSeek、下面地址却是空的」这种自相矛盾的状态。
+    check("服务商默认是「-」而不是默认某一家",
+          'PROVIDER_NONE = "-"' in src
+          and "AI_PROVIDER_OPTIONS: list[str] = [PROVIDER_NONE] + list(AI_PROVIDERS.keys())" in src)
+    check("反查不到服务商时返回「-」而不是默认 DeepSeek",
+          re.search(r"def _guess_provider.*?return PROVIDER_NONE", src, re.S)
+          is not None)
+    check("选回「-」时把地址和模型名一起清空（保持三者状态一致）",
+          re.search(r"def _cb_pick_provider.*?PROVIDER_NONE.*?"
+                    r"ai_base_input = \"\"", src, re.S) is not None)
+    # 占位符统一用「-」，表示「没填」
+    check("输入框占位符统一用「-」",
+          re.search(r'st\.text_input\(\s*"API Key",\s*type="password",\s*key="ai_key_input",\s*placeholder="-"', src)
+          is not None
+          and re.search(r'key="ai_base_input",\s*placeholder="-"', src) is not None
+          and re.search(r'key="ai_model_input",\s*placeholder="-"', src) is not None)
+    # 服务商要排第一：先知道用哪家，才知道去哪儿申请 API Key
+    dlg = src.split('@st.dialog("🤖 AI 接口配置"', 1)[-1]
+    check("「服务商」排在「API Key」之前（先选服务商再填密钥）",
+          dlg.find('"服务商"') > 0
+          and dlg.find('"服务商"') < dlg.find('"API Key"'))
     # 预设里的地址必须能拼出 /chat/completions —— 即填到兼容层为止，
     # 不能再带 /chat/completions（会拼成 .../chat/completions/chat/completions）
     prov = re.search(r"AI_PROVIDERS[^=]*=\s*\{(.*?)\n\}", src, re.S)

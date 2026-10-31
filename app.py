@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.6.1"
+APP_VERSION = "2.6.2"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7524,13 +7524,16 @@ def _cb_toggle_ai_key() -> None:
 
 
 def _guess_provider(base_url: str) -> str:
-    """按已填的接口地址反查服务商；认不出来就回落到第一个（DeepSeek）。
+    """按已填的接口地址反查服务商；认不出来（或压根没填）就返回「-」。
 
     只做「前缀包含」匹配：同一家的地址可能带不带尾斜杠、带不带子路径，
     只要包含厂商特征串就算命中。
+
+    认不出来时返回「-」而不是默认 DeepSeek —— 地址是空的就该显示空，
+    不能显示一个跟下面字段对不上的服务商（用户会以为地址漏填了）。
     """
     if not base_url:
-        return next(iter(AI_PROVIDERS))
+        return PROVIDER_NONE
     marks = {
         "DeepSeek（深度求索）": "api.deepseek.com",
         "通义千问 Qwen（阿里云百炼）": "dashscope.aliyuncs.com",
@@ -7547,7 +7550,7 @@ def _guess_provider(base_url: str) -> str:
     for name, mark in marks.items():
         if mark in low:
             return name
-    return next(iter(AI_PROVIDERS))
+    return PROVIDER_NONE
 
 
 def _cb_period_dismiss() -> None:
@@ -7766,6 +7769,10 @@ def _cb_save_ai_key() -> None:
     st.session_state.ai_api_key = str(st.session_state.get("ai_key_input") or "").strip()
     st.session_state.ai_base_url = str(st.session_state.get("ai_base_input") or "").strip()
     st.session_state.ai_model = str(st.session_state.get("ai_model_input") or "").strip()
+    # 服务商下拉也按**实际填的地址**回写：用户可能选了 DeepSeek 又手动改了地址，
+    # 这时下次打开应该显示「-」或对应的真实厂商，而不是留下一个对不上的选项。
+    st.session_state.ai_provider_pick = _guess_provider(
+        st.session_state.ai_base_url)
     st.session_state.ai_key_status = "已保存并启用"
     st.session_state.ai_key_open = False
     st.rerun()
@@ -7797,6 +7804,7 @@ def _cb_clear_ai_key() -> None:
     st.session_state.ai_key_input = ""
     st.session_state.ai_base_input = ""
     st.session_state.ai_model_input = ""
+    st.session_state.ai_provider_pick = PROVIDER_NONE
     st.session_state.ai_key_status = "已清除"
     st.session_state.ai_key_open = False
     st.rerun()
@@ -7811,6 +7819,11 @@ def _cb_clear_ai_key() -> None:
 # 让用户手敲容易漏后缀，直接给个下拉框选厂商最省事。
 #
 # base_url 一律写到「兼容层」为止，程序会拼成 {base_url}/chat/completions。
+#
+# 「服务商」下拉的第一项是 PROVIDER_NONE（显示为「-」），表示**未选择**：
+#   用户可能已经通过环境变量配好了接口，也可能想手填自定义地址。
+#   默认就选中 DeepSeek 会造成「下拉显示 DeepSeek、下面地址却是空的」这种
+#   自相矛盾的状态（用户会以为地址漏填了），所以默认一律是「-」。
 AI_PROVIDERS: dict[str, dict[str, str]] = {
     "DeepSeek（深度求索）": {
         "base_url": "https://api.deepseek.com/v1",
@@ -7854,6 +7867,13 @@ AI_PROVIDERS: dict[str, dict[str, str]] = {
     },
 }
 
+# 「服务商」下拉的「未选择」项。显示成「-」——
+# 界面上所有空字段都用「-」表示「没填」，保持一致。
+PROVIDER_NONE = "-"
+
+# 下拉的完整选项列表：先「-」，再各家厂商
+AI_PROVIDER_OPTIONS: list[str] = [PROVIDER_NONE] + list(AI_PROVIDERS.keys())
+
 
 def _cb_pick_provider() -> None:
     """选了厂商 → 自动把接口地址和模型名填进输入框。
@@ -7861,6 +7881,12 @@ def _cb_pick_provider() -> None:
     回调在 widget 实例化之前执行，正好可以改 ai_base_input / ai_model_input。
     """
     name = str(st.session_state.get("ai_provider_pick") or "")
+    if name == PROVIDER_NONE:
+        # 选回「-」＝不指定服务商，把地址和模型名一起清空，
+        # 免得下拉显示「-」而下面还留着上一家的地址，对不上。
+        st.session_state.ai_base_input = ""
+        st.session_state.ai_model_input = ""
+        return
     preset = AI_PROVIDERS.get(name)
     if not preset:
         return
@@ -7877,31 +7903,33 @@ def _show_ai_key_dialog() -> None:
     # 注意：这里**不传 value=**，也不需要接返回值。
     # Streamlit 里 widget 一旦有了自己的 session_state，value= 就会被忽略，
     # 造成「清空后重新打开，框里还显示旧密钥」。
-    # 正确做法是由 _cb_toggle_ai_key 在打开弹窗时把已保存的值同步到这三个 key；
+    # 正确做法是由 _cb_toggle_ai_key 在打开弹窗时把已保存的值同步到这几个 key；
     # 三个按钮则统一用 on_click 回调读取它们（回调早于 widget 实例化）。
+
+    # 服务商放最前面：先知道用哪家，才知道去哪儿申请 API Key。
+    # 默认是「-」（未选择），对应下面两个框也是空的 —— 三者状态保持一致。
+    st.selectbox(
+        "服务商", AI_PROVIDER_OPTIONS, key="ai_provider_pick",
+        on_change=_cb_pick_provider,
+        help=_tip("服务商", "先选你用的是哪家服务商，再填它的 API Key。"
+                            "选了会自动填好下面的接口地址和模型名；"
+                            "选「-」表示不指定（手动填，或用环境变量里的配置）。"),
+    )
     st.text_input(
         "API Key", type="password", key="ai_key_input",
-        placeholder="sk-…（DeepSeek / 通义 / Kimi / OpenAI 等）",
+        placeholder="-",
         help=_tip("API Key", "大模型服务的密钥。填完点「保存并启用」生效。"
                              "只保存在本页内存，刷新后需要重新填写。"),
     )
-
-    # 厂商预设：地址和模型名是最容易填错的两项，给个下拉直接选
-    st.selectbox(
-        "服务商", list(AI_PROVIDERS.keys()), key="ai_provider_pick",
-        on_change=_cb_pick_provider,
-        help=_tip("服务商", "选了会自动填好下面的接口地址和模型名。"
-                            "选错了也不怕 —— 两个框都能手动改。"),
-    )
     st.text_input(
         "接口地址（Base URL）",
-        key="ai_base_input", placeholder="https://api.deepseek.com/v1",
+        key="ai_base_input", placeholder="-",
         help=_tip("接口地址", "填到兼容层为止，程序会自动接上 /chat/completions。"
                              "例如 DeepSeek 填 https://api.deepseek.com/v1。"
                              "留空则用 DeepSeek 官方地址。"),
     )
     st.text_input(
-        "模型名", key="ai_model_input", placeholder="deepseek-chat",
+        "模型名", key="ai_model_input", placeholder="-",
         help=_tip("模型名", "要用的模型标识。留空则用 deepseek-chat。"
                              "不确定的话先点「测试连接」，报错会告诉你怎么改。"),
     )
