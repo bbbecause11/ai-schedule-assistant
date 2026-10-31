@@ -1120,6 +1120,72 @@ def test_security() -> None:
     check("提供了 HTML 转义工具", "def _escape(" in src)
     check("用户可编辑文本走表格渲染而非 HTML",
           "st.data_editor" in src)
+    # 密钥绝不落盘：只允许存在 session_state（内存）
+    check("用户填的密钥只存 session_state，不写文件",
+          "st.session_state.ai_api_key" in src
+          and not re.search(r"open\([^)]*ai_api_key", src))
+
+
+def test_ai_key_dialog() -> None:
+    """AI 接口配置：侧边栏独立入口 + 小弹窗填写 + 密钥安全。"""
+    section("H2. AI 接口配置弹窗")
+    src = open("app.py", encoding="utf-8").read()
+    import re
+
+    # ① 入口在侧边栏，且是独立按钮（不是塞在设置面板里）
+    sidebar = src.split("def render_sidebar", 1)[-1]
+    check("侧边栏有独立的「AI 接口」入口",
+          "ai_key_toggle" in sidebar and "AI 接口" in sidebar)
+    check("侧边栏入口显示 AI 配置状态（已连接 / 未配置）",
+          "已连接" in sidebar and "未配置" in sidebar)
+    # 入口必须在「设置与外观」按钮**之前**：
+    # 设置面板一展开就占掉大半屏，放后面入口会被推到视口外，够不着。
+    check("AI 接口入口排在「设置与外观」之前（保证始终可见可点）",
+          sidebar.find("ai_key_toggle") < sidebar.find("settings_toggle")
+          and sidebar.find("ai_key_toggle") > 0)
+
+    # ② 配置走弹窗（width="small" = 小窗口）
+    check("AI 配置用小弹窗承载（width=\"small\"）",
+          re.search(r'@st\.dialog\("🤖 AI 接口配置",\s*width="small"', src)
+          is not None)
+    check("弹窗有三个字段：API Key / 接口地址 / 模型名",
+          "ai_key_input" in src and "ai_base_input" in src
+          and "ai_model_input" in src)
+
+    # ③ 密钥输入必须是 password 类型，且界面上不回显明文
+    check("API Key 输入框用 password 类型（页面上显示圆点）",
+          re.search(r'st\.text_input\(\s*"API Key",\s*type="password"', src)
+          is not None)
+    check("侧边栏只显示掩码后的密钥（前 4 + 尾 4）",
+          "_mask_key(" in src and "def _mask_key(" in src)
+
+    # ④ 设置面板里不再有旧的密钥配置指引（已挪走）
+    settings = src.split("def render_settings_panel", 1)[-1].split("\ndef ", 1)[0]
+    check("设置面板里不再有「如何配置 API Key」展开块",
+          "如何配置 API Key" not in settings)
+    check("设置面板改为指引去侧边栏入口填",
+          "AI 接口" in settings)
+
+    # ⑤ 三个按钮都必须用 on_click 回调：
+    #    st.dialog 是独立 fragment，按钮分支里的 st.rerun() 只重跑弹窗，
+    #    侧边栏（在主脚本里）不会更新；而直接改 widget 的 session_state
+    #    会抛 StreamlitWidgetAlreadyInstantiatedError。
+    for name in ("ai_key_save", "ai_key_test", "ai_key_clear"):
+        m = re.search(rf'st\.button\("[^"]+",\s*key="{name}".*?\)', src, re.S)
+        check(f"「{name}」按钮用 on_click 回调（fragment 内要显式 st.rerun）",
+              m is not None and "on_click=" in m.group(0))
+    check("回调里显式 st.rerun()（让主脚本跟着刷新）",
+          re.search(r"def _cb_save_ai_key.*?st\.rerun\(\)", src, re.S) is not None
+          and re.search(r"def _cb_clear_ai_key.*?st\.rerun\(\)", src, re.S)
+          is not None)
+
+    # ⑥ 打开弹窗时把已保存的值同步到输入框
+    check("打开弹窗时同步已保存的值到输入框",
+          re.search(r"def _cb_toggle_ai_key.*?ai_key_input", src, re.S)
+          is not None)
+    check("text_input 不传 value=（否则 widget state 会覆盖它）",
+          re.search(r'st\.text_input\(\s*"API Key",\s*type="password"', src)
+          is not None)
 
 
 def test_placeholder_style() -> None:
@@ -1187,7 +1253,7 @@ def main() -> int:
                test_dedup_conflict, test_export, test_recurrence,
                test_calendar_and_sample, test_ocr,
                test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_period_table, test_security, test_theme_guard,
-               test_placeholder_style, test_period_editor):
+               test_placeholder_style, test_period_editor, test_ai_key_dialog):
         try:
             fn()
         except Exception:  # noqa: BLE001
