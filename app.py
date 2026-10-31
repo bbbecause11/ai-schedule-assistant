@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.5.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -4130,6 +4130,25 @@ def _set_period_rows(rows: list[dict[str, str]]) -> None:
         pass
 
 
+def _clean_period_rows(rows: list[Any]) -> list[dict[str, str]]:
+    """清洗作息表行：丢掉「名称为空 / 时间非法」的行。
+
+    给解析器用的那份要清洗（不完整的行没法换算成时间），
+    但编辑器必须用原始行渲染 —— 否则用户刚清空一个名称，行号就整体上移。
+    """
+    cleaned: list[dict[str, str]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("name") or "").strip()
+        s, e = _parse_hhmm(r.get("start")), _parse_hhmm(r.get("end"))
+        if name and s and e:
+            cleaned.append({"name": name,
+                            "start": f"{s[0]:02d}:{s[1]:02d}",
+                            "end": f"{e[0]:02d}:{e[1]:02d}"})
+    return cleaned
+
+
 def _period_rows() -> list[dict[str, str]]:
     """当前生效的作息表：进程内配置 > 会话状态 > 默认模板。"""
     rows = _CUSTOM_PERIOD_ROWS
@@ -4139,16 +4158,7 @@ def _period_rows() -> list[dict[str, str]]:
         except Exception:  # noqa: BLE001 - 裸模式没有会话
             rows = None
     if isinstance(rows, list) and rows:
-        cleaned: list[dict[str, str]] = []
-        for r in rows:
-            if not isinstance(r, dict):
-                continue
-            name = str(r.get("name") or "").strip()
-            s, e = _parse_hhmm(r.get("start")), _parse_hhmm(r.get("end"))
-            if name and s and e:
-                cleaned.append({"name": name,
-                                "start": f"{s[0]:02d}:{s[1]:02d}",
-                                "end": f"{e[0]:02d}:{e[1]:02d}"})
+        cleaned = _clean_period_rows(rows)
         if cleaned:
             return cleaned
     return _default_period_rows()
@@ -5643,23 +5653,32 @@ _CSS = """
     -webkit-text-fill-color: var(--input-text) !important;
 }
 
-/* 弹窗（作息表编辑器）：Streamlit 的 dialog 容器默认背景透明，
-   内容会和背后的页面叠在一起 —— 给它一个实色底 + 边框阴影。
-   真实结构：DIV[stDialog] > SECTION[role="dialog"]，
-   但 SECTION 本身也被判成 role=dialog，所以两处都得上色。 */
-[data-testid="stDialog"],
-[data-testid="stDialog"] > [role="dialog"],
+/* 弹窗（作息表编辑器）：毛玻璃。
+   真实结构：DIV[stDialog] > DIV > SECTION[role="dialog"]。
+   stDialog 是全屏 fixed 容器（内容在里面滚动），SECTION 才是那张卡片。
+
+   毛玻璃的关键：底色必须**半透明** + backdrop-filter 模糊背后的页面。
+   底色若是不透明，backdrop-filter 无物可糊，玻璃感会彻底消失 ——
+   之前手机端侧边栏踩过同样的坑。
+
+   分工：
+     · stDialog  = 全屏容器，铺一层压暗遮罩（--dialog-scrim），把背后页面压下去；
+     · SECTION   = 卡片本体，半透明底 + backdrop-filter 模糊 + 细边框 + 阴影。 */
+[data-testid="stDialog"] {
+    background: var(--dialog-scrim) !important;
+    backdrop-filter: blur(6px) saturate(120%);
+    -webkit-backdrop-filter: blur(6px) saturate(120%);
+}
+[data-testid="stDialog"] > div {
+    background: transparent !important;
+}
 section[role="dialog"] {
-    background: var(--surface-1) !important;
-    border: 1px solid var(--card-border) !important;
+    background: var(--dialog-bg) !important;
+    backdrop-filter: blur(30px) saturate(180%);
+    -webkit-backdrop-filter: blur(30px) saturate(180%);
+    border: 1px solid var(--dialog-border) !important;
     border-radius: var(--r-xl) !important;
     box-shadow: var(--card-shadow-lg) !important;
-}
-[data-testid="stDialog"] > [role="dialog"] {
-    border: none !important;
-    box-shadow: none !important;
-    border-radius: 0 !important;
-    background: transparent !important;
 }
 
 /* ---------- 弹窗内的文字色：补回 .stApp 作用域之外的排版规则 ----------
@@ -5716,6 +5735,24 @@ section[role="dialog"] {
 }
 [data-testid="stDialog"] button[aria-label="Close"]:hover {
     color: var(--ink) !important;
+}
+
+/* 弹窗内的输入框：毛玻璃底下要能看清字，
+   底色略提亮一档，避免半透明玻璃把输入框衬得发虚 */
+[data-testid="stDialog"] .stTextInput input,
+[data-testid="stDialog"] .stTextArea textarea {
+    background: var(--input-bg) !important;
+}
+
+/* 底部「＋ 添加一节」操作条：与上方行区分开，
+   顶部一道细线 + 上下留白，像一条"页脚工具条" */
+.st-key-period_add_bar {
+    margin-top: .9rem;
+    padding-top: .9rem;
+    border-top: 1px solid var(--line);
+}
+.st-key-period_add_bar [data-testid="stBaseButton-secondary"] {
+    width: 100%;
 }
 
 .stTextArea textarea, .stTextInput input, .stNumberInput input, .stDateInput input {
@@ -6163,6 +6200,13 @@ _TOKENS_LIGHT = {
     "sidebar-bg": "rgba(250,250,252,.78)",
     "sidebar-border": "rgba(0,0,0,.06)",
 
+    # ---------- 弹窗（作息表编辑器）：毛玻璃 ----------
+    # 半透明底 + backdrop-filter 模糊背后的页面内容。
+    # 底色必须半透明 —— 不透明的话 backdrop-filter 无物可糊，玻璃感消失。
+    "dialog-bg": "rgba(252,252,254,.72)",
+    "dialog-border": "rgba(255,255,255,.70)",
+    "dialog-scrim": "rgba(24,24,28,.42)",      # 弹窗外的压暗遮罩
+
     # ---------- 语义色 ----------
     "chip-ok-bg": "rgba(43,168,124,.10)",
     "chip-ok-fg": "#0A6B54",
@@ -6324,6 +6368,11 @@ _TOKENS_DARK = {
     # ---------- 侧边栏 ----------
     "sidebar-bg": "rgba(20,20,23,.72)",
     "sidebar-border": "rgba(255,255,255,.07)",
+
+    # ---------- 弹窗（作息表编辑器）：毛玻璃 ----------
+    "dialog-bg": "rgba(32,32,37,.74)",
+    "dialog-border": "rgba(255,255,255,.12)",
+    "dialog-scrim": "rgba(0,0,0,.58)",
 
     # ---------- 语义色 ----------
     "chip-ok-bg": "rgba(63,196,150,.14)",
@@ -7460,28 +7509,15 @@ def _render_period_editor() -> None:
     st.caption("一行一节。改完立即生效：解析「第6-7节」会用第 6 节的开始时间到"
                "第 7 节的结束时间。")
 
-    # 操作条放表格**上方**：12 行的表格很长，按钮放底部要滚动才够得着
-    bar = st.columns([1, 1, 3])
-    with bar[0]:
-        if st.button("＋ 添加一节", key="period_add",
-                     help=_tip("添加一节",
-                               "在表格末尾加一行，填上这节课的名称和起止时间。")):
-            st.session_state.period_rows_count = count + 1
-            st.rerun()
-    with bar[1]:
+    # 顶部只留「恢复默认模板」——破坏性操作放远一点，避免误触。
+    # 「添加一节」和「当前生效」都放在所有行下面：
+    # 新行追加在末尾，按钮紧跟末尾，加完一节视线不用往回跑；
+    # 「共 N 节」也跟过去，形成「加一节 → 看生效节数 → 再加一节」的闭环。
+    with st.columns([1, 3])[0]:
         st.button("↺ 恢复默认模板", key="period_reset", on_click=_cb_reset_periods,
                   help=_tip("恢复默认模板",
                             "把作息表重置成内置的 12 节通用模板"
                             "（第 1 节 08:00-08:45 起）。"))
-    with bar[2]:
-        hit = _period_lookup(1)
-        if hit:
-            # 用 _period_rows() 而不是 session_state.period_rows ——
-            # 后者在首次渲染时还是 None（_set_period_rows 要等表格渲染完才跑）
-            st.caption(f"当前生效：第 1 节 {hit[0][0]:02d}:{hit[0][1]:02d} 起，"
-                       f"共 {len(_period_rows())} 节。")
-        else:
-            st.caption(f"注入 AI 的话：{_period_table_text()[:40]}…")
 
     # 表头（窄屏隐藏 —— 竖排布局每行自带标签）
     hdr = st.columns([2, 2, 2, 1])
@@ -7542,6 +7578,25 @@ def _render_period_editor() -> None:
                 st.session_state.pop(k, None)
         _set_period_rows(new_rows)
         st.rerun()
+
+    # 底部操作条：「当前生效」提示 + 「＋ 添加一节」。
+    # 「添加一节」放在**所有行下面**：新行追加在末尾，按钮紧跟末尾，
+    # 加完一节视线不用往回跑，接着就能加下一节。
+    with st.container(key="period_add_bar"):
+        # 用**本轮刚收集到的** new_rows 算，而不是 _period_rows() ——
+        # 后者读的是上一次渲染落盘的数据，提示会永远慢一拍
+        # （刚填完名字，「共 N 节」还是旧数字）。
+        effective = _clean_period_rows(new_rows)
+        if effective:
+            first = effective[0]
+            st.caption(f"当前生效：第 1 节 {first['start']} 起，共 {len(effective)} 节。")
+        else:
+            st.caption(f"注入 AI 的话：{_period_table_text()[:40]}…")
+        if st.button("＋ 添加一节", key="period_add", width="stretch",
+                     help=_tip("添加一节",
+                               "在表格末尾加一行，填上这节课的名称和起止时间。")):
+            st.session_state.period_rows_count = count + 1
+            st.rerun()
 
     _set_period_rows(new_rows)
 

@@ -1055,12 +1055,18 @@ def test_period_editor() -> None:
     check("time_input 的显示值（div）也上了色",
           "stTimeInputTimeDisplay" in src)
 
-    # ⑤ 操作按钮在表格上方（12 行很长，放底部要滚动才够得着）
+    # ⑤ 「＋ 添加一节」放在**所有行下面**。
+    #    新行总是追加在末尾，按钮紧跟末尾就能连着加，不用滚回顶部找按钮。
     head = body.split("new_rows: list", 1)[0]
     add_pos = head.find("period_add")
-    check("「添加一节」按钮在表格上方",
-          add_pos > 0 and "new_rows: list" not in head[add_pos:],
-          "按钮应渲染在表格之前")
+    check("「添加一节」按钮在表格下方（跟着末尾行，方便连着加）",
+          add_pos < 0,                      # 不再出现在表格渲染之前
+          "按钮应渲染在所有行之后")
+    check("「添加一节」按钮确实存在于编辑器里",
+          "period_add" in body)
+    check("「当前生效」提示与「添加一节」同在底部操作条",
+          'key="period_add_bar"' in body
+          and body.index("period_add_bar") > body.index("new_rows: list"))
 
     # ⑥ 弹窗内容的文字色必须显式覆盖。
     #    st.dialog 由 React portal 渲染到 body 之下，**不在 .stApp 里**，
@@ -1077,6 +1083,22 @@ def test_period_editor() -> None:
           is not None)
     check("弹窗关闭按钮也上了色（默认是浅色主题的暗色，深色下看不见）",
           'button[aria-label="Close"]' in src)
+
+    # ⑦ 弹窗毛玻璃。
+    #    关键：底色必须**半透明**（rgba(...,a) 且 a<1）。
+    #    不透明底 + backdrop-filter 是无效组合 —— 无物可糊，玻璃感彻底消失。
+    #    之前手机端侧边栏踩过同一个坑，必须防回归。
+    glass = re.search(
+        r"section\[role=\"dialog\"\]\s*\{([^}]*)\}", src)
+    check("弹窗卡片带 backdrop-filter（毛玻璃）",
+          glass is not None and "backdrop-filter" in glass.group(1))
+    check("弹窗底色是半透明的（不透明底 = 毛玻璃失效）",
+          glass is not None
+          and re.search(r"background:\s*var\(--dialog-bg\)", glass.group(1)) is not None
+          and re.search(r'"dialog-bg":\s*"rgba\([^)]*,\s*0?\.\d+\)"', src) is not None,
+          "--dialog-bg 必须是带小 alpha 的 rgba")
+    check("弹窗有独立的遮罩层令牌（把背后页面压暗，玻璃才立体）",
+          '"dialog-scrim"' in src)
 
 
 def test_security() -> None:
