@@ -1181,7 +1181,7 @@ def test_ai_key_dialog() -> None:
 
     # ⑥ 打开弹窗时把已保存的值同步到输入框
     check("打开弹窗时同步已保存的值到输入框",
-          re.search(r"def _cb_toggle_ai_key.*?ai_key_input", src, re.S)
+          re.search(r"def _prepare_ai_dialog.*?ai_key_input", src, re.S)
           is not None)
     check("text_input 不传 value=（否则 widget state 会覆盖它）",
           re.search(r'st\.text_input\(\s*"API Key",\s*type="password"', src)
@@ -1232,6 +1232,40 @@ def test_ai_key_dialog() -> None:
     # ⑧ 测试连接失败时给可操作建议，不能只甩状态码
     check("连接失败时给具体建议（不只报 404/401）",
           "def _ai_error_hint" in src and "接口地址填错" in src)
+
+    # ⑨ 弹窗打开方式：必须在侧边栏按钮分支里**直接调用** dialog，
+    #    不能用 `xxx_open` 持久标记逐轮重叫。后者在点 X 关闭后标记仍是 True，
+    #    下一次任何 rerun（例如点「设置与外观」）都会把弹窗重新叫出来。
+    section("H3. 弹窗打开方式与提示气泡")
+    check("AI 弹窗在按钮分支里直接打开（不靠持久标记）",
+          re.search(r'if st\.button\([\s\S]*?key="ai_key_toggle"[\s\S]*?'
+                    r'_prepare_ai_dialog\(\)[\s\S]*?_show_ai_key_dialog\(\)', src)
+          is not None)
+    check("作息表弹窗同样在按钮分支里直接打开",
+          re.search(r'if st\.button\("⏰ 作息时间表",\s*key="period_toggle"[\s\S]*?'
+                    r'_show_period_dialog\(\)', src) is not None)
+    check("弹窗不再依赖 period_open / ai_key_open 持久标记",
+          not re.search(r"st\.session_state\.(period_open|ai_key_open)", src)
+          and "def _cb_toggle_period" not in src
+          and "def _cb_ai_dismiss" not in src)
+    check("弹窗内的「添加 / 删除」只重跑 fragment（整页 rerun 会把弹窗关掉）",
+          src.count('st.rerun(scope="fragment")') >= 2)
+    # 侧边栏是一列紧挨着的按钮：hover 气泡会向上盖住上一个按钮，
+    # 且点完按钮后焦点还在、气泡不消失，所以入口一律不带 help=。
+    check("侧边栏入口不再用 hover 气泡（避免遮挡上一个按钮）",
+          "填写大模型 API Key、接口地址与模型名" not in src
+          and "在这里调整：明暗模式、界面字号" not in src
+          and "课表上写的「第6-7节」「晚修」按这张表换算" not in src
+          and "新日程默认提前多久提醒，导出 .ics 时写入 VALARM" not in src)
+
+    # ⑩ 悬停提示气泡：不能盖住按钮并挡住点击
+    tip = re.search(r'\[data-testid="stTooltipContent"\],\s*\[role="tooltip"\]\s*'
+                    r'\{([^}]*)\}', src, re.S)
+    check("提示气泡设置了 pointer-events: none（遮住按钮时也不挡点击）",
+          tip is not None and "pointer-events: none" in tip.group(1),
+          "否则鼠标移进气泡后既点不到按钮，也触发不了离开即关闭")
+    check("提示气泡限宽（说明文字不再铺成一大块）",
+          tip is not None and "max-width" in tip.group(1))
 
 
 def test_placeholder_style() -> None:

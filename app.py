@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.0"
+APP_VERSION = "2.7.1"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -6171,6 +6171,12 @@ _TOKENS_LIGHT = {
     "accent": "#B01F5A",
     "accent-hover": "#8C1747",
     "logo": "#8E3D6B",
+    # 界面字号滑块（带节点样式）：轨道 / 填充 / 节点 / 旋钮 / 投影
+    "slider-rail": "rgba(0,0,0,.12)",
+    "slider-fill": "rgba(0,0,0,.42)",
+    "slider-node": "rgba(0,0,0,.30)",
+    "slider-knob": "#1D1D1F",
+    "slider-shadow": "0 2px 6px rgba(0,0,0,.35)",
 
     # ---------- 面 / 卡片（白卡片 + 细边框 + 极轻阴影） ----------
     "surface-1": "#FFFFFF",
@@ -6340,6 +6346,12 @@ _TOKENS_DARK = {
     "accent": "#F075A6",
     "accent-hover": "#FF9CC2",
     "logo": "#FFB3D9",
+    # 界面字号滑块（带节点样式）：深色下白旋钮 + 浅轨道
+    "slider-rail": "rgba(255,255,255,.16)",
+    "slider-fill": "rgba(255,255,255,.6)",
+    "slider-node": "rgba(255,255,255,.42)",
+    "slider-knob": "#FFFFFF",
+    "slider-shadow": "0 3px 8px rgba(0,0,0,.45)",
 
     # ---------- 面 / 卡片 ----------
     "surface-1": "#1B1B1E",
@@ -6546,17 +6558,50 @@ textarea:-webkit-autofill, select:-webkit-autofill {
     background: var(--field-bd) !important;
 }
 
-/* ---------- 滑块 / 步进器 ---------- */
-[data-testid="stSlider"] [role="slider"] { background: var(--accent) !important; }
+/* ---------- 界面字号：带节点滑块（图二风格） ---------- */
+[data-testid="stSlider"] { padding: 2px 0 0 !important; }
+[data-testid="stSlider"] [data-baseweb="slider"] { background: transparent !important; }
+[data-testid="stSlider"] [data-baseweb="slider"] > div { background: transparent !important; }
+/* 轨道（未填充部分）：细线 + 4 个节点刻度 */
+[data-testid="stSlider"] [data-baseweb="slider"] > div > div {
+    height: 4px !important; border-radius: 4px !important;
+    background:
+        radial-gradient(circle 1.4px at 0% 50%, var(--slider-node) 0 1.4px, transparent 2px),
+        radial-gradient(circle 1.4px at 33.333% 50%, var(--slider-node) 0 1.4px, transparent 2px),
+        radial-gradient(circle 1.4px at 66.667% 50%, var(--slider-node) 0 1.4px, transparent 2px),
+        radial-gradient(circle 1.4px at 100% 50%, var(--slider-node) 0 1.4px, transparent 2px),
+        var(--slider-rail) !important;
+}
+/* 已填充部分：浅一档的底色 + 同样的节点刻度 */
 [data-testid="stSlider"] [data-baseweb="slider"] > div > div > div:first-child {
-    background: var(--accent) !important;
+    height: 4px !important; border-radius: 4px !important;
+    background:
+        radial-gradient(circle 1.4px at 0% 50%, var(--slider-node) 0 1.4px, transparent 2px),
+        radial-gradient(circle 1.4px at 33.333% 50%, var(--slider-node) 0 1.4px, transparent 2px),
+        radial-gradient(circle 1.4px at 66.667% 50%, var(--slider-node) 0 1.4px, transparent 2px),
+        radial-gradient(circle 1.4px at 100% 50%, var(--slider-node) 0 1.4px, transparent 2px),
+        var(--slider-fill) !important;
 }
-[data-testid="stSlider"] [data-testid="stSliderThumbValue"] {
-    color: var(--brand-fg) !important;
-    -webkit-text-fill-color: var(--brand-fg) !important;
+/* 旋钮：白色圆点 + 投影 */
+[data-testid="stSlider"] [role="slider"] {
+    background: var(--slider-knob) !important; border: none !important;
+    box-shadow: var(--slider-shadow) !important;
+    width: 18px !important; height: 18px !important;
 }
+/* 隐藏原生数值 / 两端文字 */
+[data-testid="stSlider"] [data-testid="stSliderThumbValue"],
 [data-testid="stSlider"] [data-testid="stSliderTickBarMin"],
-[data-testid="stSlider"] [data-testid="stSliderTickBarMax"] { color: var(--muted) !important; }
+[data-testid="stSlider"] [data-testid="stSliderTickBarMax"] { display: none !important; }
+
+/* 字号滑块下方的 A 刻度行（小 A / 当前档位 / 大 A） */
+.fs-scale { position: relative; height: 18px; margin: 2px 9px 2px; }
+.fs-scale .fs-a { position: absolute; top: 0; color: var(--muted); line-height: 1; }
+.fs-scale .fs-a.sm { left: 0; font-size: .72rem; }
+.fs-scale .fs-a.lg { right: 0; font-size: 1.1rem; }
+.fs-scale .fs-cur {
+    position: absolute; top: 0; transform: translateX(-50%);
+    font-size: .7rem; font-weight: 600; color: var(--ink);
+}
 
 /* ---------- 下拉框（Streamlit 1.66 用 react-aria ComboBox） ----------
    它不是 <select> 也不是 BaseWeb，而是一个 div[role=group] 包着
@@ -6651,6 +6696,25 @@ textarea:-webkit-autofill, select:-webkit-autofill {
     background: var(--tip-bg) !important;
     border: 1px solid var(--tip-bd) !important;
     box-shadow: var(--pop-shadow) !important;
+    /* ① 限宽：说明文字较长时不再铺成一大块 */
+    max-width: min(320px, 68vw) !important;
+    width: max-content !important;
+    font-size: .78rem !important;
+    line-height: 1.5 !important;
+    padding: 8px 11px !important;
+    /* ② 关键：气泡永不接收鼠标事件。
+       否则气泡盖住上方按钮时，鼠标一进入气泡就既点不到按钮、
+       也触发不了「离开图标即关闭」，表现为按钮被冻住。 */
+    pointer-events: none !important;
+    z-index: 1000000 !important;
+}
+[data-testid="stTooltipContent"] p, [role="tooltip"] p {
+    margin: 0 0 .35em !important; font-size: inherit !important;
+}
+[data-testid="stTooltipContent"] p:last-child,
+[role="tooltip"] p:last-child { margin-bottom: 0 !important; }
+[data-testid="stTooltipContent"] code, [role="tooltip"] code {
+    font-size: .92em !important;
 }
 [data-testid="stTooltipHoverTarget"] svg { color: var(--muted) !important; fill: currentColor; }
 
@@ -6838,6 +6902,7 @@ _CSS_DARK_ONLY = """
 
 /* 深色下阴影要看不出"浮起白边"，把浅色高光去掉 */
 .hero-badge { border-color: rgba(255,255,255,.34) !important; }
+
 </style>
 """
 
@@ -7197,7 +7262,6 @@ def init_state() -> None:
         # 这里只记录「用户是否手动指定过」，决定导入后是否提示日期为推算值。
         "course_anchor_set": False,
         "period_rows": None,             # None = 未自定义，用默认作息模板
-        "period_open": False,            # 作息表编辑器是否展开（侧边栏入口 → 主区域编辑器）
         "anchor_open": False,            # 侧边栏学期起始周是否展开
         "remind_open": False,            # 侧边栏默认提醒是否展开
         "period_rows_count": None,       # 编辑器里的行数（「添加一节」会增加）
@@ -7208,7 +7272,6 @@ def init_state() -> None:
         "ai_api_key": "",                # 用户填写的密钥（明文存于本会话内存）
         "ai_base_url": "",               # 用户填写的接口地址（留空则用默认值）
         "ai_model": "",                  # 用户填写的模型名（留空则用默认值）
-        "ai_key_open": False,            # AI 接口配置弹窗是否打开
         "ai_key_status": "",             # 弹窗内的连接测试结果提示
         "ai_test_pending": False,        # 「测试连接」待执行标记（见 _cb_test_ai_key）
         # --- 加载指示器 ---
@@ -7537,9 +7600,35 @@ def _cb_theme_pick() -> None:
     _remember_theme(st.session_state.ui_theme)
 
 
-def _cb_font_pick() -> None:
-    """字号同理，回调里同步，本次 rerun 即生效。"""
-    st.session_state.ui_font = st.session_state.ui_font_pick
+def _cb_font_idx() -> None:
+    """字号滑块回调：把 0–3 的整数档位映射回中文档位名。"""
+    st.session_state.ui_font = FONT_OPTIONS[st.session_state.ui_font_idx]
+
+
+def _render_font_size() -> None:
+    """界面字号：带节点滑块（小 / 标准 / 大 / 特大）。
+
+    原生 st.slider 负责拖拽 / 键盘交互，CSS 把它皮肤成图二那种
+    「细轨道 + 节点 + 白色旋钮 + A 刻度」的样式；下方再补一行
+    小 A / 当前档位 / 大 A 的刻度说明。
+    """
+    options = FONT_OPTIONS
+    n = len(options)
+    idx = options.index(st.session_state.ui_font)
+    pct = idx / (n - 1) * 100
+    # 先把当前档位同步进滑块的 session_state key，避免 value/key 冲突
+    st.session_state["ui_font_idx"] = idx
+    st.slider(
+        "界面字号", 0, n - 1, step=1, key="ui_font_idx",
+        on_change=_cb_font_idx,
+    )
+    _html(
+        '<div class="fs-scale">'
+        '<span class="fs-a sm">A</span>'
+        f'<span class="fs-cur" style="left:{pct:.4f}%">{options[idx]}</span>'
+        '<span class="fs-a lg">A</span>'
+        '</div>'
+    )
 
 
 def _render_remind_picker() -> None:
@@ -7549,8 +7638,6 @@ def _render_remind_picker() -> None:
     idx = remind_labels.index(current_label) if current_label in remind_labels else 1
     chosen = st.selectbox(
         "新日程默认提前多久提醒", remind_labels, index=idx,
-        help=_tip("默认提醒", "导出 .ics 时写入 VALARM；单条日程可以在"
-                              "表格的「提醒」列里单独改。"),
     )
     st.session_state.default_remind = REMIND_OPTIONS[chosen]
 
@@ -7558,11 +7645,6 @@ def _render_remind_picker() -> None:
 def _cb_toggle_remind() -> None:
     """侧边栏默认提醒入口的开合回调。"""
     st.session_state.remind_open = not bool(st.session_state.get("remind_open"))
-
-
-def _cb_toggle_period() -> None:
-    """侧边栏作息表入口的开合回调。"""
-    st.session_state.period_open = not bool(st.session_state.get("period_open"))
 
 
 def _cb_toggle_anchor() -> None:
@@ -7599,8 +7681,6 @@ def _render_anchor_editor() -> None:
         key="course_anchor",
         on_change=_cb_course_anchor,
         format="YYYY/MM/DD",
-        help=_tip("开学第一周", "学期第 1 周里随便选哪一天都行，"
-                  "应用会自动取那一周的周一作为起始周。"),
     )
     anchor = _this_monday(st.session_state.get("course_anchor")
                           or datetime.now().date())
@@ -7616,8 +7696,6 @@ def _render_anchor_editor() -> None:
     st.button(
         "把本周设为第一周", key="anchor_this_week", width="stretch",
         on_click=_cb_anchor_this_week,
-        help=_tip("把本周设为第一周",
-                  "快速把起始周设为今天所在的这一周。"),
     )
     st.caption("改完起始周后，**重新上传/解析课表**即可按新日期对齐；"
                "上课时间按侧边栏「⏰ 作息时间表」换算。")
@@ -7649,38 +7727,25 @@ def _period_rows_raw() -> list[dict[str, str]]:
     return _default_period_rows()
 
 
-def _cb_toggle_period() -> None:
-    """侧边栏作息表入口：打开 / 关闭编辑器弹窗。"""
-    opening = not bool(st.session_state.get("period_open"))
-    st.session_state.period_open = opening
+def _prepare_ai_dialog() -> None:
+    """打开 AI 配置弹窗前，把已保存的值同步到三个输入框的 widget key。
 
+    text_input 一旦有了自己的 session_state，value= 就会被忽略；
+    不同步的话「清除后重新打开」框里还显示旧密钥。
 
-def _cb_toggle_ai_key() -> None:
-    """侧边栏「🤖 AI 接口」入口：打开 / 关闭配置弹窗。
-
-    打开时做两件事：
-      ① 把已保存的值同步到三个输入框的 widget key
-         （text_input 一旦有了自己的 session_state，value= 就会被忽略，
-          不同步的话「清除后重新打开」框里还显示旧密钥）；
-      ② 清掉上一次的连接测试提示，避免显示一条过期的旧结果。
-
-    注意：改 widget 自己的 session_state key 只能在 widget 实例化**之前**。
-    侧边栏按钮的回调早于弹窗渲染，正常情况下安全；
-    但保险起见用 try 兜住，绝不让整个侧边栏因为这个崩掉。
+    改 widget 自己的 session_state key 只能在 widget 实例化**之前**。
+    这里在按钮分支里、dialog 调用之前执行，时序正好。
     """
-    opening = not bool(st.session_state.get("ai_key_open"))
-    st.session_state.ai_key_open = opening
-    if opening:
-        st.session_state.ai_key_status = ""
-        try:
-            st.session_state.ai_key_input = st.session_state.get("ai_api_key", "")
-            st.session_state.ai_base_input = st.session_state.get("ai_base_url", "")
-            st.session_state.ai_model_input = st.session_state.get("ai_model", "")
-            # 服务商下拉：按已存的地址反查是哪一家，选中它
-            st.session_state.ai_provider_pick = _guess_provider(
-                str(st.session_state.get("ai_base_url") or ""))
-        except Exception as exc:  # noqa: BLE001 - widget 已实例化等情况
-            log(f"AI 配置同步到输入框失败: {exc}")
+    st.session_state.ai_key_status = ""
+    try:
+        st.session_state.ai_key_input = st.session_state.get("ai_api_key", "")
+        st.session_state.ai_base_input = st.session_state.get("ai_base_url", "")
+        st.session_state.ai_model_input = st.session_state.get("ai_model", "")
+        # 服务商下拉：按已存的地址反查是哪一家，选中它
+        st.session_state.ai_provider_pick = _guess_provider(
+            str(st.session_state.get("ai_base_url") or ""))
+    except Exception as exc:  # noqa: BLE001 - widget 已实例化等情况
+        log(f"AI 配置同步到输入框失败: {exc}")
 
 
 def _guess_provider(base_url: str) -> str:
@@ -7711,11 +7776,6 @@ def _guess_provider(base_url: str) -> str:
         if mark in low:
             return name
     return PROVIDER_NONE
-
-
-def _cb_period_dismiss() -> None:
-    """弹窗被关闭（点 X / 点外部）。"""
-    st.session_state.period_open = False
 
 
 def _render_period_editor() -> None:
@@ -7810,7 +7870,9 @@ def _render_period_editor() -> None:
             for k in (f"period_name_{i}", f"period_start_{i}", f"period_end_{i}"):
                 st.session_state.pop(k, None)
         _set_period_rows(new_rows)
-        st.rerun()
+        # 只重跑弹窗 fragment：默认的 scope="app" 会触发整页 rerun，
+        # 而弹窗没有在按钮分支里被重新调用 —— 会被直接关掉。
+        st.rerun(scope="fragment")
 
     # 底部操作条：「当前生效」提示 + 「＋ 添加一节」。
     # 「添加一节」放在**所有行下面**：新行追加在末尾，按钮紧跟末尾，
@@ -7829,12 +7891,12 @@ def _render_period_editor() -> None:
                      help=_tip("添加一节",
                                "在表格末尾加一行，填上这节课的名称和起止时间。")):
             st.session_state.period_rows_count = count + 1
-            st.rerun()
+            st.rerun(scope="fragment")
 
     _set_period_rows(new_rows)
 
 
-@st.dialog("⏰ 作息时间表", width="large", on_dismiss=_cb_period_dismiss)
+@st.dialog("⏰ 作息时间表", width="large")
 def _show_period_dialog() -> None:
     """作息表编辑器弹窗。
 
@@ -7937,7 +7999,6 @@ def _cb_save_ai_key() -> None:
     st.session_state.ai_provider_pick = _guess_provider(
         st.session_state.ai_base_url)
     st.session_state.ai_key_status = "已保存并启用"
-    st.session_state.ai_key_open = False
     st.rerun()
 
 
@@ -7974,7 +8035,6 @@ def _cb_clear_ai_key() -> None:
     st.session_state.ai_model_input = ""
     st.session_state.ai_provider_pick = PROVIDER_NONE
     st.session_state.ai_key_status = "已清除"
-    st.session_state.ai_key_open = False
     st.rerun()
 
 
@@ -8071,7 +8131,7 @@ def _show_ai_key_dialog() -> None:
     # 注意：这里**不传 value=**，也不需要接返回值。
     # Streamlit 里 widget 一旦有了自己的 session_state，value= 就会被忽略，
     # 造成「清空后重新打开，框里还显示旧密钥」。
-    # 正确做法是由 _cb_toggle_ai_key 在打开弹窗时把已保存的值同步到这几个 key；
+    # 正确做法是由 _prepare_ai_dialog 在打开弹窗时把已保存的值同步到这几个 key；
     # 三个按钮则统一用 on_click 回调读取它们（回调早于 widget 实例化）。
 
     # 服务商放最前面：先知道用哪家，才知道去哪儿申请 API Key。
@@ -8160,18 +8220,9 @@ def render_settings_panel() -> None:
         horizontal=True,
         format_func=lambda x: f"☀️ {x}" if x == THEME_LIGHT else f"🌙 {x}",
         on_change=_cb_theme_pick,
-        help=_tip("明暗模式", "在浅色（奶油柔光底）与深色（暗夜紫）之间切换，立即生效。"
-                              "只影响本机显示，不影响导出内容。"),
     )
-    st.select_slider(
-        "界面字号",
-        options=FONT_OPTIONS,
-        value=st.session_state.ui_font,
-        key="ui_font_pick",
-        on_change=_cb_font_pick,
-        help=_tip("界面字号", "整体放大或缩小页面文字：小 / 标准 / 大 / 特大。"
-                              "按钮、表格、日历会一起缩放，导出文件不受影响。"),
-    )
+    # 界面字号：原生 st.slider 承担交互，外观皮肤成图二的「带节点」样式
+    _render_font_size()
 
     # ---------- AI ----------
     # 注意：API Key / 接口地址 / 模型名的配置**不在这里**，
@@ -8185,12 +8236,7 @@ def render_settings_panel() -> None:
             + f'<span style="font-size:.75rem;color:var(--muted-2);">'
               f'{_escape(ai_config["model"])}</span>'
         )
-        st.checkbox(
-            "优先使用 AI 解析", key="use_ai",
-            help=_tip("优先使用 AI 解析",
-                      "勾选时先让大模型理解这段文字，再用本地规则补充漏项；"
-                      "取消勾选则完全离线，只用本地规则引擎。"),
-        )
+        st.checkbox("优先使用 AI 解析", key="use_ai")
         st.caption("**作用**：把口语化的整段话（微信群聊、语音转写）交给大模型，"
                    "理解出「标题 / 时间 / 地点」，比纯规则更懂上下文。")
     else:
@@ -8233,8 +8279,6 @@ def render_settings_panel() -> None:
     st.button(
         "收起设置", key="settings_close", width="stretch",
         on_click=_cb_toggle_settings,
-        help=_tip("收起设置", "把设置面板收起来，回到只看数据和日程的清爽状态。"
-                              "偏好会保留，下次点开还在。"),
     )
 
 
@@ -8256,17 +8300,16 @@ def render_sidebar() -> None:
         # 单独一个小窗口更清楚，也更符合「填完即关」的心理预期。
         ai_cfg = get_ai_config()
         ai_ok = ai_cfg["available"]
-        st.button(
+        # 直接从按钮分支打开弹窗（Streamlit 官方用法）。
+        # 不再用 `xxx_open` 布尔标记逐轮重叫 dialog —— 那种写法在
+        # 用户点 X 关闭后标记仍是 True，下一次任何 rerun 都会把它叫回来。
+        if st.button(
             "🤖 AI 接口" if ai_ok else "🔑 AI 接口",
             key="ai_key_toggle",
             width="stretch",
-            on_click=_cb_toggle_ai_key,
-            help=_tip(
-                "AI 接口",
-                "填写大模型 API Key、接口地址与模型名。"
-                "不填也能用 —— 解析会全部走本地规则引擎。",
-            ),
-        )
+        ):
+            _prepare_ai_dialog()
+            _show_ai_key_dialog()
         if ai_ok:
             # 只显示掩码后的密钥（头 4 位 + 尾 4 位），既能确认填对了，
             # 又不会把完整密钥摆在屏幕上。
@@ -8276,31 +8319,6 @@ def render_sidebar() -> None:
         else:
             st.caption("未配置 · 不填也能用（走本地规则引擎）")
 
-        # --- 设置入口（AI / OCR / 外观都收在这里面） ---
-        is_open = bool(st.session_state.settings_open)
-        st.button(
-            "✕ 收起设置" if is_open else "⚙️ 设置与外观",
-            key="settings_toggle",
-            width="stretch",
-            on_click=_cb_toggle_settings,
-            help=_tip(
-                "收起设置" if is_open else "设置与外观",
-                "收起设置面板，回到只看数据和日程的清爽视图。" if is_open else
-                "在这里调整：明暗模式、界面字号、AI 解析开关、OCR 识别状态。"
-                "（API Key 在上面的「🤖 AI 接口」里单独配置）",
-            ),
-        )
-        if is_open:
-            with st.container(border=True):
-                render_settings_panel()
-        else:
-            # 收起时保留一行极简状态，不占地方又不至于完全看不到能力状态。
-            # AI 状态不在这里显示 —— 它由下面独立的「🤖 AI 接口」入口负责。
-            st.caption(f"{'🌙' if _is_dark() else '☀️'} {st.session_state.ui_theme}"
-                       f" · 字号 {st.session_state.ui_font}")
-            ocr_name, _ = get_ocr_engine()
-            st.caption(f"OCR {'就绪' if ocr_name else '未安装'}")
-
         # --- 学期起始周：独立入口，选第一周任意一天自动对齐周一 ---
         anchor_open = bool(st.session_state.get("anchor_open"))
         st.button(
@@ -8308,12 +8326,6 @@ def render_sidebar() -> None:
             key="anchor_toggle",
             width="stretch",
             on_click=_cb_toggle_anchor,
-            help=_tip(
-                "收起起始周" if anchor_open else "学期起始周",
-                "收起学期起始周设置。" if anchor_open else
-                "课表上的「4-19周」从起始周往后推算成具体日期。"
-                "选开学第一周里的任意一天即可，自动对齐到那一周的周一。",
-            ),
         )
         if anchor_open:
             with st.container(border=True):
@@ -8328,23 +8340,13 @@ def render_sidebar() -> None:
 
         # --- 作息时间表：独立入口，不塞在设置面板里 ---
         # 编辑器本体在弹窗里（桌面宽、手机满屏），侧边栏只留入口 + 摘要。
-        period_open = bool(st.session_state.get("period_open"))
-        st.button(
-            "✕ 关闭作息表" if period_open else "⏰ 作息时间表",
-            key="period_toggle",
-            width="stretch",
-            on_click=_cb_toggle_period,
-            help=_tip(
-                "关闭作息表" if period_open else "作息时间表",
-                "关闭作息表编辑器。" if period_open else
-                "课表上写的「第6-7节」「晚修」按这张表换算成具体上课时间。"
-                "改成你学校的作息后再解析，时间就是准的。",
-            ),
-        )
+        # 同上：按钮分支直接开弹窗，不保留「打开中」标记。
+        if st.button("⏰ 作息时间表", key="period_toggle", width="stretch"):
+            _show_period_dialog()
         rows = _period_rows()
         first = rows[0] if rows else {"name": "第1节", "start": "08:00", "end": "08:45"}
         st.caption(f"共 {len(rows)} 节 · {first['name']} {first['start']} 起 · "
-                   + ("编辑器已打开" if period_open else "点开编辑你学校的作息"))
+                   "点开编辑你学校的作息")
 
         # --- 默认提醒：独立入口 ---
         remind_open = bool(st.session_state.get("remind_open"))
@@ -8353,12 +8355,6 @@ def render_sidebar() -> None:
             key="remind_toggle",
             width="stretch",
             on_click=_cb_toggle_remind,
-            help=_tip(
-                "收起默认提醒" if remind_open else "默认提醒",
-                "收起默认提醒设置。" if remind_open else
-                "新日程默认提前多久提醒，导出 .ics 时写入 VALARM；"
-                "单条日程可以在表格的「提醒」列里单独改。",
-            ),
         )
         if remind_open:
             with st.container(border=True):
@@ -8388,6 +8384,27 @@ def render_sidebar() -> None:
 
         st.markdown("---")
         st.caption("🔒 所有日程与图片仅在本机内存中处理，关闭页面即销毁，不写入任何数据库或文件。")
+
+        # --- 设置入口：放在侧边栏**最底部** ---
+        # 外观 / AI 开关 / OCR 不是高频操作，沉到底部，不挡日常入口。
+        st.markdown("---")
+        is_open = bool(st.session_state.settings_open)
+        st.button(
+            "✕ 收起设置" if is_open else "⚙️ 设置与外观",
+            key="settings_toggle",
+            width="stretch",
+            on_click=_cb_toggle_settings,
+        )
+        if is_open:
+            with st.container(border=True):
+                render_settings_panel()
+        else:
+            # 收起时保留一行极简状态，不占地方又不至于完全看不到能力状态。
+            # AI 状态不在这里显示 —— 它由顶部的「🤖 AI 接口」入口负责。
+            st.caption(f"{'🌙' if _is_dark() else '☀️'} {st.session_state.ui_theme}"
+                       f" · 字号 {st.session_state.ui_font}")
+            ocr_name, _ = get_ocr_engine()
+            st.caption(f"OCR {'就绪' if ocr_name else '未安装'}")
 
 
 # ---------------------------------------------------------------------------
@@ -9719,25 +9736,10 @@ def main() -> None:
     if st.session_state.get("_busy_text"):
         _loading(str(st.session_state.get("_busy_text") or "正在处理…"), _busy_slot)
 
-    # 作息表编辑器：侧边栏只留入口，编辑器本体用弹窗
-    # （桌面 ~1200px 宽，手机几乎满屏，都比侧边栏里的窄表格好用）
-    if st.session_state.get("period_open"):
-        try:
-            _show_period_dialog()
-        except Exception:  # noqa: BLE001
-            log(f"作息表编辑器异常: {traceback.format_exc()}")
-            st.session_state.period_open = False
-            st.error("作息表编辑器渲染异常，请刷新页面重试。")
-
-    # AI 接口配置：侧边栏入口 → 小弹窗填密钥
-    if st.session_state.get("ai_key_open"):
-        try:
-            _show_ai_key_dialog()
-        except Exception:  # noqa: BLE001
-            log(f"AI 接口配置弹窗异常: {traceback.format_exc()}")
-            st.session_state.ai_key_open = False
-            st.error("AI 接口配置弹窗渲染异常，请刷新页面重试。")
-
+    # 两个弹窗都改为在侧边栏按钮分支里直接打开（`if st.button(...): dialog()`），
+    # 不再用 `period_open / ai_key_open` 这种持久标记逐轮重叫。
+    # 原因：标记版在用户点 X 关闭后仍停在 True，下一次任何 rerun
+    # （例如点「设置与外观」）都会把弹窗重新叫出来。
     tab1, tab2, tab3, tab4 = st.tabs(
         ["📥 录入解析", "📅 日程表", "📤 导出日历", "❓ 使用说明"]
     )
