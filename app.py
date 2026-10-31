@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.6.1"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7516,8 +7516,38 @@ def _cb_toggle_ai_key() -> None:
             st.session_state.ai_key_input = st.session_state.get("ai_api_key", "")
             st.session_state.ai_base_input = st.session_state.get("ai_base_url", "")
             st.session_state.ai_model_input = st.session_state.get("ai_model", "")
+            # 服务商下拉：按已存的地址反查是哪一家，选中它
+            st.session_state.ai_provider_pick = _guess_provider(
+                str(st.session_state.get("ai_base_url") or ""))
         except Exception as exc:  # noqa: BLE001 - widget 已实例化等情况
             log(f"AI 配置同步到输入框失败: {exc}")
+
+
+def _guess_provider(base_url: str) -> str:
+    """按已填的接口地址反查服务商；认不出来就回落到第一个（DeepSeek）。
+
+    只做「前缀包含」匹配：同一家的地址可能带不带尾斜杠、带不带子路径，
+    只要包含厂商特征串就算命中。
+    """
+    if not base_url:
+        return next(iter(AI_PROVIDERS))
+    marks = {
+        "DeepSeek（深度求索）": "api.deepseek.com",
+        "通义千问 Qwen（阿里云百炼）": "dashscope.aliyuncs.com",
+        "Kimi（月之暗面）": "api.moonshot.cn",
+        "智谱 GLM（BigModel）": "open.bigmodel.cn",
+        "豆包 Doubao（火山方舟）": "volces.com",
+        "文心一言 ERNIE（百度千帆）": "qianfan.baidubce.com",
+        "硅基流动 SiliconFlow": "siliconflow.cn",
+        "腾讯混元 Hunyuan": "hunyuan.cloud.tencent.com",
+        "OpenAI 官方": "api.openai.com",
+        "本地 Ollama": "localhost:11434",
+    }
+    low = base_url.lower()
+    for name, mark in marks.items():
+        if mark in low:
+            return name
+    return next(iter(AI_PROVIDERS))
 
 
 def _cb_period_dismiss() -> None:
@@ -7677,6 +7707,8 @@ def _test_ai_connection() -> None:
 
     结果只写一句人话到 session_state，由界面显示；
     失败原因也只保留摘要，绝不把请求头或密钥带进提示。
+
+    失败时额外给一条**可操作的**建议 —— 光说「404」用户不知道怎么改。
     """
     cfg = get_ai_config()
     if not cfg["available"]:
@@ -7693,9 +7725,33 @@ def _test_ai_connection() -> None:
             f"连接成功 · 模型 {cfg['model']} 已响应" if ok else "连接异常：模型没有返回内容"
         )
     except AIError as exc:
-        st.session_state.ai_key_status = f"连接失败：{exc}"
+        st.session_state.ai_key_status = f"连接失败：{exc}\n\n{_ai_error_hint(exc, cfg)}"
     except Exception as exc:  # noqa: BLE001 - 网络异常等一律兜住
         st.session_state.ai_key_status = f"连接失败：{type(exc).__name__}"
+
+
+def _ai_error_hint(exc: "AIError", cfg: dict[str, Any]) -> str:
+    """按报错类型给一条具体建议，别只把状态码甩给用户。"""
+    text = str(exc)
+    if "404" in text:
+        return ("💡 多半是接口地址填错了。地址要填到兼容层为止，"
+                "程序会自动接上 /chat/completions。"
+                "例如 DeepSeek 填 https://api.deepseek.com/v1。"
+                "上面选「服务商」可以自动填好。")
+    if "401" in text:
+        return ("💡 多半是 API Key 不对或已过期 —— 检查有没有多复制了空格，"
+                "或者去服务商后台确认这个 key 还有效。")
+    if "400" in text:
+        return ("💡 多半是模型名不对。上面选「服务商」会自动填对应模型名，"
+                "也可以去服务商文档里确认模型标识怎么写。")
+    if "429" in text:
+        return "💡 额度用完了或被限流，等一会儿再试。"
+    if "SSL" in text:
+        return "💡 HTTPS 证书校验失败，检查一下网络代理设置。"
+    if "无法连接" in text or "Connection" in text:
+        return ("💡 连不上服务器。检查网络代理，或者确认接口地址拼写没错"
+                "（末尾的 /v1、/v4、/api/v3 之类的后缀不能漏）。")
+    return ""
 
 
 def _cb_save_ai_key() -> None:
@@ -7746,6 +7802,72 @@ def _cb_clear_ai_key() -> None:
     st.rerun()
 
 
+# ---------------------------------------------------------------------------
+# 大模型厂商预设（OpenAI 兼容接口）
+# ---------------------------------------------------------------------------
+# 为什么要预设：接口地址是整个配置里最容易填错的一项 ——
+# 地址要填到「/v1」这一层（程序会自己拼 /chat/completions），
+# 而且各家不一样（通义要带 /compatible-mode、智谱是 /v4、豆包是 /api/v3）。
+# 让用户手敲容易漏后缀，直接给个下拉框选厂商最省事。
+#
+# base_url 一律写到「兼容层」为止，程序会拼成 {base_url}/chat/completions。
+AI_PROVIDERS: dict[str, dict[str, str]] = {
+    "DeepSeek（深度求索）": {
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+    },
+    "通义千问 Qwen（阿里云百炼）": {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+    },
+    "Kimi（月之暗面）": {
+        "base_url": "https://api.moonshot.cn/v1",
+        "model": "moonshot-v1-8k",
+    },
+    "智谱 GLM（BigModel）": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4-flash",
+    },
+    "豆包 Doubao（火山方舟）": {
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "model": "doubao-pro-32k",
+    },
+    "文心一言 ERNIE（百度千帆）": {
+        "base_url": "https://qianfan.baidubce.com/v2",
+        "model": "ernie-4.5-8k",
+    },
+    "硅基流动 SiliconFlow": {
+        "base_url": "https://api.siliconflow.cn/v1",
+        "model": "Qwen/Qwen2.5-7B-Instruct",
+    },
+    "腾讯混元 Hunyuan": {
+        "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
+        "model": "hunyuan-turbo",
+    },
+    "OpenAI 官方": {
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+    },
+    "本地 Ollama": {
+        "base_url": "http://localhost:11434/v1",
+        "model": "qwen2.5:7b",
+    },
+}
+
+
+def _cb_pick_provider() -> None:
+    """选了厂商 → 自动把接口地址和模型名填进输入框。
+
+    回调在 widget 实例化之前执行，正好可以改 ai_base_input / ai_model_input。
+    """
+    name = str(st.session_state.get("ai_provider_pick") or "")
+    preset = AI_PROVIDERS.get(name)
+    if not preset:
+        return
+    st.session_state.ai_base_input = preset["base_url"]
+    st.session_state.ai_model_input = preset["model"]
+
+
 @st.dialog("🤖 AI 接口配置", width="small")
 def _show_ai_key_dialog() -> None:
     """AI 接口配置弹窗：填 API Key、接口地址、模型名，并可测试连接。"""
@@ -7763,15 +7885,25 @@ def _show_ai_key_dialog() -> None:
         help=_tip("API Key", "大模型服务的密钥。填完点「保存并启用」生效。"
                              "只保存在本页内存，刷新后需要重新填写。"),
     )
+
+    # 厂商预设：地址和模型名是最容易填错的两项，给个下拉直接选
+    st.selectbox(
+        "服务商", list(AI_PROVIDERS.keys()), key="ai_provider_pick",
+        on_change=_cb_pick_provider,
+        help=_tip("服务商", "选了会自动填好下面的接口地址和模型名。"
+                            "选错了也不怕 —— 两个框都能手动改。"),
+    )
     st.text_input(
         "接口地址（Base URL）",
         key="ai_base_input", placeholder="https://api.deepseek.com/v1",
-        help=_tip("接口地址", "OpenAI 兼容接口的地址。留空则用 DeepSeek 官方地址。"
-                             "通义 / Kimi / 智谱等填各自的兼容地址。"),
+        help=_tip("接口地址", "填到兼容层为止，程序会自动接上 /chat/completions。"
+                             "例如 DeepSeek 填 https://api.deepseek.com/v1。"
+                             "留空则用 DeepSeek 官方地址。"),
     )
     st.text_input(
         "模型名", key="ai_model_input", placeholder="deepseek-chat",
-        help=_tip("模型名", "要用的模型标识。留空则用 deepseek-chat。"),
+        help=_tip("模型名", "要用的模型标识。留空则用 deepseek-chat。"
+                             "不确定的话先点「测试连接」，报错会告诉你怎么改。"),
     )
 
     status = st.session_state.get("ai_key_status") or ""

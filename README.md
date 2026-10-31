@@ -3,7 +3,7 @@
 > 把散落在聊天记录、课表截图、备忘录里的碎片化日程，一键整理成可视化日程表，
 > 并导出为标准 `.ics` 日历文件，直接导入手机、电脑、Outlook、Google 日历。
 
-由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.6.0**。
+由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.6.1**。
 
 **仓库地址**：<https://github.com/bbbecause11/ai-schedule-assistant>（公开，可直接访问）
 
@@ -143,7 +143,8 @@ streamlit run app.py
 | 字段 | 说明 | 留空时 |
 | --- | --- | --- |
 | **API Key** | 大模型密钥，输入框是密码框，页面上显示圆点 | 无法启用 AI |
-| **接口地址** | OpenAI 兼容接口地址，需含 `/v1` | 用 `https://api.deepseek.com/v1` |
+| **服务商** | 下拉选厂家，**选完自动填好下面的地址和模型名** | 默认 DeepSeek |
+| **接口地址** | OpenAI 兼容接口地址 | 用 `https://api.deepseek.com/v1` |
 | **模型名** | 模型标识 | 用 `deepseek-chat` |
 
 窗口里还有三个按钮：**「保存并启用」**、**「测试连接」**（真发一次请求，确认密钥/地址/模型都对）、**「清除」**。
@@ -151,6 +152,34 @@ streamlit run app.py
 > 🔒 **密钥安全**：只存在浏览器的**页面内存**里，刷新页面即失效；
 > 不写文件、不进日志、不回显完整密钥（侧边栏只显示 `sk-t••••••••cdef` 这样的掩码）。
 > 部署给他人使用时，请改用下面的环境变量方式。
+
+### 接口地址怎么填？
+
+**规则只有一条：填到「兼容层」为止，程序会自动接上 `/chat/completions`。**
+
+程序实际请求的地址是 `{你填的地址}/chat/completions`，所以：
+
+- ✅ `https://api.deepseek.com/v1` → 请求 `https://api.deepseek.com/v1/chat/completions`
+- ❌ `https://api.deepseek.com/v1/chat/completions` → 会拼成 `.../chat/completions/chat/completions`，404
+
+各家的地址都不一样，**后缀最容易漏**，所以推荐直接用上面的「服务商」下拉：
+
+| 服务商 | 接口地址 | 默认模型名 |
+| --- | --- | --- |
+| DeepSeek（深度求索） | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| 通义千问 Qwen（阿里云百炼） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
+| Kimi（月之暗面） | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
+| 智谱 GLM（BigModel） | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` |
+| 豆包 Doubao（火山方舟） | `https://ark.cn-beijing.volces.com/api/v3` | `doubao-pro-32k` |
+| 文心一言 ERNIE（百度千帆） | `https://qianfan.baidubce.com/v2` | `ernie-4.5-8k` |
+| 硅基流动 SiliconFlow | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-7B-Instruct` |
+| 腾讯混元 Hunyuan | `https://api.hunyuan.cloud.tencent.com/v1` | `hunyuan-turbo` |
+| OpenAI 官方 | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| 本地 Ollama | `http://localhost:11434/v1` | `qwen2.5:7b` |
+
+> ⚠️ 各家地址与模型名会随官方调整，以服务商最新文档为准。
+> 填错了不用猜 —— 点「测试连接」，报错会直接告诉你哪里不对
+> （404 多半是地址、401 多半是密钥、400 多半是模型名）。
 
 ### 方式二：环境变量（适合部署 / 长期使用）
 
@@ -810,6 +839,7 @@ OCR 各返回格式与异常分支、AI 层错误处理、安全性静态扫描�
 
 | 版本 | 内容 | 用户反馈修复 | 自查修复 |
 | --- | --- | --- | --- |
+| **2.6.1** | AI 接口弹窗加「服务商」下拉：选了自动填好接口地址与模型名（内置 10 家）；测试连接失败时给可操作建议，不再只甩状态码 | 1 | 7 |
 | **2.6.0** | API Key 配置从设置面板挪到侧边栏独立入口「🤖 AI 接口」，改成小弹窗填写（密码框 + 掩码显示 + 测试连接）；密钥只存内存不落盘 | 1 | 16 |
 | **2.5.0** | 作息表弹窗改毛玻璃（半透明底 + backdrop-filter + 压暗遮罩）；「＋ 添加一节」移到所有行下方（跟着末尾行连着加）；「当前生效 共 N 节」实时同步 | 2 | 5 |
 | **2.4.1** | 弹窗内文字色修复：st.dialog 走 React portal、不在 .stApp 作用域内，标题 / 说明文字 / 字段标签一度退回浅色主题的暗紫（深色下几乎看不见）；显式补作用域后全部走主题令牌 | 1 | 3 |
