@@ -8274,12 +8274,8 @@ def render_settings_panel() -> None:
     st.caption("🔁 循环日程的**开始日期与重复次数**在「日程表 → 重复设置」里逐条调整，"
                "默认不循环，只有出现「每周一」「每天」这类字眼才会自动循环。"
                "默认提醒时间在侧边栏「🔔 默认提醒」里调。")
-
-    st.markdown("")
-    st.button(
-        "收起设置", key="settings_close", width="stretch",
-        on_click=_cb_toggle_settings,
-    )
+    # 收起按钮只保留侧边栏入口那一个（在面板上方），
+    # 面板底部不再重复放一个「收起设置」，避免上下各一个。
 
 
 def render_sidebar() -> None:
