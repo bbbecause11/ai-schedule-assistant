@@ -1187,6 +1187,30 @@ def test_ai_key_dialog() -> None:
           re.search(r'st\.text_input\(\s*"API Key",\s*type="password"', src)
           is not None)
 
+    # ⑦ 服务商预设：接口地址是最容易填错的一项，给下拉框自动填
+    check("有服务商预设表（选了自动填地址和模型名）",
+          "AI_PROVIDERS" in src and "def _cb_pick_provider" in src)
+    check("服务商下拉用 on_change 回调自动填充",
+          "ai_provider_pick" in src and "_cb_pick_provider" in src)
+    # 预设里的地址必须能拼出 /chat/completions —— 即填到兼容层为止，
+    # 不能再带 /chat/completions（会拼成 .../chat/completions/chat/completions）
+    prov = re.search(r"AI_PROVIDERS[^=]*=\s*\{(.*?)\n\}", src, re.S)
+    check("预设地址列表存在且格式正确",
+          prov is not None and prov.group(1).count('"base_url"') >= 5)
+    urls = re.findall(r'"base_url":\s*"([^"]+)"', src)
+    check("所有预设地址都以兼容层结尾（不含 /chat/completions）",
+          bool(urls) and all("/chat/completions" not in u for u in urls),
+          str(urls[:3]))
+    check("预设地址都是 https 或本地 http",
+          all(u.startswith("https://") or u.startswith("http://localhost")
+              for u in urls))
+    check("能按已填地址反查服务商（重新打开时回填下拉）",
+          "def _guess_provider" in src and "_guess_provider(" in src)
+
+    # ⑧ 测试连接失败时给可操作建议，不能只甩状态码
+    check("连接失败时给具体建议（不只报 404/401）",
+          "def _ai_error_hint" in src and "接口地址填错" in src)
+
 
 def test_placeholder_style() -> None:
     """占位符颜色：必须同时压 color 和 -webkit-text-fill-color。
