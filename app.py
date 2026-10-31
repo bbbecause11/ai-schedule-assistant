@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.6.2"
+APP_VERSION = "2.7.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -6978,6 +6978,157 @@ def _html(html: str) -> None:
     st.markdown(html, unsafe_allow_html=True)
 
 
+# ---------------------------------------------------------------------------
+# 加载动画
+# ---------------------------------------------------------------------------
+# 为什么要自己写而不用 st.spinner：
+#   ① st.spinner 只在 rerun 期间显示一次，OCR / AI 调用这几秒里，
+#      页面**整块空白**（连按钮都不见了），用户会以为页面卡死；
+#   ② st.spinner 在 st.dialog（独立 fragment）里几乎不刷新；
+#   ③ 自定义版可以做成「卡片 + 品牌色进度光带 + 步骤文案」，
+#      让用户知道程序在干嘛、干到哪一步了。
+#
+# 实现要点：动画必须是**纯 CSS @keyframes**，不能靠 JS。
+# Streamlit 每次 rerun 都会重建 DOM，JS 定时器会被打断，
+# 靠 JS 驱动的动画会卡在某一帧不动 —— 反而更让人以为卡死。
+
+_LOADER_CSS = """
+<style>
+/* ---------- 加载动画：纯 CSS，不依赖 JS ---------- */
+@keyframes load-spin { to { transform: rotate(360deg); } }
+@keyframes load-slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(400%); }
+}
+@keyframes load-pulse {
+    0%, 100% { opacity: .55; }
+    50% { opacity: 1; }
+}
+
+/* 加载卡片：固定在视口顶部居中。
+   为什么不用普通流式布局：指示器画在页面顶部，而用户往往已经
+   滚到页面中部（点的是下方的按钮），流式布局的卡片会停在视口外看不见。
+   固定定位 + 一点投影，保证任何滚动位置都能看到「还在转」。 */
+.load-card {
+    position: fixed;
+    top: 4.6rem;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 999999;
+    display: flex;
+    align-items: center;
+    gap: .85rem;
+    padding: .85rem 1.15rem;
+    max-width: min(92vw, 30rem);
+    border-radius: 999px;
+    background: var(--surface-1);
+    border: 1px solid var(--card-border);
+    box-shadow: var(--card-shadow-lg);
+    overflow: hidden;
+}
+/* 卡片底部一条来回跑的进度光带，让「还在动」这件事更明确 */
+.load-card::after {
+    content: "";
+    position: absolute;
+    left: 0; bottom: 0;
+    height: 2px;
+    width: 25%;
+    background: var(--brand-grad);
+    animation: load-slide 1.25s var(--ease-out) infinite;
+}
+.load-ring {
+    flex: 0 0 auto;
+    width: 1.15rem;
+    height: 1.15rem;
+    border-radius: 50%;
+    border: 2px solid var(--line);
+    border-top-color: var(--accent);
+    animation: load-spin .8s linear infinite;
+}
+.load-text {
+    font-size: var(--fs-sm);
+    color: var(--ink-2);
+    line-height: 1.45;
+    animation: load-pulse 1.6s var(--ease-out) infinite;
+}
+/* 顶栏「运行中」的小圆点：任何页面都能看到「还在跑」 */
+.load-pip {
+    display: inline-block;
+    width: .5rem; height: .5rem;
+    border-radius: 50%;
+    background: var(--accent);
+    margin-right: .45rem;
+    vertical-align: middle;
+    animation: load-pulse 1.1s var(--ease-out) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+    .load-ring, .load-text, .load-card::after, .load-pip {
+        animation-duration: 2.4s;
+    }
+}
+/* 弹窗里的加载卡片：不用固定定位，就在弹窗内原位显示。
+   （主页面那个是 fixed 的，弹窗里再 fixed 会跑到弹窗外去） */
+[data-testid="stDialog"] .load-card {
+    position: static;
+    transform: none;
+    max-width: none;
+    margin: .5rem 0 .25rem;
+    padding: .8rem 1rem;
+    border-radius: var(--r-lg);
+    box-shadow: var(--card-shadow);
+}
+</style>
+"""
+
+
+def _busy(text: str) -> None:
+    """更新全局加载指示器的文案（原地刷新，不整页重跑）。
+
+    指示器本体画在主区域（tabs 之外）—— tab 里的元素在阻塞期间
+    不会推到前端，画在 tab 里用户根本看不到。
+    """
+    st.session_state._busy_text = text
+    slot = st.session_state.get("_busy_slot")
+    if slot is None:
+        return
+    try:
+        slot.empty()
+        _loading(text, slot)
+    except Exception:  # noqa: BLE001 - 占位符失效不该影响主流程
+        pass
+
+
+def _loading(text: str, slot: Any = None) -> None:
+    """渲染加载动画卡片。
+
+    text 建议写成「正在做什么」，比如「正在识别第 2 张图片…」，
+    让用户知道程序在干嘛，而不是干等。
+
+    slot 可以传一个 st.empty() 占位符：先把卡片画进去，
+    之后用 slot.empty() + 重新 _loading() 就能原地更新文案，
+    不用整页刷新。
+    """
+    markup = (
+        _LOADER_CSS
+        + '<div class="load-card">'
+        + '<div class="load-ring"></div>'
+        + f'<div class="load-text">{_escape(text)}</div>'
+        + "</div>"
+    )
+    target = slot if slot is not None else st
+    target.markdown(markup, unsafe_allow_html=True)
+
+
+def _loading_pip() -> None:
+    """顶栏用的迷你运行指示点（一行文字 + 跳动的圆点）。"""
+    st.markdown(
+        '<div style="display:flex;align-items:center;gap:.4rem;'
+        'font-size:var(--fs-xs);color:var(--muted-2);">'
+        '<span class="load-pip"></span>正在处理，请稍候…</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _token(name: str) -> str:
     """
     取当前主题的设计令牌值。
@@ -7059,6 +7210,12 @@ def init_state() -> None:
         "ai_model": "",                  # 用户填写的模型名（留空则用默认值）
         "ai_key_open": False,            # AI 接口配置弹窗是否打开
         "ai_key_status": "",             # 弹窗内的连接测试结果提示
+        "ai_test_pending": False,        # 「测试连接」待执行标记（见 _cb_test_ai_key）
+        # --- 加载指示器 ---
+        # _busy_text 有值 = 正在干活，主区域（tabs 之外）会显示转圈动画。
+        # 指示器必须画在 tabs 外面：tab 里的元素在阻塞期间不推前端。
+        "_busy_text": "",                # 当前进度文案（空 = 不忙）
+        "_parse_pending": False,         # 解析待执行标记（两阶段解析用）
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -7230,6 +7387,9 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
         if len(image_files) > 3:
             warnings.append("单次最多识别 3 张图片，超出的已忽略。")
         for idx, f in enumerate(image_files[:3], start=1):
+            # 更新进度文案。指示器本体画在主区域（tabs 之外）——
+            # tab 里的元素在阻塞期间不会推到前端，画在这里用户看不见。
+            _busy(f"正在识别第 {idx} / {min(len(image_files), 3)} 张图片…")
             try:
                 data = f.getvalue()
             except Exception:  # noqa: BLE001
@@ -7305,8 +7465,8 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
     ai_config = get_ai_config()
     if use_ai and ai_config["available"] and combined:
         try:
-            with st.spinner("AI 正在理解你的日程…"):
-                ai_events = parse_with_ai(combined, ai_config)
+            _busy("大模型正在理解你的日程…（网络请求，通常几秒）")
+            ai_events = parse_with_ai(combined, ai_config)
         except AIError as exc:
             ai_error = str(exc)
         except Exception as exc:  # noqa: BLE001
@@ -7712,6 +7872,9 @@ def _test_ai_connection() -> None:
     失败原因也只保留摘要，绝不把请求头或密钥带进提示。
 
     失败时额外给一条**可操作的**建议 —— 光说「404」用户不知道怎么改。
+
+    请求可能要等好几秒（网络慢 / 对方服务不稳），所以调用方会先渲染
+    加载动画再调本函数。本函数只管发请求，不碰界面。
     """
     cfg = get_ai_config()
     if not cfg["available"]:
@@ -7779,12 +7942,17 @@ def _cb_save_ai_key() -> None:
 
 
 def _cb_test_ai_key() -> None:
-    """「测试连接」回调：先存后测，结果显示在弹窗里（保持弹窗开着）。"""
+    """「测试连接」按钮被点击时先把输入值存下来（真正的测试在主流程里做）。
+
+    这里**不**做实际的 HTTP 请求：on_click 回调里渲染的内容不会推给前端，
+    用户看不到任何加载提示，只会以为点了一下没反应。
+    真正的请求放在 _show_ai_key_dialog 的主流程里做，
+    那里可以先渲染加载动画再发起阻塞请求。
+    """
     st.session_state.ai_api_key = str(st.session_state.get("ai_key_input") or "").strip()
     st.session_state.ai_base_url = str(st.session_state.get("ai_base_input") or "").strip()
     st.session_state.ai_model = str(st.session_state.get("ai_model_input") or "").strip()
-    _test_ai_connection()
-    st.rerun()
+    st.session_state.ai_test_pending = True
 
 
 def _cb_clear_ai_key() -> None:
@@ -7941,11 +8109,24 @@ def _show_ai_key_dialog() -> None:
         else:
             st.warning(status)
 
+    # --- 真正的「测试连接」请求 ---
+    # 放在**按钮之前**、主流程里（而不是 on_click 回调里）：
+    #   ① on_click 回调里渲染的内容不会推给前端 —— 用户点下去看不到任何反馈；
+    #   ② 主流程里可以先渲染加载动画再发起阻塞请求，
+    #      Streamlit 会把执行到一半已渲染的元素先推给前端，
+    #      后面阻塞几秒页面依然能看到转圈提示。
+    if st.session_state.get("ai_test_pending"):
+        st.session_state.ai_test_pending = False
+        _loading("正在测试连接…（正在向服务商发起请求）")
+        _test_ai_connection()
+
     cols = st.columns([1, 1, 1])
     with cols[0]:
         st.button("保存并启用", key="ai_key_save", width="stretch", type="primary",
                   on_click=_cb_save_ai_key)
     with cols[1]:
+        # 不用 on_click 做实际的请求 —— 回调只置一个标记位，
+        # 真正的请求在上面主流程里做（那里能先渲染加载动画）。
         st.button("测试连接", key="ai_key_test", width="stretch",
                   on_click=_cb_test_ai_key)
     with cols[2]:
@@ -8325,8 +8506,19 @@ def render_ingest_tab() -> None:
     render_clear_all_confirm("ingest")
 
     # --- 解析 ---
+    # 两阶段：
+    #   ① 点按钮这一轮：只置标志 + rerun，让**主区域**（tabs 之外）的
+    #      加载指示器先渲染出来。tab 里的内容在阻塞期间不会推到前端，
+    #      指示器必须画在 tabs 外面才看得见。
+    #   ② 下一轮：看到标志就在指示器下方干真正的活（OCR / AI），
+    #      干完清标志再 rerun 出结果。
     if do_parse:
-        # 兜底：run_parse 内部虽已逐层捕获，但任何遗漏的异常都不应让页面白屏
+        st.session_state._busy_text = "正在解析…"
+        st.session_state._parse_pending = True
+        st.rerun()
+
+    if st.session_state.get("_parse_pending"):
+        st.session_state._parse_pending = False
         try:
             run_parse(st.session_state.raw_text_input, images or [], st.session_state.use_ai)
         except Exception:  # noqa: BLE001
@@ -8336,6 +8528,7 @@ def render_ingest_tab() -> None:
                 "请检查输入内容后重试，或改用「粘贴文字」方式。"
             )
             st.session_state.last_report = None
+        st.session_state._busy_text = ""
         # 侧边栏与统计卡在同一次 run 中更早渲染，不重跑一次会停留在解析前的数字。
         # 报告已写入 session_state，rerun 后照常展示。
         st.rerun()
@@ -9512,6 +9705,19 @@ def main() -> None:
     if st.session_state.get("pending_toast"):
         st.toast(st.session_state.pending_toast)
         st.session_state.pending_toast = ""
+
+    # 全局加载指示器：放在 tabs **之外**。
+    # 为什么必须在外面：st.tabs 里的内容在阻塞期间不会推到前端
+    # （实测：点「开始解析」后 tab1 里的元素整个不刷新），
+    # 而 tabs 之前的区域属于主页面，阻塞时照样能把已渲染的元素推给前端。
+    #
+    # 用 st.empty() 占位：占位符对象存进 session_state，
+    # 耗时流程（比如 OCR 一张一张识别）就能原地更新文案，
+    # 不用整页刷新。
+    _busy_slot = st.empty()
+    st.session_state._busy_slot = _busy_slot
+    if st.session_state.get("_busy_text"):
+        _loading(str(st.session_state.get("_busy_text") or "正在处理…"), _busy_slot)
 
     # 作息表编辑器：侧边栏只留入口，编辑器本体用弹窗
     # （桌面 ~1200px 宽，手机几乎满屏，都比侧边栏里的窄表格好用）

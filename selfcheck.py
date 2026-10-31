@@ -1289,6 +1289,60 @@ def test_placeholder_style() -> None:
           2.4 <= l <= 3.2, f"{light} → {l:.2f}:1")
 
 
+def test_loading_indicator() -> None:
+    """加载动画：耗时操作期间必须有可见的转圈提示。
+
+    这里固化的三条都是实测踩出来的坑：
+      ① 动画必须是**纯 CSS @keyframes** —— Streamlit 每次 rerun 都会重建
+         DOM，JS 定时器会被打断，靠 JS 驱动的动画会卡在某一帧不动；
+      ② 指示器必须画在**主区域（tabs 之外）** —— st.tabs 里的内容在
+         同步阻塞期间**不会**推到前端，画在 tab 里用户根本看不到；
+      ③ 卡片必须**固定定位**在视口内 —— 用户点的是页面下方的按钮，
+         页面已经滚下去，流式布局的卡片会停在视口外看不见。
+    """
+    src = open("app.py", encoding="utf-8").read()
+    import re
+
+    # ① 纯 CSS 动画
+    check("有加载动画的关键帧定义（必须是纯 CSS，不能靠 JS）",
+          "@keyframes load-spin" in src
+          and "@keyframes load-slide" in src)
+    check("加载动画不依赖 JS 定时器",
+          "setInterval" not in src and "requestAnimationFrame" not in src,
+          "Streamlit rerun 会打断 JS 定时器，动画会卡住")
+    check("转圈指示器绑定在 CSS 动画上",
+          re.search(r"\.load-ring\s*\{[^}]*animation:\s*load-spin", src)
+          is not None)
+
+    # ② 指示器在 tabs 之外
+    main = src.split("def main(", 1)[-1]
+    tabs_idx = main.find("st.tabs(")
+    loader_idx = main.find("_busy_slot")
+    check("加载指示器画在 tabs 之外（tab 里的元素阻塞时不推前端）",
+          loader_idx > 0 and tabs_idx > 0 and loader_idx < tabs_idx,
+          "指示器必须排在 st.tabs() 之前")
+
+    # ③ 固定定位，任何滚动位置都看得见
+    card = re.search(r"\.load-card\s*\{([^}]*)\}", src)
+    check("加载卡片固定定位在视口内（页面滚动时也看得见）",
+          card is not None and "position: fixed" in card.group(1))
+    check("弹窗内的加载卡片改为原位显示（fixed 会跑出弹窗外）",
+          re.search(r'\[data-testid="stDialog"\] \.load-card\s*\{[^}]*position: static',
+                    src) is not None)
+
+    # ④ 覆盖到真正的耗时点
+    check("图片 OCR 识别有进度提示",
+          re.search(r'_busy\(\s*f?"正在识别第', src) is not None)
+    check("AI 解析有进度提示",
+          "_busy(\"大模型正在理解你的日程" in src)
+    check("API Key 测试连接有进度提示",
+          "_loading(\"正在测试连接" in src)
+
+    # ⑤ 进度文案可原地更新（多张图片时能看到第几张）
+    check("提供 _busy() 原地更新进度的接口",
+          "def _busy(" in src and "_busy_slot" in src)
+
+
 def main() -> int:
     print("=" * 68)
     print(" AI 智能日程收纳工具 · 自动化自查")
@@ -1299,7 +1353,8 @@ def main() -> int:
                test_dedup_conflict, test_export, test_recurrence,
                test_calendar_and_sample, test_ocr,
                test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_period_table, test_security, test_theme_guard,
-               test_placeholder_style, test_period_editor, test_ai_key_dialog):
+               test_placeholder_style, test_period_editor, test_ai_key_dialog,
+               test_loading_indicator):
         try:
             fn()
         except Exception:  # noqa: BLE001
