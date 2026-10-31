@@ -1021,6 +1021,48 @@ def test_recurrence() -> None:
           str(by_time["14:00"].start.date()) if by_time.get("14:00") else "")
 
 
+def test_period_editor() -> None:
+    """作息表编辑器：不能再用 st.data_editor（会丢编辑），必须用原生控件。"""
+    import re
+
+    section("H. 作息表编辑器")
+    src = open("app.py", encoding="utf-8").read()
+
+    # ① 编辑器本体不能用 data_editor（只查真正的调用，忽略文档字符串里的说明）
+    body = src.split("def _render_period_editor", 1)[-1].split("\ndef ", 1)[0]
+    code = "\n".join(line for line in body.splitlines()
+                      if not line.strip().startswith("#"))
+    code = re.sub(r'"""[\s\S]*?"""', "", code)   # 去掉 docstring
+    check("作息表编辑器不用 st.data_editor（动态行数下会丢编辑）",
+          "st.data_editor" not in code and "data_editor(" not in code,
+          "num_rows='dynamic' 时 data_editor 元素 ID 含完整数据，"
+          "编辑会让 ID 变化 → 前端刚提交的编辑被丢弃")
+
+    # ② 用原生控件：文本框 + 时间选择器
+    check("用 st.text_input 填节次名称", "text_input(" in body)
+    check("用 st.time_input 选起止时间（手机上能直接调出时间选择器）",
+          "time_input(" in body)
+    check("每个控件都有稳定 key（值由 session_state 保管，不会漂移）",
+          'key=f"period_name_' in body and 'key=f"period_start_' in body)
+
+    # ③ 编辑器放在弹窗里（桌面宽、手机满屏），不在侧边栏窄表格里
+    check("编辑器用 st.dialog 弹窗承载",
+          "@st.dialog(" in src)
+    check("弹窗背景按主题上色（深色不能是白底）",
+          'section[role="dialog"]' in src and "--surface-1" in src)
+
+    # ④ 时间输入框的显示值是 div 不是 input，得单独上色
+    check("time_input 的显示值（div）也上了色",
+          "stTimeInputTimeDisplay" in src)
+
+    # ⑤ 操作按钮在表格上方（12 行很长，放底部要滚动才够得着）
+    head = body.split("new_rows: list", 1)[0]
+    add_pos = head.find("period_add")
+    check("「添加一节」按钮在表格上方",
+          add_pos > 0 and "new_rows: list" not in head[add_pos:],
+          "按钮应渲染在表格之前")
+
+
 def test_security() -> None:
     section("I. 安全与合规静态检查")
     src = open("app.py", encoding="utf-8").read()
@@ -1107,7 +1149,7 @@ def main() -> int:
                test_dedup_conflict, test_export, test_recurrence,
                test_calendar_and_sample, test_ocr,
                test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_period_table, test_security, test_theme_guard,
-               test_placeholder_style):
+               test_placeholder_style, test_period_editor):
         try:
             fn()
         except Exception:  # noqa: BLE001

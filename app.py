@@ -87,7 +87,17 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   2.3.2  占位符不再像「已输入内容」：field-ph 压暗（深 #6E6E73 /
 #          浅 #9A9AA0），并补上 -webkit-text-fill-color —— 它优先级高于
 #          color，不覆盖的话占位符仍会被输入框正文色刷白
-APP_VERSION = "2.3.2"
+#   2.4.0  作息表编辑器重做：
+#          ① 弃用 st.data_editor —— num_rows="dynamic" 时元素 ID 含完整
+#             数据，编辑让数据变 → ID 变 → 前端刚提交的编辑被丢弃，
+#             表现就是「输入 → 回车 → 退回原值 → 再输一遍才生效」。
+#             改用 st.text_input + st.time_input（key 稳定、值即所见，
+#             手机上还能直接调出系统时间选择器）。
+#          ② 编辑器从侧边栏（仅 300px，三列截断）移到 st.dialog 弹窗：
+#             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
+#          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
+#             （12 行很长，放底部要滚动才够得着）。
+APP_VERSION = "2.4.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -4087,6 +4097,24 @@ def _parse_hhmm(text: Any) -> tuple[int, int] | None:
     return None
 
 
+def _hhmm_to_time(text: Any) -> datetime.time:
+    """「08:00」→ datetime.time(8, 0)；解析不了就用 08:00 兜底。"""
+    hit = _parse_hhmm(text)
+    if hit is None:
+        return datetime.time(8, 0)
+    return dt_time(hit[0], hit[1])
+
+
+def _time_to_hhmm(value: Any) -> str:
+    """datetime.time / 「8:05」→ 「08:05」。"""
+    if isinstance(value, dt_time):
+        return f"{value.hour:02d}:{value.minute:02d}"
+    hit = _parse_hhmm(value)
+    if hit is None:
+        return ""
+    return f"{hit[0]:02d}:{hit[1]:02d}"
+
+
 # 进程内的自定义作息表缓存：UI 与解析都在同一次运行里，改完立即生效；
 # 同时也让 selfcheck 这类无 Streamlit 会话的环境能直接注入配置做测试。
 _CUSTOM_PERIOD_ROWS: list[dict[str, str]] | None = None
@@ -4098,7 +4126,6 @@ def _set_period_rows(rows: list[dict[str, str]]) -> None:
     _CUSTOM_PERIOD_ROWS = [dict(r) for r in rows]
     try:
         st.session_state.period_rows = _CUSTOM_PERIOD_ROWS
-        st.session_state.period_editor_sync = _CUSTOM_PERIOD_ROWS
     except Exception:  # noqa: BLE001 - 无 Streamlit 会话时跳过
         pass
 
@@ -5587,6 +5614,7 @@ _CSS = """
 [data-testid="stTextAreaRootElement"],
 [data-testid="stTextInputRootElement"],
 [data-testid="stNumberInputRootElement"],
+[data-testid="stTimeInput"],
 [data-testid="stTimeInputField"] {
     background: var(--field-bg) !important;
     border: 1px solid var(--field-bd) !important;
@@ -5601,6 +5629,37 @@ _CSS = """
     border: none !important;
     color: var(--input-text) !important;
     -webkit-text-fill-color: var(--input-text) !important;
+}
+/* Streamlit 1.66 的 time_input：显示值是一个 div（stTimeInputTimeDisplay），
+   不是 input —— 不给它上色，深色主题下就是一块白底黑字。 */
+[data-testid="stTimeInputTimeDisplay"],
+[data-testid="stTimeInput"] input {
+    background: transparent !important;
+    color: var(--input-text) !important;
+    -webkit-text-fill-color: var(--input-text) !important;
+}
+[data-testid="stTimeInputTimeDisplay"] * {
+    color: var(--input-text) !important;
+    -webkit-text-fill-color: var(--input-text) !important;
+}
+
+/* 弹窗（作息表编辑器）：Streamlit 的 dialog 容器默认背景透明，
+   内容会和背后的页面叠在一起 —— 给它一个实色底 + 边框阴影。
+   真实结构：DIV[stDialog] > SECTION[role="dialog"]，
+   但 SECTION 本身也被判成 role=dialog，所以两处都得上色。 */
+[data-testid="stDialog"],
+[data-testid="stDialog"] > [role="dialog"],
+section[role="dialog"] {
+    background: var(--surface-1) !important;
+    border: 1px solid var(--card-border) !important;
+    border-radius: var(--r-xl) !important;
+    box-shadow: var(--card-shadow-lg) !important;
+}
+[data-testid="stDialog"] > [role="dialog"] {
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    background: transparent !important;
 }
 
 .stTextArea textarea, .stTextInput input, .stNumberInput input, .stDateInput input {
@@ -6862,10 +6921,11 @@ def init_state() -> None:
         # 这里只记录「用户是否手动指定过」，决定导入后是否提示日期为推算值。
         "course_anchor_set": False,
         "period_rows": None,             # None = 未自定义，用默认作息模板
-        "period_open": False,            # 侧边栏作息表编辑器是否展开
+        "period_open": False,            # 作息表编辑器是否展开（侧边栏入口 → 主区域编辑器）
         "anchor_open": False,            # 侧边栏学期起始周是否展开
         "remind_open": False,            # 侧边栏默认提醒是否展开
-        "period_editor_sync": None,
+        "period_rows_count": None,       # 编辑器里的行数（「添加一节」会增加）
+        "period_del_index": None,        # 待删除的行号
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -7286,46 +7346,160 @@ def _render_anchor_editor() -> None:
 def _cb_reset_periods() -> None:
     """恢复默认作息模板。"""
     _set_period_rows(_default_period_rows())
+    # 行数也回到默认（12 节），否则「添加一节」加的行会留着
+    st.session_state.period_rows_count = len(_default_period_rows())
     st.session_state.pending_toast = "已恢复默认作息模板（12 节）"
 
 
+def _period_rows_raw() -> list[dict[str, str]]:
+    """编辑器用的原始行（保留用户填了一半的行，不做清洗）。
+
+    _period_rows() 会把「名称为空 / 时间非法」的行丢掉，那是给解析器用的；
+    但编辑器必须按原始行渲染，否则用户刚清空一个名称，行号就整体上移，
+    正在编辑的那一行会突然变成另一行。
+    """
+    rows = _CUSTOM_PERIOD_ROWS
+    if not rows:
+        try:
+            rows = st.session_state.get("period_rows")
+        except Exception:  # noqa: BLE001 - 裸模式没有会话
+            rows = None
+    if isinstance(rows, list) and rows:
+        return [dict(r) for r in rows if isinstance(r, dict)]
+    return _default_period_rows()
+
+
+def _cb_toggle_period() -> None:
+    """侧边栏作息表入口：打开 / 关闭编辑器弹窗。"""
+    opening = not bool(st.session_state.get("period_open"))
+    st.session_state.period_open = opening
+
+
+def _cb_period_dismiss() -> None:
+    """弹窗被关闭（点 X / 点外部）。"""
+    st.session_state.period_open = False
+
+
 def _render_period_editor() -> None:
-    """作息表编辑器：直接在表格里改名字和时间，回车即保存。"""
-    import pandas as pd
+    """作息表编辑器：逐行输入节次名称与起止时间，改完立即生效。
 
-    rows = st.session_state.get("period_rows") or _default_period_rows()
-    if not st.session_state.get("period_editor_sync"):
-        st.session_state.period_editor_sync = rows
+    为什么不用 st.data_editor：
+      ① 它在 num_rows="dynamic" 时，元素 ID 里含**完整数据**
+         （fixed 模式才只用 schema 签名），一旦编辑让数据变了，
+         元素 ID 就变 → 前端刚提交的编辑被当成新 widget 丢弃。
+         表现就是「输入 → 回车 → 退回原值 → 再输一遍才生效」。
+      ② 它是 canvas 渲染的窄表格，手机上三列挤在一起点不准。
+
+    改成原生控件（st.text_input + st.time_input）：
+      - 每个控件有稳定的 key，值由 session_state 保管，不存在元素 ID 漂移；
+      - st.time_input 自带时间选择器，手机上点一下就能挑时间，不用手打；
+      - 文本框即时提交（回车或失焦即生效），不会再「卡一遍」。
+    """
+    raw = _period_rows_raw()
+    count = st.session_state.get("period_rows_count")
+    if not count:
+        count = len(raw)
+        st.session_state.period_rows_count = count
+
     st.caption("一行一节。改完立即生效：解析「第6-7节」会用第 6 节的开始时间到"
-               "第 7 节的结束时间；最下一行的空白框可以批量添加。")
-    edited = st.data_editor(
-        pd.DataFrame(rows, columns=["name", "start", "end"]),
-        column_config={
-            "name": st.column_config.TextColumn("节次名称"),
-            "start": st.column_config.TextColumn("开始 (HH:MM)"),
-            "end": st.column_config.TextColumn("结束 (HH:MM)"),
-        },
-        num_rows="dynamic",                     # 底部直接拉出新行，批量添加
-        width="stretch",
-        hide_index=True,
-        key="period_editor",
-    )
-    # data_editor 每次交互都返回全量数据，同步进状态即可，不需要「保存」按钮
-    records = edited.to_dict("records") if hasattr(edited, "to_dict") else []
-    _set_period_rows(records)
+               "第 7 节的结束时间。")
 
-    hit = _period_lookup(1)
-    if hit:
-        st.caption(f"当前生效：第 1 节 {hit[0][0]:02d}:{hit[0][1]:02d} 起，"
-                   f"共 {len(st.session_state.period_rows)} 节。")
-    c1, c2 = st.columns(2)
-    with c1:
+    # 操作条放表格**上方**：12 行的表格很长，按钮放底部要滚动才够得着
+    bar = st.columns([1, 1, 3])
+    with bar[0]:
+        if st.button("＋ 添加一节", key="period_add",
+                     help=_tip("添加一节",
+                               "在表格末尾加一行，填上这节课的名称和起止时间。")):
+            st.session_state.period_rows_count = count + 1
+            st.rerun()
+    with bar[1]:
         st.button("↺ 恢复默认模板", key="period_reset", on_click=_cb_reset_periods,
                   help=_tip("恢复默认模板",
                             "把作息表重置成内置的 12 节通用模板"
                             "（第 1 节 08:00-08:45 起）。"))
-    with c2:
-        st.caption(f"注入 AI 的话：{_period_table_text()[:40]}…")
+    with bar[2]:
+        hit = _period_lookup(1)
+        if hit:
+            # 用 _period_rows() 而不是 session_state.period_rows ——
+            # 后者在首次渲染时还是 None（_set_period_rows 要等表格渲染完才跑）
+            st.caption(f"当前生效：第 1 节 {hit[0][0]:02d}:{hit[0][1]:02d} 起，"
+                       f"共 {len(_period_rows())} 节。")
+        else:
+            st.caption(f"注入 AI 的话：{_period_table_text()[:40]}…")
+
+    # 表头（窄屏隐藏 —— 竖排布局每行自带标签）
+    hdr = st.columns([2, 2, 2, 1])
+    hdr[0].markdown("**节次名称**")
+    hdr[1].markdown("**开始**")
+    hdr[2].markdown("**结束**")
+    hdr[3].markdown("")
+
+    new_rows: list[dict[str, str]] = []
+    del_idx: int | None = None
+    for i in range(count):
+        base = raw[i] if i < len(raw) else {"name": f"第{i + 1}节",
+                                           "start": "08:00", "end": "08:45"}
+        # 窄屏（手机）用竖排：名称一行、起止一行，三列横排会挤到看不清
+        if _is_mobile_client():
+            c1 = st.columns([3, 1])
+            name = c1[0].text_input(
+                "节次名称", value=str(base.get("name") or ""), key=f"period_name_{i}",
+                label_visibility="collapsed", placeholder="第1节")
+            with c1[1]:
+                if st.button("✕", key=f"period_del_{i}",
+                             help=f"删除「{base.get('name') or f'第 {i + 1} 节'}」"):
+                    del_idx = i
+            c2 = st.columns([2, 2])
+            start = c2[0].time_input(
+                "开始", value=_hhmm_to_time(base.get("start")), key=f"period_start_{i}",
+                label_visibility="visible", step=60)
+            end = c2[1].time_input(
+                "结束", value=_hhmm_to_time(base.get("end")), key=f"period_end_{i}",
+                label_visibility="visible", step=60)
+        else:
+            cols = st.columns([2, 2, 2, 1])
+            name = cols[0].text_input(
+                "节次名称", value=str(base.get("name") or ""), key=f"period_name_{i}",
+                label_visibility="collapsed", placeholder="第1节")
+            start = cols[1].time_input(
+                "开始", value=_hhmm_to_time(base.get("start")), key=f"period_start_{i}",
+                label_visibility="collapsed", step=60)
+            end = cols[2].time_input(
+                "结束", value=_hhmm_to_time(base.get("end")), key=f"period_end_{i}",
+                label_visibility="collapsed", step=60)
+            with cols[3]:
+                if st.button("✕", key=f"period_del_{i}",
+                             help=f"删除「{base.get('name') or f'第 {i + 1} 节'}」"):
+                    del_idx = i
+        new_rows.append({
+            "name": str(name).strip(),
+            "start": _time_to_hhmm(start),
+            "end": _time_to_hhmm(end),
+        })
+
+    # 删除行：先摘掉这一行，再把后面各行的控件状态上移
+    if del_idx is not None:
+        new_rows.pop(del_idx)
+        st.session_state.period_rows_count = len(new_rows)
+        for i in range(del_idx, count):
+            for k in (f"period_name_{i}", f"period_start_{i}", f"period_end_{i}"):
+                st.session_state.pop(k, None)
+        _set_period_rows(new_rows)
+        st.rerun()
+
+    _set_period_rows(new_rows)
+
+
+@st.dialog("⏰ 作息时间表", width="large", on_dismiss=_cb_period_dismiss)
+def _show_period_dialog() -> None:
+    """作息表编辑器弹窗。
+
+    用弹窗而不是侧边栏内嵌：
+      · 侧边栏只有 300px 宽，窄表格在手机上三列挤不开、点不准；
+      · 手机端侧边栏是盖在内容之上的浮层，展开时会把正文全遮住；
+      · 弹窗在桌面上是宽浮层（~1200px），在手机上几乎占满屏幕，两边都好用。
+    """
+    _render_period_editor()
 
 
 def render_settings_panel() -> None:
@@ -7478,27 +7652,24 @@ def render_sidebar() -> None:
                        + " · 点开设置")
 
         # --- 作息时间表：独立入口，不塞在设置面板里 ---
+        # 编辑器本体在弹窗里（桌面宽、手机满屏），侧边栏只留入口 + 摘要。
         period_open = bool(st.session_state.get("period_open"))
         st.button(
-            "✕ 收著作息表" if period_open else "⏰ 作息时间表",
+            "✕ 关闭作息表" if period_open else "⏰ 作息时间表",
             key="period_toggle",
             width="stretch",
             on_click=_cb_toggle_period,
             help=_tip(
-                "收著作息表" if period_open else "作息时间表",
-                "收起作息表编辑器。" if period_open else
+                "关闭作息表" if period_open else "作息时间表",
+                "关闭作息表编辑器。" if period_open else
                 "课表上写的「第6-7节」「晚修」按这张表换算成具体上课时间。"
                 "改成你学校的作息后再解析，时间就是准的。",
             ),
         )
-        if period_open:
-            with st.container(border=True):
-                _render_period_editor()
-        else:
-            rows = _period_rows()
-            first = rows[0] if rows else {"name": "第1节", "start": "08:00", "end": "08:45"}
-            st.caption(f"共 {len(rows)} 节 · {first['name']} {first['start']} 起 · "
-                       f"点开编辑你学校的作息")
+        rows = _period_rows()
+        first = rows[0] if rows else {"name": "第1节", "start": "08:00", "end": "08:45"}
+        st.caption(f"共 {len(rows)} 节 · {first['name']} {first['start']} 起 · "
+                   + ("编辑器已打开" if period_open else "点开编辑你学校的作息"))
 
         # --- 默认提醒：独立入口 ---
         remind_open = bool(st.session_state.get("remind_open"))
@@ -8847,6 +9018,16 @@ def main() -> None:
     if st.session_state.get("pending_toast"):
         st.toast(st.session_state.pending_toast)
         st.session_state.pending_toast = ""
+
+    # 作息表编辑器：侧边栏只留入口，编辑器本体用弹窗
+    # （桌面 ~1200px 宽，手机几乎满屏，都比侧边栏里的窄表格好用）
+    if st.session_state.get("period_open"):
+        try:
+            _show_period_dialog()
+        except Exception:  # noqa: BLE001
+            log(f"作息表编辑器异常: {traceback.format_exc()}")
+            st.session_state.period_open = False
+            st.error("作息表编辑器渲染异常，请刷新页面重试。")
 
     tab1, tab2, tab3, tab4 = st.tabs(
         ["📥 录入解析", "📅 日程表", "📤 导出日历", "❓ 使用说明"]
