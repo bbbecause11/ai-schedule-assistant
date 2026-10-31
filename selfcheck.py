@@ -183,6 +183,15 @@ def test_export() -> None:
     check("ICS 事件数与日程数一致", ics.count("BEGIN:VEVENT") == len(norm),
           f"{ics.count('BEGIN:VEVENT')} vs {len(norm)}")
     check("ICS 含 VALARM 提醒", "BEGIN:VALARM" in ics and "TRIGGER:-PT15M" in ics)
+    # 默认提醒支持多选：每个时间点各写一条 VALARM
+    ev_m = app.Event("多提醒", datetime(2026, 11, 5, 9, 0), datetime(2026, 11, 5, 10, 0))
+    ics_m = app.build_ics([ev_m], "m", [30, 60, 120], 16)
+    check("多选提醒：每个时间点各写一条 VALARM",
+          ics_m.count("BEGIN:VALARM") == 3
+          and all(t in ics_m for t in ("TRIGGER:-PT30M", "TRIGGER:-PT1H",
+                                       "TRIGGER:-PT2H")))
+    check("旧版单个分钟数仍兼容（int → 一条提醒）",
+          app.build_ics([ev_m], "m", 15, 16).count("BEGIN:VALARM") == 1)
     check("ICS 使用 CRLF 换行", "\r\n" in ics)
     over = [l for l in ics.split("\r\n") if len(l.encode("utf-8")) > 75]
     check("ICS 每行不超过 75 字节（RFC 5545）", not over, f"超长行 {len(over)}")
@@ -1266,6 +1275,17 @@ def test_ai_key_dialog() -> None:
           "否则鼠标移进气泡后既点不到按钮，也触发不了离开即关闭")
     check("提示气泡限宽（说明文字不再铺成一大块）",
           tip is not None and "max-width" in tip.group(1))
+
+    # ⑪ 默认提醒：复选框多选，最多 3 个
+    check("默认提醒是复选框多选（最多 3 个）",
+          "REMIND_MAX = 3" in src
+          and "on_change=_cb_collect_reminds" in src
+          and "disabled=(not checked and len(selected) >= REMIND_MAX)" in src)
+    check("提醒选项含 30 分钟 / 1 小时 / 2 小时 / 4 小时",
+          all(f'"提前 {x}": {m}' in src for x, m in
+              (("30 分钟", 30), ("1 小时", 60), ("2 小时", 120), ("4 小时", 240))))
+    check("多选提醒导出到 CSV 时用「+」连接",
+          "remind_text = _remind_labels(default_remind)" in src)
 
 
 def test_placeholder_style() -> None:

@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.1"
+APP_VERSION = "2.7.2"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -137,9 +137,15 @@ PRIORITY_ICS = {"高": 1, "中": 5, "低": 9}   # RFC 5545: 1 最高，9 最低
 REMIND_OPTIONS = {
     "不提醒": 0,
     "提前 15 分钟": 15,
+    "提前 30 分钟": 30,
     "提前 1 小时": 60,
+    "提前 2 小时": 120,
+    "提前 4 小时": 240,
     "提前 1 天": 1440,
 }
+# 全局默认提醒支持多选：这些是可勾选的时间点（不含「不提醒」——一个都不勾即不提醒）
+REMIND_CHECK_OPTIONS = [(label, m) for label, m in REMIND_OPTIONS.items() if m > 0]
+REMIND_MAX = 3
 
 # 重复频率选项（界面文案）。对应 RRULE 的构造方式见 build_recur_rrule。
 RECUR_FREQ_WEEKLY = "每周重复"
@@ -270,6 +276,18 @@ def _cell_text(row: dict[str, Any], key: str) -> str:
     return "" if text.lower() in {"nan", "none", "<na>"} else text
 
 
+def _as_remind_list(value: Any) -> list[int]:
+    """把「单个分钟数 / 分钟数列表」统一成去重升序的正整数列表。"""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        vals = [int(value)]
+    elif isinstance(value, (list, tuple, set)):
+        vals = [int(v) for v in value
+                if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    else:
+        vals = []
+    return sorted({v for v in vals if v > 0})
+
+
 def _remind_label(minutes: int) -> str:
     for label, value in REMIND_OPTIONS.items():
         if value == minutes:
@@ -286,6 +304,12 @@ def _parse_remind_label(label: str) -> int:
         return -1
     m = re.search(r"(\d+)", label)
     return int(m.group(1)) if m else -1
+
+
+def _remind_labels(value: Any) -> str:
+    """全局提醒可能有多条，用「 + 」连起来展示。"""
+    vals = _as_remind_list(value)
+    return " + ".join(_remind_label(m) for m in vals) if vals else "不提醒"
 
 
 def _coerce_datetime(value: Any, default: datetime) -> datetime:
@@ -4896,7 +4920,8 @@ def _rrule_with_until(rrule: str, start: datetime, weeks: int) -> str:
 
 
 def build_ics(events: list[Event], calendar_name: str = "AI 智能日程",
-              default_remind: int = 15, recur_weeks: int = DEFAULT_RECUR_WEEKS) -> str:
+              default_remind: int | list[int] = 15,
+              recur_weeks: int = DEFAULT_RECUR_WEEKS) -> str:
     """生成标准 .ics 文本（CRLF 换行、含 VALARM 提醒）。"""
     stamp = _ics_dt(datetime.now())
     lines: list[str] = [
@@ -4910,10 +4935,18 @@ def build_ics(events: list[Event], calendar_name: str = "AI 智能日程",
         "X-WR-CALDESC:由 AI 智能日程收纳工具生成",
     ]
 
+    default_reminds = _as_remind_list(default_remind)
+
     for ev in events:
         # 事件 UID 必须全局唯一且稳定，用已有 uid + 域名后缀
         uid = f"{ev.uid}@ai-schedule.local"
-        remind = default_remind if ev.remind_minutes < 0 else ev.remind_minutes
+        # 单条日程可以覆盖全局：-1 跟随全局（可能是多条），0 不提醒
+        if ev.remind_minutes < 0:
+            reminds = default_reminds
+        elif ev.remind_minutes == 0:
+            reminds = []
+        else:
+            reminds = [ev.remind_minutes]
 
         description_parts: list[str] = []
         if ev.note:
@@ -4952,7 +4985,10 @@ def build_ics(events: list[Event], calendar_name: str = "AI 智能日程",
         lines.append("STATUS:CONFIRMED")
         lines.append("TRANSP:OPAQUE")
 
-        if remind and remind > 0:
+        # 一条日程可以有多个提醒：全局多选时逐个写 VALARM。
+        for remind in reminds:
+            if remind <= 0:
+                continue
             trigger = f"-P{remind // 1440}D" if remind % 1440 == 0 else (
                 f"-PT{remind // 60}H" if remind % 60 == 0 else f"-PT{remind}M"
             )
@@ -4969,14 +5005,19 @@ def build_ics(events: list[Event], calendar_name: str = "AI 智能日程",
     return "\r\n".join(_ics_fold(ln) for ln in lines) + "\r\n"
 
 
-def build_csv(events: list[Event], default_remind: int = 15) -> bytes:
+def build_csv(events: list[Event], default_remind: int | list[int] = 15) -> bytes:
     """生成 CSV（UTF-8 BOM，保证 Excel 直接双击不乱码）。"""
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\r\n")
     writer.writerow(["标题", "开始时间", "结束时间", "时长(分钟)", "地点",
                      "优先级", "备注", "重复", "重复规则(RRULE)", "提醒", "状态", "来源"])
     for ev in events:
-        remind = default_remind if ev.remind_minutes < 0 else ev.remind_minutes
+        if ev.remind_minutes < 0:
+            remind_text = _remind_labels(default_remind)
+        elif ev.remind_minutes == 0:
+            remind_text = "不提醒"
+        else:
+            remind_text = _remind_label(ev.remind_minutes)
         writer.writerow([
             ev.title,
             ev.start.strftime("%Y-%m-%d %H:%M"),
@@ -4987,14 +5028,14 @@ def build_csv(events: list[Event], default_remind: int = 15) -> bytes:
             ev.note,
             describe_recurrence(ev.rrule) or "不重复",
             ev.rrule or "",
-            _remind_label(remind),
+            remind_text,
             ev.status.replace("🔴 ", "").replace("⚠️ ", "").replace("✅ ", ""),
             ev.source,
         ])
     return buf.getvalue().encode("utf-8-sig")
 
 
-def build_markdown(events: list[Event], default_remind: int = 15) -> str:
+def build_markdown(events: list[Event], default_remind: int | list[int] = 15) -> str:
     """生成 Markdown 日程表，按日期分组，便于粘贴到文档或 README。"""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     out: list[str] = [
@@ -7240,7 +7281,7 @@ def init_state() -> None:
         "ui_font": FONT_NORMAL,       # 小 / 标准 / 大 / 特大
         "settings_open": False,       # 侧边栏设置面板是否展开
         "use_ai": True,               # 是否优先调用大模型
-        "default_remind": 15,         # 全局提醒（分钟）
+        "default_remind": [30, 60],   # 全局提醒（分钟列表，可多选，最多 3 个）
         "calendar_name": "我的 AI 日程",
         "raw_text_input": "",
         "total_parsed": 0,
@@ -7632,14 +7673,38 @@ def _render_font_size() -> None:
 
 
 def _render_remind_picker() -> None:
-    """默认提醒下拉框：侧边栏独立入口与别处共用。"""
-    remind_labels = list(REMIND_OPTIONS.keys())
-    current_label = _remind_label(st.session_state.default_remind)
-    idx = remind_labels.index(current_label) if current_label in remind_labels else 1
-    chosen = st.selectbox(
-        "新日程默认提前多久提醒", remind_labels, index=idx,
+    """默认提醒：勾选 1–3 个提前时间点（一个都不勾 = 不提醒）。"""
+    selected = _as_remind_list(st.session_state.get("default_remind"))
+    st.caption("建议勾选 2–3 个时间点；最多 3 个，勾满后其余会变灰，"
+               "先取消一个再换。")
+    # 先把当前选择同步到各 checkbox 的 key，保证 rerun 前后状态一致
+    for _, minutes in REMIND_CHECK_OPTIONS:
+        st.session_state[f"remind_opt_{minutes}"] = minutes in selected
+    for label, minutes in REMIND_CHECK_OPTIONS:
+        key = f"remind_opt_{minutes}"
+        checked = bool(st.session_state.get(key))
+        st.checkbox(
+            label,
+            key=key,
+            disabled=(not checked and len(selected) >= REMIND_MAX),
+            on_change=_cb_collect_reminds,
+        )
+    st.caption(
+        ("已选 " + "、".join(_remind_label(m) for m in selected)
+         if selected else "未选择 · 不提醒")
+        + f"（最多 {REMIND_MAX} 个）"
     )
-    st.session_state.default_remind = REMIND_OPTIONS[chosen]
+
+
+def _cb_collect_reminds() -> None:
+    """把勾选状态收集成 default_remind 列表；超过上限就取消多出来的。"""
+    chosen = [m for _, m in REMIND_CHECK_OPTIONS
+              if st.session_state.get(f"remind_opt_{m}")]
+    if len(chosen) > REMIND_MAX:
+        for m in chosen[REMIND_MAX:]:
+            st.session_state[f"remind_opt_{m}"] = False
+        chosen = chosen[:REMIND_MAX]
+    st.session_state.default_remind = chosen
 
 
 def _cb_toggle_remind() -> None:
@@ -8356,7 +8421,7 @@ def render_sidebar() -> None:
             with st.container(border=True):
                 _render_remind_picker()
         else:
-            st.caption(f"当前：提前 {_remind_label(st.session_state.default_remind)}")
+            st.caption(f"当前：{_remind_labels(st.session_state.default_remind)}")
 
         st.markdown("---")
 
@@ -9438,7 +9503,7 @@ def render_export_tab() -> None:
     recurring_total = sum(1 for e in events if e.is_recurring)
     _html(
         '<div class="notice notice-info">'
-        f'当前全局提醒：<b>{_remind_label(default_remind)}</b>；'
+        f'当前全局提醒：<b>{_remind_labels(default_remind)}</b>；'
         f'循环日程 <b>{recurring_total}</b> 条，其中 <b>{fixed_count}</b> 条已指定重复次数。'
         f'其余按默认 <b>{RECUR_COUNT_DEFAULT}</b> 次（约一学期）兜底，'
         '可在「日程表 → 重复设置」里逐条修改开始日期与次数。<br>'
