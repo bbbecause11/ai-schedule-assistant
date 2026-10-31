@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -5660,6 +5660,62 @@ section[role="dialog"] {
     box-shadow: none !important;
     border-radius: 0 !important;
     background: transparent !important;
+}
+
+/* ---------- 弹窗内的文字色：补回 .stApp 作用域之外的排版规则 ----------
+   st.dialog 的内容由 React portal 渲染到 body 之下，**不在 .stApp 里**。
+   于是第 1 节那批 `.stApp xxx` 的文字规则一条都命不中：
+   标题、说明文字、字段标签全部落回 Streamlit 自身浅色主题的默认文字色
+   （config.toml 里 textColor 那个暗紫），在深色背景上几乎看不见。
+   这里把作用域显式补到弹窗容器上，颜色一律走令牌，
+   明暗两套主题都正确。 */
+[data-testid="stDialog"] {
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: var(--fs-body);
+    line-height: var(--lh-body);
+}
+[data-testid="stDialog"] h1, [data-testid="stDialog"] h2,
+[data-testid="stDialog"] h3, [data-testid="stDialog"] h4,
+[data-testid="stDialog"] h5, [data-testid="stDialog"] h6 {
+    color: var(--ink) !important;
+    font-weight: 600;
+    line-height: var(--lh-tight);
+    letter-spacing: var(--track-snug);
+}
+[data-testid="stDialog"] h1 { font-size: var(--fs-h1); }
+[data-testid="stDialog"] h2 { font-size: var(--fs-h2); margin: 0 0 .45em; }
+[data-testid="stDialog"] h3 { font-size: var(--fs-h3); }
+[data-testid="stDialog"] h4, [data-testid="stDialog"] h5,
+[data-testid="stDialog"] h6 { font-size: var(--fs-sm); }
+[data-testid="stDialog"] p { color: var(--ink) !important; }
+[data-testid="stDialog"] strong, [data-testid="stDialog"] b {
+    color: var(--ink) !important;
+    font-weight: 600;
+}
+[data-testid="stDialog"] small,
+[data-testid="stDialog"] [data-testid="stCaptionContainer"],
+[data-testid="stDialog"] [data-testid="stCaptionContainer"] p {
+    color: var(--muted-3) !important;
+    font-size: var(--fs-xs) !important;
+    line-height: var(--lh-snug);
+}
+[data-testid="stDialog"] label,
+[data-testid="stDialog"] [data-testid="stWidgetLabel"] {
+    color: var(--ink-2) !important;
+    font-size: var(--fs-sm) !important;
+    font-weight: 500;
+}
+[data-testid="stDialog"] a { color: var(--accent) !important; }
+/* 右上角关闭 ✕：Streamlit 默认也是浅色主题的暗色，同样看不见 */
+[data-testid="stDialog"] button[aria-label="Close"] {
+    color: var(--muted) !important;
+}
+[data-testid="stDialog"] button[aria-label="Close"] svg {
+    stroke: currentColor;
+}
+[data-testid="stDialog"] button[aria-label="Close"]:hover {
+    color: var(--ink) !important;
 }
 
 .stTextArea textarea, .stTextInput input, .stNumberInput input, .stDateInput input {

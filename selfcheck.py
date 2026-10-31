@@ -1062,6 +1062,22 @@ def test_period_editor() -> None:
           add_pos > 0 and "new_rows: list" not in head[add_pos:],
           "按钮应渲染在表格之前")
 
+    # ⑥ 弹窗内容的文字色必须显式覆盖。
+    #    st.dialog 由 React portal 渲染到 body 之下，**不在 .stApp 里**，
+    #    所以 `.stApp label` / `.stApp h2` / `.stApp [data-testid=stCaptionContainer]`
+    #    这些规则一条都命不中，文字会落回 Streamlit 浅色主题的默认文字色，
+    #    在深色背景上就是那层几乎看不见的暗紫。必须显式补作用域。
+    check("弹窗内的标题/说明/标签都显式用了主题令牌",
+          '[data-testid="stDialog"] h1' in src
+          and '[data-testid="stDialog"] [data-testid="stCaptionContainer"]' in src
+          and '[data-testid="stDialog"] [data-testid="stWidgetLabel"]' in src,
+          "弹窗内容不在 .stApp 内，漏掉就会退回浅色主题默认色")
+    check("弹窗文字色走令牌而非硬编码",
+          re.search(r'\[data-testid="stDialog"\][^{]*\{\s*color:\s*var\(--ink\)', src)
+          is not None)
+    check("弹窗关闭按钮也上了色（默认是浅色主题的暗色，深色下看不见）",
+          'button[aria-label="Close"]' in src)
+
 
 def test_security() -> None:
     section("I. 安全与合规静态检查")
