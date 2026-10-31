@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -4441,22 +4441,40 @@ def _read_secret(key: str) -> str:
 
 def get_ai_config() -> dict[str, Any]:
     """
-    从环境变量（或 Streamlit secrets）读取大模型配置。
+    读取大模型配置。
+
+    优先级：**用户在弹窗里填的** > 环境变量 > Streamlit secrets > 默认值。
+    用户填的密钥只存在于 session_state（内存），刷新页面即失效，
+    不写文件、不进日志、不回显到页面。
 
     严禁在代码中硬编码密钥：这里只读取运行时注入的配置，读不到就返回 available=False。
     """
+    # 用户在「🤖 AI 接口」弹窗里填的（内存态）
+    user_key = ""
+    user_base = ""
+    user_model = ""
+    try:
+        user_key = str(st.session_state.get("ai_api_key") or "").strip()
+        user_base = str(st.session_state.get("ai_base_url") or "").strip()
+        user_model = str(st.session_state.get("ai_model") or "").strip()
+    except Exception:  # noqa: BLE001 - 裸模式没有会话
+        pass
+
     api_key = (
-        (os.environ.get("AI_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
+        user_key
+        or (os.environ.get("AI_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
         or _read_secret("AI_API_KEY")
         or _read_secret("OPENAI_API_KEY")
     )
     base_url = (
-        (os.environ.get("AI_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").strip()
+        user_base
+        or (os.environ.get("AI_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").strip()
         or _read_secret("AI_BASE_URL")
         or "https://api.deepseek.com/v1"
     ).rstrip("/")
     model = (
-        (os.environ.get("AI_MODEL") or "").strip()
+        user_model
+        or (os.environ.get("AI_MODEL") or "").strip()
         or _read_secret("AI_MODEL")
         or "deepseek-chat"
     )
@@ -4470,6 +4488,8 @@ def get_ai_config() -> dict[str, Any]:
         "base_url": base_url,
         "model": model,
         "timeout": max(10.0, min(timeout, 180.0)),
+        # 用户是否是自己填的（决定侧边栏显示哪种状态文案）
+        "from_user": bool(user_key),
     }
 
 
@@ -7031,6 +7051,14 @@ def init_state() -> None:
         "remind_open": False,            # 侧边栏默认提醒是否展开
         "period_rows_count": None,       # 编辑器里的行数（「添加一节」会增加）
         "period_del_index": None,        # 待删除的行号
+        # --- AI 接口配置（侧边栏「🤖 AI 接口」弹窗）---
+        # 用户在弹窗里填的 API Key / 接口地址 / 模型名。
+        # 只存在 session_state（内存），刷新页面即失效，绝不落盘、绝不进日志。
+        "ai_api_key": "",                # 用户填写的密钥（明文存于本会话内存）
+        "ai_base_url": "",               # 用户填写的接口地址（留空则用默认值）
+        "ai_model": "",                  # 用户填写的模型名（留空则用默认值）
+        "ai_key_open": False,            # AI 接口配置弹窗是否打开
+        "ai_key_status": "",             # 弹窗内的连接测试结果提示
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -7174,19 +7202,6 @@ def _recompute_conflicts() -> None:
 # ---------------------------------------------------------------------------
 # 12. 解析编排
 # ---------------------------------------------------------------------------
-
-def _read_config_hint() -> str:
-    return (
-        "配置大模型（任选其一，均在**环境变量**中设置，切勿写进代码）：\n\n"
-        "```bash\n"
-        "# DeepSeek\n"
-        "set AI_API_KEY=sk-xxxx\n"
-        "set AI_BASE_URL=https://api.deepseek.com/v1\n"
-        "set AI_MODEL=deepseek-chat\n"
-        "```\n"
-        "也兼容通义千问、Kimi、智谱、OpenAI 等任意 OpenAI 兼容接口。"
-    )
-
 
 def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
     """
@@ -7480,6 +7495,31 @@ def _cb_toggle_period() -> None:
     st.session_state.period_open = opening
 
 
+def _cb_toggle_ai_key() -> None:
+    """侧边栏「🤖 AI 接口」入口：打开 / 关闭配置弹窗。
+
+    打开时做两件事：
+      ① 把已保存的值同步到三个输入框的 widget key
+         （text_input 一旦有了自己的 session_state，value= 就会被忽略，
+          不同步的话「清除后重新打开」框里还显示旧密钥）；
+      ② 清掉上一次的连接测试提示，避免显示一条过期的旧结果。
+
+    注意：改 widget 自己的 session_state key 只能在 widget 实例化**之前**。
+    侧边栏按钮的回调早于弹窗渲染，正常情况下安全；
+    但保险起见用 try 兜住，绝不让整个侧边栏因为这个崩掉。
+    """
+    opening = not bool(st.session_state.get("ai_key_open"))
+    st.session_state.ai_key_open = opening
+    if opening:
+        st.session_state.ai_key_status = ""
+        try:
+            st.session_state.ai_key_input = st.session_state.get("ai_api_key", "")
+            st.session_state.ai_base_input = st.session_state.get("ai_base_url", "")
+            st.session_state.ai_model_input = st.session_state.get("ai_model", "")
+        except Exception as exc:  # noqa: BLE001 - widget 已实例化等情况
+            log(f"AI 配置同步到输入框失败: {exc}")
+
+
 def _cb_period_dismiss() -> None:
     """弹窗被关闭（点 X / 点外部）。"""
     st.session_state.period_open = False
@@ -7613,6 +7653,160 @@ def _show_period_dialog() -> None:
     _render_period_editor()
 
 
+# ---------------------------------------------------------------------------
+# AI 接口配置弹窗
+# ---------------------------------------------------------------------------
+# 为什么用弹窗而不是侧边栏内嵌：
+#   侧边栏只有 300px 宽，API Key / 接口地址 / 模型名三个字段塞进去又窄又挤，
+#   而密钥这种敏感内容放在一个独立小窗口里，用户心理上也更放心（点完即关）。
+# 密钥安全约定：
+#   · 只存在 session_state（内存），刷新页面即失效，不写文件、不进日志；
+#   · 输入框用 password 类型，页面上永远显示成圆点；
+#   · 任何提示文案都不回显密钥本身。
+
+def _mask_key(key: str) -> str:
+    """把密钥显示成「前 4 位 + 圆点 + 后 4 位」，便于用户确认填对了。"""
+    key = (key or "").strip()
+    if len(key) <= 10:
+        return "•" * len(key) if key else ""
+    return f"{key[:4]}{'•' * 8}{key[-4:]}"
+
+
+def _test_ai_connection() -> None:
+    """弹窗里的「测试连接」：真发一次最小请求，确认密钥 / 地址 / 模型都对。
+
+    结果只写一句人话到 session_state，由界面显示；
+    失败原因也只保留摘要，绝不把请求头或密钥带进提示。
+    """
+    cfg = get_ai_config()
+    if not cfg["available"]:
+        st.session_state.ai_key_status = "请先填写 API Key"
+        return
+    try:
+        content = _post_chat(
+            cfg,
+            [{"role": "user", "content": "回复「ok」两个字即可。"}],
+            force_json=False,
+        )
+        ok = bool(content.strip())
+        st.session_state.ai_key_status = (
+            f"连接成功 · 模型 {cfg['model']} 已响应" if ok else "连接异常：模型没有返回内容"
+        )
+    except AIError as exc:
+        st.session_state.ai_key_status = f"连接失败：{exc}"
+    except Exception as exc:  # noqa: BLE001 - 网络异常等一律兜住
+        st.session_state.ai_key_status = f"连接失败：{type(exc).__name__}"
+
+
+def _cb_save_ai_key() -> None:
+    """「保存并启用」回调：保存三个字段并关窗。
+
+    st.dialog 是独立 fragment：弹窗里的 on_click 默认只重跑弹窗本身，
+    侧边栏（在主脚本里）不会跟着刷新。所以这里显式 st.rerun()，
+    让整个脚本从顶层重来，侧边栏的「已连接」状态才是最新的。
+
+    保存后关窗还有个好处：用户填完本来就该关掉小窗口。
+    """
+    st.session_state.ai_api_key = str(st.session_state.get("ai_key_input") or "").strip()
+    st.session_state.ai_base_url = str(st.session_state.get("ai_base_input") or "").strip()
+    st.session_state.ai_model = str(st.session_state.get("ai_model_input") or "").strip()
+    st.session_state.ai_key_status = "已保存并启用"
+    st.session_state.ai_key_open = False
+    st.rerun()
+
+
+def _cb_test_ai_key() -> None:
+    """「测试连接」回调：先存后测，结果显示在弹窗里（保持弹窗开着）。"""
+    st.session_state.ai_api_key = str(st.session_state.get("ai_key_input") or "").strip()
+    st.session_state.ai_base_url = str(st.session_state.get("ai_base_input") or "").strip()
+    st.session_state.ai_model = str(st.session_state.get("ai_model_input") or "").strip()
+    _test_ai_connection()
+    st.rerun()
+
+
+def _cb_clear_ai_key() -> None:
+    """「清除」按钮的回调：抹掉已保存的密钥并关窗。
+
+    必须放在 on_click 回调里 —— 回调在 widget 实例化之前执行，
+    这时才可以改 ai_key_input 这类 widget 自己的 session_state key。
+    （在按钮分支里直接改会抛 StreamlitWidgetAlreadyInstantiatedError。）
+
+    另外 st.dialog 是独立的 fragment：弹窗里的 on_click 默认只重跑弹窗，
+    侧边栏（在主脚本里）不会跟着更新。所以这里显式 st.rerun()，
+    让整个脚本从顶层重来一遍，侧边栏状态才是最新的。
+    """
+    st.session_state.ai_api_key = ""
+    st.session_state.ai_base_url = ""
+    st.session_state.ai_model = ""
+    st.session_state.ai_key_input = ""
+    st.session_state.ai_base_input = ""
+    st.session_state.ai_model_input = ""
+    st.session_state.ai_key_status = "已清除"
+    st.session_state.ai_key_open = False
+    st.rerun()
+
+
+@st.dialog("🤖 AI 接口配置", width="small")
+def _show_ai_key_dialog() -> None:
+    """AI 接口配置弹窗：填 API Key、接口地址、模型名，并可测试连接。"""
+    st.caption("填好后 AI 解析才会启用。密钥只存在本页内存里，"
+               "刷新页面就失效，不会写入任何文件。")
+
+    # 注意：这里**不传 value=**，也不需要接返回值。
+    # Streamlit 里 widget 一旦有了自己的 session_state，value= 就会被忽略，
+    # 造成「清空后重新打开，框里还显示旧密钥」。
+    # 正确做法是由 _cb_toggle_ai_key 在打开弹窗时把已保存的值同步到这三个 key；
+    # 三个按钮则统一用 on_click 回调读取它们（回调早于 widget 实例化）。
+    st.text_input(
+        "API Key", type="password", key="ai_key_input",
+        placeholder="sk-…（DeepSeek / 通义 / Kimi / OpenAI 等）",
+        help=_tip("API Key", "大模型服务的密钥。填完点「保存并启用」生效。"
+                             "只保存在本页内存，刷新后需要重新填写。"),
+    )
+    st.text_input(
+        "接口地址（Base URL）",
+        key="ai_base_input", placeholder="https://api.deepseek.com/v1",
+        help=_tip("接口地址", "OpenAI 兼容接口的地址。留空则用 DeepSeek 官方地址。"
+                             "通义 / Kimi / 智谱等填各自的兼容地址。"),
+    )
+    st.text_input(
+        "模型名", key="ai_model_input", placeholder="deepseek-chat",
+        help=_tip("模型名", "要用的模型标识。留空则用 deepseek-chat。"),
+    )
+
+    status = st.session_state.get("ai_key_status") or ""
+    if status:
+        if status.startswith("连接成功"):
+            st.success(status)
+        else:
+            st.warning(status)
+
+    cols = st.columns([1, 1, 1])
+    with cols[0]:
+        st.button("保存并启用", key="ai_key_save", width="stretch", type="primary",
+                  on_click=_cb_save_ai_key)
+    with cols[1]:
+        st.button("测试连接", key="ai_key_test", width="stretch",
+                  on_click=_cb_test_ai_key)
+    with cols[2]:
+        # 清除要用 on_click 回调，不能在按钮分支里直接改 widget 的 key：
+        # widget 一旦实例化，Streamlit 就不允许再改它的 session_state
+        # （StreamlitWidgetAlreadyInstantiatedError）。
+        # on_click 回调在 widget 实例化**之前**执行，正好能改。
+        st.button("清除", key="ai_key_clear", width="stretch",
+                  on_click=_cb_clear_ai_key)
+
+    with st.expander("不想用 AI？"):
+        st.markdown(
+            "本应用的解析分两层：**本地规则引擎**（默认，纯离线，不联网）"
+            "和**大模型**。课表、备忘录这类格式规整的内容，规则引擎就够用了；"
+            "口语化的群聊记录、语音转写才需要大模型帮忙。"
+        )
+        st.markdown(
+            "不填任何东西也能正常使用所有功能，只是解析会全部走本地规则。"
+        )
+
+
 def render_settings_panel() -> None:
     """侧边栏设置面板：外观 → AI 解析 → OCR 识别 → 课表识别 → 默认提醒。"""
     # ---------- 外观 ----------
@@ -7639,6 +7833,9 @@ def render_settings_panel() -> None:
     )
 
     # ---------- AI ----------
+    # 注意：API Key / 接口地址 / 模型名的配置**不在这里**，
+    # 已挪到侧边栏独立的「🤖 AI 接口」入口（弹窗填写）。
+    # 这里只留「要不要优先用 AI」这个开关。
     st.markdown("#### 🤖 AI 解析")
     ai_config = get_ai_config()
     if ai_config["available"]:
@@ -7660,8 +7857,7 @@ def render_settings_panel() -> None:
         st.caption("**作用**：把口语化的整段话交给大模型，理解出标题、时间、地点。"
                    "现在没检测到密钥，会自动用**本地规则引擎**——格式规整的课表、"
                    "备忘录一样能解析，而且完全离线、不联网。")
-        with st.expander("如何配置 API Key"):
-            st.markdown(_read_config_hint())
+        st.caption("👉 配置密钥：点侧边栏上方的「🤖 AI 接口」，在小窗口里填 API Key。")
 
     # ---------- OCR ----------
     st.markdown("#### 👁️ OCR 识别")
@@ -7712,6 +7908,33 @@ def render_sidebar() -> None:
             f'v{APP_VERSION} · 内存计算 · 不存数据</div></div>'
         )
 
+        # --- AI 接口：独立入口，弹窗里填密钥 ---
+        # 放在侧边栏**最上面**：设置面板一展开就会占掉大半屏，
+        # 放下面的话入口会被推到视口外，得滚动才点得到。
+        # 密钥这种敏感内容也不该塞进设置面板（那里还堆着外观 / OCR / 课表等一堆别的），
+        # 单独一个小窗口更清楚，也更符合「填完即关」的心理预期。
+        ai_cfg = get_ai_config()
+        ai_ok = ai_cfg["available"]
+        st.button(
+            "🤖 AI 接口" if ai_ok else "🔑 AI 接口",
+            key="ai_key_toggle",
+            width="stretch",
+            on_click=_cb_toggle_ai_key,
+            help=_tip(
+                "AI 接口",
+                "填写大模型 API Key、接口地址与模型名。"
+                "不填也能用 —— 解析会全部走本地规则引擎。",
+            ),
+        )
+        if ai_ok:
+            # 只显示掩码后的密钥（头 4 位 + 尾 4 位），既能确认填对了，
+            # 又不会把完整密钥摆在屏幕上。
+            masked = _mask_key(ai_cfg["api_key"])
+            tail = f" · {masked}" if masked else ""
+            st.caption(f"已连接 · {ai_cfg['model']}{tail} · 点开修改")
+        else:
+            st.caption("未配置 · 不填也能用（走本地规则引擎）")
+
         # --- 设置入口（AI / OCR / 外观都收在这里面） ---
         is_open = bool(st.session_state.settings_open)
         st.button(
@@ -7721,21 +7944,21 @@ def render_sidebar() -> None:
             on_click=_cb_toggle_settings,
             help=_tip(
                 "收起设置" if is_open else "设置与外观",
-                "收起设置面板，回到只看数据的视图。" if is_open else
-                "在这里调整：明暗模式、界面字号、AI 解析开关、OCR 识别状态、默认提醒时间。",
+                "收起设置面板，回到只看数据和日程的清爽视图。" if is_open else
+                "在这里调整：明暗模式、界面字号、AI 解析开关、OCR 识别状态。"
+                "（API Key 在上面的「🤖 AI 接口」里单独配置）",
             ),
         )
         if is_open:
             with st.container(border=True):
                 render_settings_panel()
         else:
-            # 收起时保留一行极简状态，不占地方又不至于完全看不到能力状态
+            # 收起时保留一行极简状态，不占地方又不至于完全看不到能力状态。
+            # AI 状态不在这里显示 —— 它由下面独立的「🤖 AI 接口」入口负责。
             st.caption(f"{'🌙' if _is_dark() else '☀️'} {st.session_state.ui_theme}"
                        f" · 字号 {st.session_state.ui_font}")
-            ai_ok = get_ai_config()["available"]
             ocr_name, _ = get_ocr_engine()
-            st.caption(f"{'AI 已连接' if ai_ok else 'AI 未配置'}"
-                       f" · {'OCR 就绪' if ocr_name else 'OCR 未安装'}")
+            st.caption(f"OCR {'就绪' if ocr_name else '未安装'}")
 
         # --- 学期起始周：独立入口，选第一周任意一天自动对齐周一 ---
         anchor_open = bool(st.session_state.get("anchor_open"))
@@ -9139,6 +9362,15 @@ def main() -> None:
             log(f"作息表编辑器异常: {traceback.format_exc()}")
             st.session_state.period_open = False
             st.error("作息表编辑器渲染异常，请刷新页面重试。")
+
+    # AI 接口配置：侧边栏入口 → 小弹窗填密钥
+    if st.session_state.get("ai_key_open"):
+        try:
+            _show_ai_key_dialog()
+        except Exception:  # noqa: BLE001
+            log(f"AI 接口配置弹窗异常: {traceback.format_exc()}")
+            st.session_state.ai_key_open = False
+            st.error("AI 接口配置弹窗渲染异常，请刷新页面重试。")
 
     tab1, tab2, tab3, tab4 = st.tabs(
         ["📥 录入解析", "📅 日程表", "📤 导出日历", "❓ 使用说明"]
