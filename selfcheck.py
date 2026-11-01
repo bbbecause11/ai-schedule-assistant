@@ -2060,7 +2060,8 @@ def test_feedback() -> None:
           src[src.find("_feedback_env_info"):src.find("_feedback_env_info") + 400])
 
     # ④ 降级链路：没配 SMTP 不抛异常，退回 mailto
-    ok, msg = app._send_feedback("测试", "描述", [])
+    #    （cfg 传空壳模拟「没配 secrets」——本地配了真 secrets 也不能真发信）
+    ok, msg = app._send_feedback("测试", "描述", [], cfg={})
     check("未配置 SMTP 时优雅降级（返回 False 而不是抛异常）",
           ok is False and "SMTP" in msg, msg)
     mailto = app._feedback_mailto("📷 识别错了", "测试")

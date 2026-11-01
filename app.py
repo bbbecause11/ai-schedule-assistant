@@ -105,7 +105,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.10.0"
+APP_VERSION = "2.10.1"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -8877,8 +8877,8 @@ def _build_feedback_message(
     return msg, skipped
 
 
-def _send_feedback(ftype: str, desc: str,
-                   shots: list[Any]) -> tuple[bool, str]:
+def _send_feedback(ftype: str, desc: str, shots: list[Any],
+                   cfg: dict[str, Any] | None = None) -> tuple[bool, str]:
     """
     发送反馈邮件。SMTP 配置（host/user/password）来自 st.secrets：
 
@@ -8889,8 +8889,10 @@ def _send_feedback(ftype: str, desc: str,
     password = "授权码"
 
     没配置时返回失败，弹窗会退回 mailto 方式。
+    cfg 参数供测试注入，不传则读 secrets。
     """
-    cfg = _smtp_config()
+    if cfg is None:
+        cfg = _smtp_config()
     host = str(cfg.get("host", "")).strip()
     user = str(cfg.get("user", "")).strip()
     password = str(cfg.get("password", "")).strip()
@@ -8925,7 +8927,7 @@ def _show_feedback_dialog() -> None:
                          label_visibility="collapsed")
         desc = st.text_area(
             "问题描述", key="fb_desc", height=110,
-            placeholder="比如：上传了课表截图，W9阶被识别成了9阶。越具体越好。",
+            placeholder="比如：上传了多张火车票截图，只识别出了第一张。越具体越好。",
         )
         shots = st.file_uploader(
             f"截图（最多 {_FEEDBACK_MAX_SHOTS} 张）",
