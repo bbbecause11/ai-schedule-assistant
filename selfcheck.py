@@ -1749,6 +1749,31 @@ def test_share() -> None:
           "segno 不可用时应返回 None 而不是抛异常")
 
 
+def test_version_policy() -> None:
+    """版本号：主.次.修订，按改动量决定升哪一位（不是每轮都 +0.0.1）。"""
+    section("M. 版本号规则")
+    import re
+    import app
+
+    src = open("app.py", encoding="utf-8").read()
+    readme = open("README.md", encoding="utf-8").read()
+
+    check("APP_VERSION 是 X.Y.Z 三段式",
+          re.fullmatch(r"\d+\.\d+\.\d+", app.APP_VERSION) is not None,
+          app.APP_VERSION)
+    check("README 顶部写的版本和代码一致",
+          f"当前版本 **v{app.APP_VERSION}**" in readme,
+          f"代码 {app.APP_VERSION}")
+    check("README 写明了三级规则（大版本 / 功能版本 / 小修）",
+          "大版本" in readme and "功能版本" in readme and "小修" in readme
+          and "第一位 +1" in readme and "第二位 +1" in readme and "第三位 +1" in readme)
+    check("代码里 APP_VERSION 上方有规则注释",
+          "按改动量决定升哪一位" in src[src.find("APP_VERSION") - 400: src.find("APP_VERSION")])
+    # 最近几版的规则：分享面板属于「一整块功能」→ 次版本号变 1，修订位归零
+    check("功能版本会把修订位归零（2.8.0 而不是 2.7.13 这种堆修订号）",
+          app.APP_VERSION.endswith(".0"), app.APP_VERSION)
+
+
 def main() -> int:
     print("=" * 68)
     print(" AI 智能日程收纳工具 · 自动化自查")
@@ -1761,7 +1786,8 @@ def main() -> int:
                test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_period_table, test_security, test_theme_guard,
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
                test_loading_indicator, test_chat_notices,
-               test_output_selfcheck, test_all_day, test_share):
+               test_output_selfcheck, test_all_day, test_share,
+               test_version_policy):
         try:
             fn()
         except Exception:  # noqa: BLE001
