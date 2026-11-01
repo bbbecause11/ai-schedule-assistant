@@ -1460,6 +1460,43 @@ def test_chat_notices() -> None:
     check("普通多行日程不被聊天通道劫持", len(evs) == 2, f"{len(evs)} 条")
 
 
+def test_output_selfcheck() -> None:
+    """输出前自检：日程数据 + ICS 文件，未通过必须阻断下载。"""
+    section("K2. 输出前自检（交付门禁）")
+    import app
+
+    evs = app.parse_with_rules(app.build_sample_text())
+    rep = app.validate_events(evs)
+    check("正常日程数据自检通过", rep.ok,
+          str([i.message for i in rep.errors]))
+
+    bad = app.Event("坏事件", datetime(2026, 11, 1, 10),
+                    datetime(2026, 11, 1, 9))
+    check("结束早于开始被判为错误", not app.validate_events([bad]).ok)
+
+    empty = app.Event("", datetime(2026, 11, 1, 10),
+                      datetime(2026, 11, 1, 11))
+    check("空标题被判为错误", not app.validate_events([empty]).ok)
+
+    ics = app.build_ics(evs, "测试日历", [30, 60], 16)
+    rep2 = app.validate_ics(ics, evs)
+    check("正常 ICS 自检通过", rep2.ok,
+          str([i.message for i in rep2.errors]))
+    check("ICS 每行不超过 75 字节",
+          max(len(ln.encode("utf-8")) for ln in ics.split("\r\n")) <= 75)
+    check("截断的 ICS 被判为错误",
+          not app.validate_ics(ics.replace("END:VCALENDAR", ""), evs).ok)
+
+    src = open("app.py", encoding="utf-8").read()
+    check("日程表预览前调用 validate_events",
+          "preview_report = validate_events(events)" in src)
+    check("导出前同时校验日程与 ICS",
+          "ics_report = (validate_ics(ics_text, events)" in src)
+    check("自检未通过时阻止下载",
+          "allow_download = bool(ics_text) and event_report.ok and ics_report.ok"
+          in src and "if allow_download:" in src)
+
+
 def main() -> int:
     print("=" * 68)
     print(" AI 智能日程收纳工具 · 自动化自查")
@@ -1471,7 +1508,8 @@ def main() -> int:
                test_calendar_and_sample, test_ocr,
                test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_period_table, test_security, test_theme_guard,
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
-               test_loading_indicator, test_chat_notices):
+               test_loading_indicator, test_chat_notices,
+               test_output_selfcheck):
         try:
             fn()
         except Exception:  # noqa: BLE001

@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.4"
+APP_VERSION = "2.7.5"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -5217,6 +5217,192 @@ def build_markdown(events: list[Event], default_remind: int | list[int] = 15) ->
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------------------
+# 输出前自检（交付门禁）
+# ---------------------------------------------------------------------------
+# 原则：**先自检，再交付**。
+#   · 日程表预览：先校验 events，把错误 / 风险直接标在表格上方；
+#   · .ics 下载：生成后先校验文件结构，未通过就不给下载按钮。
+# 这样用户拿到手的表格和日历文件都是「检查过」的，而不是生成完直接丢出去。
+
+@dataclass
+class CheckIssue:
+    level: str          # error = 必须修；warn = 提醒但不阻断
+    message: str
+
+
+@dataclass
+class CheckReport:
+    scope: str
+    checked: int
+    issues: list[CheckIssue] = field(default_factory=list)
+
+    @property
+    def errors(self) -> list[CheckIssue]:
+        return [i for i in self.issues if i.level == "error"]
+
+    @property
+    def warnings(self) -> list[CheckIssue]:
+        return [i for i in self.issues if i.level == "warn"]
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+def validate_events(events: list[Event]) -> CheckReport:
+    """交付前校验日程数据：字段完整性、时间合法性、UID / 重复 / 冲突。"""
+    rep = CheckReport(scope="日程数据", checked=len(events))
+    if not events:
+        rep.issues.append(CheckIssue("warn", "没有可输出的日程"))
+        return rep
+
+    seen_uid: dict[str, int] = {}
+    seen_fp: dict[tuple[str, datetime, datetime], int] = {}
+    vague = conflict = 0
+    for idx, ev in enumerate(events, 1):
+        title = str(ev.title or "").strip()
+        if not title:
+            rep.issues.append(CheckIssue("error", f"第 {idx} 条：标题为空"))
+        elif len(title) > 80:
+            rep.issues.append(CheckIssue("warn", f"第 {idx} 条：标题过长（{len(title)} 字）"))
+
+        if not isinstance(ev.start, datetime) or not isinstance(ev.end, datetime):
+            rep.issues.append(CheckIssue("error", f"第 {idx} 条：开始 / 结束不是有效时间"))
+            continue
+        if ev.end < ev.start:
+            rep.issues.append(CheckIssue("error", f"第 {idx} 条：结束时间早于开始时间"))
+        if ev.end - ev.start > timedelta(days=7):
+            rep.issues.append(CheckIssue("warn", f"第 {idx} 条：时长超过 7 天"))
+        if not (2000 <= ev.start.year <= 2100):
+            rep.issues.append(CheckIssue("warn", f"第 {idx} 条：年份异常（{ev.start.year}）"))
+
+        uid = str(ev.uid or "").strip()
+        if not uid:
+            rep.issues.append(CheckIssue("error", f"第 {idx} 条：UID 为空"))
+        elif uid in seen_uid:
+            rep.issues.append(CheckIssue(
+                "error", f"第 {idx} 条：UID 与第 {seen_uid[uid]} 条重复"))
+        else:
+            seen_uid[uid] = idx
+
+        fp = (title, ev.start, ev.end)
+        if fp in seen_fp:
+            rep.issues.append(CheckIssue(
+                "warn", f"第 {idx} 条：与第 {seen_fp[fp]} 条完全重复"))
+        else:
+            seen_fp[fp] = idx
+
+        if len(str(ev.location or "")) > 80:
+            rep.issues.append(CheckIssue("warn", f"第 {idx} 条：地点过长"))
+        if ev.rrule and not str(ev.rrule).strip().upper().startswith("FREQ="):
+            rep.issues.append(CheckIssue("error", f"第 {idx} 条：重复规则格式不合法"))
+
+        vague += int(bool(ev.vague))
+        conflict += int(bool(ev.conflict))
+
+    if vague:
+        rep.issues.append(CheckIssue("warn", f"{vague} 条时间待人工核对"))
+    if conflict:
+        rep.issues.append(CheckIssue("warn", f"{conflict} 条存在时间冲突"))
+    return rep
+
+
+_ICS_LINE_MAX = 75
+_ICS_DT_RE = re.compile(r"\d{8}T\d{6}Z?")
+
+
+def validate_ics(ics_text: str, events: list[Event]) -> CheckReport:
+    """交付前校验 .ics：头尾、事件数、必需字段、UID、时间、VALARM、折行。"""
+    rep = CheckReport(scope="ICS 文件", checked=len(events))
+    if not ics_text:
+        rep.issues.append(CheckIssue("error", "ICS 内容为空"))
+        return rep
+    if not ics_text.startswith("BEGIN:VCALENDAR"):
+        rep.issues.append(CheckIssue("error", "缺少 BEGIN:VCALENDAR"))
+    if "END:VCALENDAR" not in ics_text:
+        rep.issues.append(CheckIssue("error", "缺少 END:VCALENDAR（文件被截断）"))
+    if "\r\n" not in ics_text:
+        rep.issues.append(CheckIssue("error", "未使用 CRLF 换行（RFC 5545）"))
+
+    raw_lines = ics_text.split("\r\n")
+    if any(len(ln.encode("utf-8")) > _ICS_LINE_MAX for ln in raw_lines):
+        rep.issues.append(CheckIssue(
+            "error", f"存在超过 {_ICS_LINE_MAX} 字节的长行（未折行）"))
+
+    n_begin = sum(1 for ln in raw_lines if ln == "BEGIN:VEVENT")
+    n_end = sum(1 for ln in raw_lines if ln == "END:VEVENT")
+    if n_begin != n_end:
+        rep.issues.append(CheckIssue("error", f"VEVENT 数量不配对：{n_begin} 个开始 / {n_end} 个结束"))
+    if n_begin != len(events):
+        rep.issues.append(CheckIssue(
+            "error", f"事件数与日程数不一致：ICS {n_begin} 条 / 日程 {len(events)} 条"))
+
+    unfolded = ics_text.replace("\r\n ", "").replace("\r\n\t", "")
+    blocks = re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", unfolded, re.S)
+    uids: set[str] = set()
+    for idx, block in enumerate(blocks, 1):
+        for field_name in ("UID", "DTSTAMP", "DTSTART", "DTEND", "SUMMARY"):
+            if f"{field_name}:" not in block:
+                rep.issues.append(CheckIssue(
+                    "error", f"第 {idx} 个事件缺少 {field_name}"))
+        m = re.search(r"UID:([^\r\n]+)", block)
+        if m:
+            uid = m.group(1).strip()
+            if uid in uids:
+                rep.issues.append(CheckIssue(
+                    "error", f"第 {idx} 个事件：UID 重复（{uid[:24]}）"))
+            uids.add(uid)
+        ds = re.search(r"DTSTART:([^\r\n]+)", block)
+        de = re.search(r"DTEND:([^\r\n]+)", block)
+        if ds and de and _ICS_DT_RE.match(ds.group(1)) and _ICS_DT_RE.match(de.group(1)):
+            if de.group(1) < ds.group(1):
+                rep.issues.append(CheckIssue(
+                    "error", f"第 {idx} 个事件：DTEND 早于 DTSTART"))
+        if block.count("BEGIN:VALARM") != block.count("END:VALARM"):
+            rep.issues.append(CheckIssue("error", f"第 {idx} 个事件：VALARM 未闭合"))
+        for alarm in re.findall(r"BEGIN:VALARM(.*?)END:VALARM", block, re.S):
+            if "ACTION:DISPLAY" not in alarm:
+                rep.issues.append(CheckIssue("error", f"第 {idx} 个事件：VALARM 缺少 ACTION"))
+            if not re.search(r"TRIGGER:-P[0-9A-Z]+", alarm):
+                rep.issues.append(CheckIssue("error", f"第 {idx} 个事件：VALARM 的 TRIGGER 不合法"))
+        rrule = re.search(r"RRULE:([^\r\n]+)", block)
+        if rrule and not rrule.group(1).startswith("FREQ="):
+            rep.issues.append(CheckIssue(
+                "error", f"第 {idx} 个事件：RRULE 不是 FREQ= 开头"))
+    return rep
+
+
+def _render_check_report(report: CheckReport, title: str,
+                         show_expander: bool = True) -> None:
+    """把自检结果画成一条状态条 + 可展开的明细。"""
+    n_err, n_warn = len(report.errors), len(report.warnings)
+    if report.ok and not n_warn:
+        _html(
+            f'<div class="notice notice-ok" style="margin:10px 0;">'
+            f'🛡️ <b>{title}自检通过</b>：{report.checked} 条，字段完整、时间有效。</div>'
+        )
+        return
+    if report.ok:
+        _html(
+            f'<div class="notice notice-warn" style="margin:10px 0;">'
+            f'🛡️ <b>{title}自检通过</b>（{n_warn} 条提醒）：{report.checked} 条，'
+            f'可继续交付，建议看一下提醒项。</div>'
+        )
+    else:
+        _html(
+            f'<div class="notice notice-bad" style="margin:10px 0;">'
+            f'🛡️ <b>{title}自检未通过</b>：{n_err} 个错误、{n_warn} 个提醒。'
+            f'修正前不会交付。</div>'
+        )
+    if show_expander:
+        with st.expander(f"查看「{title}」自检明细", expanded=not report.ok):
+            for issue in report.errors:
+                st.markdown(f"- ❌ {issue.message}")
+            for issue in report.warnings:
+                st.markdown(f"- ⚠️ {issue.message}")
+
+
 def events_to_dataframe(events: list[Event]) -> pd.DataFrame:
     """把 Event 列表转成 data_editor 可用的 DataFrame。"""
     columns = ["uid", "标题", "开始", "结束", "地点", "优先级", "备注",
@@ -9497,6 +9683,10 @@ def render_schedule_tab() -> None:
                "「重复」列为只读展示，要调整请用下方「重复设置」面板。"
                "🔴 红色=时间冲突　🟡 黄色=时间待核对")
 
+    # 预览交付前先自检：字段缺失 / 时间倒挂 / UID 重复先在这里拦下
+    preview_report = validate_events(events)
+    _render_check_report(preview_report, "日程表预览")
+
     df = events_to_dataframe(events)
 
     editor_cols = {
@@ -9687,6 +9877,10 @@ def render_export_tab() -> None:
         '</div>'
     )
 
+    # --- 输出前自检：先查日程数据，再查生成的 ICS ---
+    event_report = validate_events(events)
+    _render_check_report(event_report, "日程数据")
+
     # --- 生成三种格式 ---
     ics_error = ""
     ics_text = ""
@@ -9699,6 +9893,14 @@ def render_export_tab() -> None:
     except Exception:  # noqa: BLE001
         log(f"ICS 生成失败: {traceback.format_exc()}")
         ics_error = "日历文件生成失败，请尝试减少日程数量后重试。"
+
+    ics_report = (validate_ics(ics_text, events) if ics_text
+                  else CheckReport("ICS 文件", len(events),
+                                   [CheckIssue("error", ics_error or "ICS 生成失败")]))
+    _render_check_report(ics_report, "ICS 文件")
+    allow_download = bool(ics_text) and event_report.ok and ics_report.ok
+    if not allow_download:
+        st.error("导出前自检未通过，已阻止下载。请按上方「自检明细」修正后重试。")
 
     try:
         csv_bytes = build_csv(events, default_remind)
@@ -9714,7 +9916,7 @@ def render_export_tab() -> None:
     dl1, dl2, dl3 = st.columns(3)
 
     with dl1:
-        if ics_text:
+        if allow_download:
             st.download_button(
                 "📅 下载 .ics 日历",
                 data=ics_text.encode("utf-8"),
@@ -9729,7 +9931,7 @@ def render_export_tab() -> None:
         else:
             st.error(ics_error or "ICS 生成失败")
     with dl2:
-        if csv_bytes:
+        if allow_download and csv_bytes:
             st.download_button(
                 "📊 下载 CSV 表格",
                 data=csv_bytes,
@@ -9741,7 +9943,7 @@ def render_export_tab() -> None:
                           "用 Excel / WPS 直接打开不会乱码。"),
             )
     with dl3:
-        if md_text:
+        if allow_download and md_text:
             st.download_button(
                 "📝 下载 Markdown",
                 data=md_text.encode("utf-8"),
@@ -9752,8 +9954,8 @@ def render_export_tab() -> None:
                           "按日期分组的纯文本表格，适合贴进笔记、文档或提交材料里。"),
             )
 
-    # --- 预览 ---
-    if ics_text:
+    # --- 预览（只展示通过自检的文件）---
+    if ics_text and ics_report.ok:
         with st.expander("👀 预览 .ics 文件内容"):
             st.code(ics_text[:3000] + ("\n…" if len(ics_text) > 3000 else ""), language="text")
         with st.expander("📝 预览 Markdown 日程表"):
