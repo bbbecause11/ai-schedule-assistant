@@ -2143,6 +2143,10 @@ def test_layout_optimizations() -> None:
     check("弹出动画用 keyframes 位移（GPU 合成，不触发逐帧重排）",
           "@keyframes sidebar-slide-in" in src
           and "animation: sidebar-slide-in .3s var(--ease-out) both;" in src)
+    check("展开态钉死 Streamlit 原生过渡与位移（否则两股动画叠加会抽搐）",
+          "transition: none !important;" in src
+          and "margin: 0 !important;" in src
+          and "translate: none !important;" in src)
     # 隐藏规则必须只在手机端媒体查询里：桌面端侧边栏是钉在左侧的，不遮按钮
     media_pos = src.rfind("@media (max-width: 640px)", 0, src.find(".st-key-fb_fab"))
     close_pos = src.find("\n}", src.find("stSidebarCollapseButton"))

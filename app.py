@@ -105,7 +105,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.10.6"
+APP_VERSION = "2.10.7"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7275,6 +7275,13 @@ section[role="dialog"] {
         box-sizing: border-box;
         animation: sidebar-slide-in .3s var(--ease-out) both;
         will-change: transform;
+        /* 关键：把 Streamlit 自己会动的属性全部钉死。它的展开过渡
+           （margin-left / translate / width 等）和我们的滑入动画叠加时，
+           元素等于被两股力同时拖动 —— 就是「抽搐一下」。这里让画面上
+           只剩 keyframes 这一个动画。 */
+        transition: none !important;
+        margin: 0 !important;
+        translate: none !important;
     }
     @keyframes sidebar-slide-in {
         from { transform: translateX(-110%); }
