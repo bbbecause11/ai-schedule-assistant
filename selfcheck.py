@@ -2013,6 +2013,81 @@ def test_share() -> None:
           "segno 不可用时应返回 None 而不是抛异常")
 
 
+def test_feedback() -> None:
+    """问题反馈：右上角胶囊按钮 → 弹窗（类型/描述/截图）→ 发到开发者邮箱。"""
+    section("L2. 问题反馈")
+    import app
+
+    src = open("app.py", encoding="utf-8").read()
+
+    # ① 按钮与位置
+    check("按钮文案是「有问题？点我反馈」", '"有问题？点我反馈"' in src)
+    check("反馈按钮在 main 里渲染且先于分享按钮",
+          "_render_feedback_button()\n    _render_share_button()" in src)
+    check("反馈按钮固定在分享按钮左侧（right 3.3rem > 分享的 .7rem）",
+          ".st-key-fb_fab {" in src and "right: 3.3rem;" in src
+          and "top: .55rem;" in src[src.find(".st-key-fb_fab {"):
+                                    src.find(".st-key-fb_fab {") + 120])
+    check("云端有 ⋮ 菜单时反馈按钮跟着分享按钮让位",
+          'body:has([data-testid="stMainMenu"] button) .st-key-fb_fab { right: 5.8rem; }' in src)
+    check("窄屏收紧字号（≤380px）", "@media (max-width: 380px)" in src
+          and ".st-key-fb_fab button" in src[src.find("@media (max-width: 380px)"):
+                                             src.find("@media (max-width: 380px)") + 200])
+
+    # ② 弹窗内容：类型 / 描述 / 截图
+    types = app._FEEDBACK_TYPES
+    check("错误类型 5~8 个且每个 ≤24 字",
+          5 <= len(types) <= 8 and all(len(t) <= 24 for t in types),
+          f"{len(types)} 个，最长 {max(len(t) for t in types)} 字")
+    check("类型覆盖历届修 bug 的高频类别",
+          all(any(kw in t for t in types)
+              for kw in ("识别错", "漏", "截图", "界面", "导出")))
+    check("截图可多选且限 3 张、只收图片",
+          "accept_multiple_files=True" in src and "_FEEDBACK_MAX_SHOTS = 3" in src
+          and '"png", "jpg", "jpeg", "webp"' in src)
+    check("截图张数在弹窗里也截断（防伪造请求）",
+          "(shots or [])[:_FEEDBACK_MAX_SHOTS]" in src)
+
+    # ③ 邮件
+    check("收件邮箱是 bbbecause11@outlook.com",
+          app._FEEDBACK_TO == "bbbecause11@outlook.com", app._FEEDBACK_TO)
+    fb_src = src[src.find("def _smtp_config"):src.find("@st.dialog(\"📮 问题反馈\"")]
+    check("SMTP 密码从 secrets 读取而非硬编码",
+          'st.secrets.get("smtp"' in src
+          and 'password = str(cfg.get("password"' in fb_src)
+    check("邮件带环境信息（版本号，方便对版本定位）",
+          f"应用版本：v{app.APP_VERSION}" in src or "APP_VERSION" in
+          src[src.find("_feedback_env_info"):src.find("_feedback_env_info") + 400])
+
+    # ④ 降级链路：没配 SMTP 不抛异常，退回 mailto
+    ok, msg = app._send_feedback("测试", "描述", [])
+    check("未配置 SMTP 时优雅降级（返回 False 而不是抛异常）",
+          ok is False and "SMTP" in msg, msg)
+    mailto = app._feedback_mailto("📷 识别错了", "测试")
+    check("mailto 兜底链接指向收件邮箱",
+          mailto.startswith(f"mailto:{app._FEEDBACK_TO}?subject="), mailto[:50])
+
+    # ⑤ 邮件组装：附件、正文、超大截图跳过（不发真邮件，纯本地组装）
+    class _Shot:
+        def __init__(self, name, size):
+            self.name = name
+            self._d = b"\x89PNG" * size
+        def getvalue(self):
+            return self._d
+    cfg = {"host": "x", "user": "a@b.c", "to": app._FEEDBACK_TO}
+    m, skipped = app._build_feedback_message(
+        cfg, "📷 识别错了", "测试描述",
+        [_Shot("ok.png", 10), _Shot("big.png", 1024 * 1024 + 10)])
+    atts = list(m.iter_attachments())
+    check("正文先写、附件后挂（顺序反了会抛 TypeError）",
+          m.get_body() is not None and len(atts) == 1
+          and atts[0].get_filename() == "ok.png")
+    check("超过 4MB 的截图自动跳过并在正文注明",
+          skipped == ["big.png"] and "big.png" in m.get_body().get_content())
+    check("正文带应用版本号",
+          f"应用版本：v{app.APP_VERSION}" in m.get_body().get_content())
+
+
 def test_layout_optimizations() -> None:
     """布局优化：顶部不再被注入块白吃 80px；手机端 Hero / 指标卡收紧。"""
     section("N. 布局优化（首屏空间）")
@@ -2099,7 +2174,7 @@ def main() -> int:
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
                test_loading_indicator, test_chat_notices,
                test_output_selfcheck, test_all_day, test_share,
-               test_version_policy,
+               test_feedback, test_version_policy,
                test_layout_optimizations):
         try:
             fn()

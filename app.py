@@ -32,12 +32,14 @@ import io
 import json
 import os
 import re
+import smtplib
 import time
 import traceback
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dt_time
+from email.message import EmailMessage
 from functools import lru_cache
 from typing import Any, Iterable
 from urllib.parse import quote as _url_quote, urlencode as _url_encode
@@ -103,7 +105,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.9.7"
+APP_VERSION = "2.10.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -8206,6 +8208,43 @@ body:has([data-testid="stMainMenu"] button) .st-key-share_fab { right: 3.2rem; }
     -webkit-mask: url("__SHARE_ICON__") center / contain no-repeat;
     mask: url("__SHARE_ICON__") center / contain no-repeat;
 }
+
+/* ---------- 右上角「问题反馈」胶囊按钮 ----------
+   固定在分享按钮左边：分享按钮宽 2.15rem、right .7rem，
+   这里 right = .7 + 2.15 + .45(间距) ≈ 3.3rem。 */
+.st-key-fb_fab {
+    position: fixed;
+    top: .55rem;
+    right: 3.3rem;
+    z-index: 1000002;
+    width: auto !important;
+}
+/* 云端有原生 ⋮ 菜单时分享按钮让位到 3.2rem，反馈按钮跟着挪 */
+body:has([data-testid="stMainMenu"] button) .st-key-fb_fab { right: 5.8rem; }
+.st-key-fb_fab button {
+    height: 2.15rem !important;
+    min-height: 0 !important;
+    padding: 0 .72rem !important;
+    border-radius: 999px;
+    background: var(--card-bg) !important;
+    border: 1px solid var(--card-border) !important;
+    box-shadow: var(--card-shadow) !important;
+    color: var(--ink) !important;
+    font-size: .74rem !important;
+    white-space: nowrap;
+    transition: transform .15s ease, box-shadow .15s ease;
+}
+.st-key-fb_fab button:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--pop-shadow) !important;
+}
+/* 窄屏略收紧，避免和标题打架 */
+@media (max-width: 380px) {
+    .st-key-fb_fab button { font-size: .66rem !important; padding: 0 .5rem !important; }
+}
+/* 反馈弹窗：截图缩略图别顶满宽，按钮行不换行 */
+.st-key-fb_body [data-testid="stElementToolbar"] { display: none !important; }
+.st-key-fb_body [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; }
 /* 分享面板里的二维码不需要「全屏 / 下载」那条悬浮工具条：
    Streamlit 悬停图片时会塞一个 stElementToolbar，二维码这种图它连按钮都没有，
    只剩一个空的小圆角框，看着像无意义的空气泡。 */
@@ -8747,6 +8786,170 @@ def _show_share_dialog() -> None:
                 st.toast("链接已复制，去粘给好友吧")
 
         st.caption("QQ / 微博在新标签页打开；微信可扫码或复制链接。")
+
+
+# ---------------------------------------------------------------------------
+# 10.5 问题反馈（右上角胶囊按钮 → 弹窗 → 发到开发者邮箱）
+# ---------------------------------------------------------------------------
+
+# 错误类型来自历届修 bug 的高频类别（识别错 / 漏多 / 新版式 / 界面 / 数据 / 导出）
+_FEEDBACK_TYPES = [
+    "📷 识别错了（文字 / 地点 / 时间）",
+    "➕ 日程多了、漏了或重复",
+    "🧾 这类截图不认识（票据 / 课表）",
+    "🖥️ 界面显示问题（错位 / 遮挡）",
+    "📅 日程数据问题（提醒 / 全天 / 重复）",
+    "⬇️ 导出问题（导入日历后不对）",
+    "💡 功能建议 / 其他",
+]
+# 收件邮箱；SMTP 账号密码不进代码，从 st.secrets 的 ["smtp"] 读
+_FEEDBACK_TO = "bbbecause11@outlook.com"
+_FEEDBACK_MAX_SHOTS = 3          # 最多传几张截图
+_FEEDBACK_MAX_SHOT_MB = 4        # 单张截图上限（超出的跳过并在邮件里注明）
+
+_IMAGE_SUBTYPE = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}
+
+
+def _render_feedback_button() -> None:
+    """「有问题？点我反馈」胶囊按钮，固定在分享按钮左边。"""
+    with st.container(key="fb_fab"):
+        if st.button("有问题？点我反馈", key="fb_open"):
+            _show_feedback_dialog()
+
+
+def _smtp_config() -> dict[str, Any]:
+    """读 secrets 里的 SMTP 配置；没配置就返回只带收件人的空壳。"""
+    cfg: dict[str, Any] = {}
+    try:
+        cfg = dict(st.secrets.get("smtp", {}))  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - 本地无 secrets.toml 属预期
+        pass
+    cfg.setdefault("to", _FEEDBACK_TO)
+    return cfg
+
+
+def _feedback_env_info() -> str:
+    """附在反馈末尾的环境信息，方便对着版本号定位问题。"""
+    agent = ""
+    try:
+        agent = str(st.context.headers.get("User-Agent", ""))[:160]
+    except Exception:  # noqa: BLE001 - 旧版本 / 无会话上下文
+        pass
+    return f"应用版本：v{APP_VERSION}\n提交时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n设备：{agent or '未知'}"
+
+
+def _feedback_mailto(ftype: str, desc: str) -> str:
+    """没配 SMTP 时的退路：唤起访客自己的邮件应用（截图需手动附上）。"""
+    return "mailto:{}?{}".format(
+        _FEEDBACK_TO,
+        _url_encode({"subject": f"【问题反馈】{ftype}",
+                     "body": f"{desc.strip()}\n\n{_feedback_env_info()}"}),
+    )
+
+
+def _build_feedback_message(
+        cfg: dict[str, Any], ftype: str, desc: str,
+        shots: list[Any]) -> tuple[EmailMessage, list[str]]:
+    """组装反馈邮件：类型 + 描述 + 环境信息 + 截图附件。返回 (邮件, 被跳过的截图说明)。"""
+    msg = EmailMessage()
+    sender = str(cfg.get("user", ""))
+    msg["From"] = sender
+    msg["To"] = str(cfg.get("to", _FEEDBACK_TO))
+    msg["Subject"] = f"【问题反馈】{ftype}"
+    body = f"{desc.strip()}\n\n—— 环境信息 ——\n{_feedback_env_info()}"
+    skipped: list[str] = []
+    accepted: list[tuple[str, bytes, str]] = []   # (文件名, 数据, 图片子类型)
+    for i, shot in enumerate(shots[:_FEEDBACK_MAX_SHOTS], 1):
+        name = getattr(shot, "name", "") or f"截图{i}.png"
+        data = shot.getvalue() if hasattr(shot, "getvalue") else shot.read()
+        if len(data) > _FEEDBACK_MAX_SHOT_MB * 1024 * 1024:
+            skipped.append(name)
+            continue
+        subtype = _IMAGE_SUBTYPE.get(name.rsplit(".", 1)[-1].lower(), "png")
+        accepted.append((name, data, subtype))
+    if skipped:
+        body += "\n\n（以下截图过大未附上：" + "、".join(skipped) + "）"
+    # 正文必须在加附件之前写：add_attachment 之后消息已变 multipart，
+    # 再 set_content 会抛 TypeError
+    msg.set_content(body)
+    for name, data, subtype in accepted:
+        msg.add_attachment(data, maintype="image", subtype=subtype, filename=name)
+    return msg, skipped
+
+
+def _send_feedback(ftype: str, desc: str,
+                   shots: list[Any]) -> tuple[bool, str]:
+    """
+    发送反馈邮件。SMTP 配置（host/user/password）来自 st.secrets：
+
+    [smtp]
+    host = "smtp-mail.outlook.com"   # 也可换成 QQ / 163 / Gmail 的 SMTP
+    port = 587
+    user = "发件邮箱"
+    password = "授权码"
+
+    没配置时返回失败，弹窗会退回 mailto 方式。
+    """
+    cfg = _smtp_config()
+    host = str(cfg.get("host", "")).strip()
+    user = str(cfg.get("user", "")).strip()
+    password = str(cfg.get("password", "")).strip()
+    if not (host and user and password):
+        return False, "未配置 SMTP（st.secrets 的 [smtp] 段）"
+    try:
+        msg, _ = _build_feedback_message(cfg, ftype, desc, shots)
+        port = int(cfg.get("port", 587))
+        use_tls = bool(cfg.get("use_tls", True))
+        if use_tls:
+            with smtplib.SMTP(host, port, timeout=20) as srv:
+                srv.ehlo()
+                srv.starttls()
+                srv.login(user, password)
+                srv.send_message(msg)
+        else:
+            with smtplib.SMTP_SSL(host, port, timeout=20) as srv:
+                srv.login(user, password)
+                srv.send_message(msg)
+        return True, "已发送"
+    except Exception:  # noqa: BLE001 - 发信失败要给用户看得懂的提示
+        log(f"反馈邮件发送失败: {traceback.format_exc()}")
+        return False, "发送失败（网络或账号授权问题）"
+
+
+@st.dialog("📮 问题反馈", width="small")
+def _show_feedback_dialog() -> None:
+    """反馈弹窗：选类型 → 写描述 → 传截图 → 发到开发者邮箱。"""
+    with st.container(key="fb_body"):
+        st.caption("选个类型、写两句、传几张截图，会直接发到开发者的邮箱。")
+        ftype = st.radio("问题类型", _FEEDBACK_TYPES, key="fb_type",
+                         label_visibility="collapsed")
+        desc = st.text_area(
+            "问题描述", key="fb_desc", height=110,
+            placeholder="比如：上传了课表截图，W9阶被识别成了9阶。越具体越好。",
+        )
+        shots = st.file_uploader(
+            f"截图（最多 {_FEEDBACK_MAX_SHOTS} 张）",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True, key="fb_shots",
+        )
+        shots = (shots or [])[:_FEEDBACK_MAX_SHOTS]
+        if st.button("发送反馈", type="primary", width="stretch", key="fb_send"):
+            if not desc.strip():
+                st.warning("先写两句描述吧，光选类型我没法定位问题。")
+                return
+            ok, msg = _send_feedback(ftype, desc, shots)
+            if ok:
+                st.session_state.pending_toast = "反馈已发送，谢谢你！🙏"
+                return                                  # 返回即关闭弹窗
+            # SMTP 没配或发失败：退回 mailto，让访客用自己的邮件应用发
+            st.warning("自动发送没成功，改用你的邮件应用发送（截图请手动附上）：")
+            st.link_button("📧 打开邮件应用发送",
+                           _feedback_mailto(ftype, desc), width="stretch")
+            st.caption(f"收件邮箱：{_FEEDBACK_TO}（也可复制下面的内容发过去）")
+            st.text_area("复制反馈内容",
+                         value=f"【问题反馈】{ftype}\n{desc.strip()}\n\n"
+                               f"{_feedback_env_info()}",
+                         height=130, key="fb_copy")
 
 
 # ---------------------------------------------------------------------------
@@ -11285,7 +11488,8 @@ def main() -> None:
     _inject_css()
     # 手机浏览器状态栏 / 底部工具栏跟随主题（否则深色下上下是白边）
     _inject_theme_color()
-    # 右上角常驻的分享按钮（原生 Share 已在 CSS 里隐藏）
+    # 右上角常驻的「问题反馈」胶囊 + 分享按钮（原生 Share 已在 CSS 里隐藏）
+    _render_feedback_button()
     _render_share_button()
 
     _html(
