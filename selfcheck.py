@@ -1287,6 +1287,12 @@ def test_ai_key_dialog() -> None:
     check("多选提醒导出到 CSV 时用「+」连接",
           "remind_text = _remind_labels(default_remind)" in src)
 
+    # ⑫ 手机浏览器状态栏 / 底部工具栏颜色跟随主题
+    check("手机状态栏颜色跟随主题（theme-color）",
+          "def _inject_theme_color" in src
+          and "s('theme-color'" in src
+          and "_inject_theme_color()" in src)
+
 
 def test_placeholder_style() -> None:
     """占位符颜色：必须同时压 color 和 -webkit-text-fill-color。

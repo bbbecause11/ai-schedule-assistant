@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.2"
+APP_VERSION = "2.7.3"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7074,6 +7074,33 @@ def _inject_css() -> None:
 
 
 
+def _inject_theme_color() -> None:
+    """把手机浏览器状态栏 / 地址栏的颜色同步成当前主题底色。
+
+    Streamlit 的 index.html 里没有 <meta name="theme-color">，
+    手机 Chrome / Safari 会默认用白色涂状态栏和底部工具栏，
+    深色主题下就会在屏幕上下各露出一条白边。
+
+    用 st.html(unsafe_allow_javascript=True) 直接在当前页面里执行脚本，
+    往 <head> 补一个 meta。每次 rerun 都带着当前主题色重设一次，
+    切换明暗主题即时生效。
+    """
+    color = _token("body-bg")
+    dark = _is_dark()
+    script = (
+        "<script>(function(){"
+        "var d=document;"
+        "function s(n,c){var m=d.querySelector('meta[name=\"'+n+'\"]');"
+        "if(!m){m=d.createElement('meta');m.setAttribute('name',n);"
+        "d.head.appendChild(m)}m.setAttribute('content',c)}"
+        "s('theme-color','" + color + "');"
+        "s('apple-mobile-web-app-status-bar-style','"
+        + ("black-translucent" if dark else "default") + "');"
+        "})();</script>"
+    )
+    st.html(script, unsafe_allow_javascript=True)
+
+
 def _html(html: str) -> None:
     """
     渲染**纯静态** HTML 片段。
@@ -9767,6 +9794,8 @@ def main() -> None:
     # 先初始化会话状态，_inject_css 才能读到用户选的明暗 / 字号
     init_state()
     _inject_css()
+    # 手机浏览器状态栏 / 底部工具栏跟随主题（否则深色下上下是白边）
+    _inject_theme_color()
 
     _html(
         '<div class="hero">'
