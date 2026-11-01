@@ -99,7 +99,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.12"
+APP_VERSION = "2.7.13"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7526,10 +7526,14 @@ div:has(> [role="tooltip"]) {
 .st-key-share_fab {
     position: fixed;
     top: .55rem;
-    right: 3.1rem;
+    /* 默认贴到最右边（原生 Share 已经被藏掉，那儿是空的） */
+    right: .7rem;
     z-index: 1000002;
     width: auto !important;
 }
+/* 但云端页面右上角还留着原生的「⋮」菜单，那种情况下分享按钮得让位，
+   否则两个图标会叠在一起。用 :has 判断菜单在不在，自动二选一。 */
+body:has([data-testid="stMainMenu"] button) .st-key-share_fab { right: 3.2rem; }
 .st-key-share_fab [data-testid="stButton"] { width: auto !important; }
 .st-key-share_fab button {
     width: 2.15rem !important; height: 2.15rem !important;
@@ -7980,9 +7984,11 @@ def _tip(name: str, desc: str) -> str:
 #     手机上点「复制链接」再粘给好友也一样顺手。
 
 # 弯曲箭头（微信 / QQ「转发」那种）：一条弧线尾巴 + 一个箭头
+# 必须显式写 width/height：SVG 没有内在尺寸时，Chrome 会按 300×150 处理，
+# 当 mask 用就会被拉偏、图标不在正中间。
 _SHARE_ICON_SVG = (
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
-    "stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'>"
+    "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' "
+    "fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'>"
     "<path d='M4.6 19.4c0-7.3 4.9-11.3 13.1-11.3'/>"
     "<path d='M12.6 3.3 18.1 8.3l-5.5 5'/></svg>"
 )

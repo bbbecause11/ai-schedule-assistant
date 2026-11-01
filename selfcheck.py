@@ -1687,6 +1687,11 @@ def test_share() -> None:
     check("自定义分享按钮固定在上层（右上角）",
           ".st-key-share_fab {" in src and "position: fixed" in
           src[src.find(".st-key-share_fab {"):src.find(".st-key-share_fab {") + 200])
+    fab_css = src[src.find(".st-key-share_fab {"):src.find(".st-key-share_fab {") + 700]
+    check("分享按钮默认贴最右边（right 不超过 1rem）",
+          "right: .7rem" in fab_css, fab_css[:120])
+    check("云端有原生 ⋮ 菜单时自动让位（否则两个图标会叠）",
+          'body:has([data-testid="stMainMenu"] button) .st-key-share_fab { right: 3.2rem; }' in src)
     check("分享按钮在 main 里渲染",
           "_render_share_button()" in src and src.count("_render_share_button") >= 2)
 
