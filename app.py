@@ -105,7 +105,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.10.5"
+APP_VERSION = "2.10.6"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7257,12 +7257,13 @@ section[role="dialog"] {
         box-shadow: var(--drawer-shadow);
     }
     /* Streamlit 移动端侧边栏是 position:relative 的 flex 子项，会占掉
-       300px 把主内容挤成一条窄缝。这里改成 fixed 浮层，主内容恢复全宽，
-       侧边栏盖在上面。宽度**一次到位**（min(85vw, 21rem)）：Streamlit
-       原生的弹出动画是过渡 width，展开过程中文字不断重排（两行变一行）、
-       按钮往上跳。固定宽度后内容不再重排，动画改用位移（transform），
-       只走 GPU 合成不触发 reflow，弹出丝滑。 */
-    [data-testid="stSidebar"] {
+       300px 把主内容挤成一条窄缝。展开态改成 fixed 浮层，主内容恢复全宽。
+       ⚠️ 布局覆盖只在**展开态**生效（data-collapsed="false"）：v2.10.5 曾
+       无条件强制宽度，和 Streamlit 收起态自己的样式打架，侧边栏被压成
+       一条细缝、文字竖排溢出。收起态完全交给 Streamlit。
+       弹出动画用 keyframes 位移：宽度一次到位、内容零重排，只走 GPU 合成，
+       不会再出现「文字两行变一行、按钮往上跳」。 */
+    .stApp:has([data-testid="stSidebar"][data-collapsed="false"]) [data-testid="stSidebar"] {
         position: fixed !important;
         top: 0 !important;
         left: 0 !important;
@@ -7272,16 +7273,12 @@ section[role="dialog"] {
         min-width: 0 !important;
         z-index: 999992 !important;
         box-sizing: border-box;
-        transform: translateX(0) !important;
-        transition: transform .3s var(--ease-out) !important;
+        animation: sidebar-slide-in .3s var(--ease-out) both;
         will-change: transform;
     }
-    /* 收起：整块滑出屏幕左侧（宽度不变，内容零重排）。
-       Streamlit 收起时多半直接 display:none，看不到退出动画也无妨；
-       若它只是把宽度收成 0，这条也能保证是平滑滑出而非挤压。 */
-    .stApp [data-testid="stSidebar"][data-collapsed="true"] {
-        transform: translateX(-110%) !important;
-        pointer-events: none;
+    @keyframes sidebar-slide-in {
+        from { transform: translateX(-110%); }
+        to { transform: translateX(0); }
     }
     /* 侧边栏浮起时给主区域压一层暗色遮罩，视觉上区分前后层级。
        遮罩不拦截点击：Streamlit 没有「外部点击收起侧边栏」的 API，
