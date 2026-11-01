@@ -105,7 +105,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.10.3"
+APP_VERSION = "2.10.4"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7289,6 +7289,13 @@ section[role="dialog"] {
     [data-testid="stSidebarCollapseButton"] {
         position: relative;
         z-index: 2;
+    }
+    /* 侧边栏浮层展开时，右上角的反馈/分享浮动按钮（z-index 1000002）
+       会压住侧边栏的 « 收起按钮（侧边栏只有 999992）——整个隐藏让位，
+       收起侧边栏后自动恢复。 */
+    .stApp:has([data-testid="stSidebar"][data-collapsed="false"]) .st-key-fb_fab,
+    .stApp:has([data-testid="stSidebar"][data-collapsed="false"]) .st-key-share_fab {
+        display: none !important;
     }
 }
 </style>

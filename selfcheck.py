@@ -1948,10 +1948,14 @@ def test_share() -> None:
           '[data-testid="stAppDeployButton"],' in src
           and "display: none !important;" in src,
           "原生 Share 的内容写死，改不了，只能藏")
+    # src 里 `.st-key-share_fab {` 有多处（手机端侧边栏展开时还有一条隐藏规则），
+    # 定义块要找带 position: fixed 的那处
+    import re as _re
+    fab_pos = next(p for p in _re.finditer(r"\.st-key-share_fab \{", src)
+                   if "position: fixed" in src[p.start():p.start() + 200]).start()
     check("自定义分享按钮固定在上层（右上角）",
-          ".st-key-share_fab {" in src and "position: fixed" in
-          src[src.find(".st-key-share_fab {"):src.find(".st-key-share_fab {") + 200])
-    fab_css = src[src.find(".st-key-share_fab {"):src.find(".st-key-share_fab {") + 700]
+          "position: fixed" in src[fab_pos:fab_pos + 200], src[fab_pos:fab_pos + 120])
+    fab_css = src[fab_pos:fab_pos + 700]
     check("分享按钮默认贴最右边（right 不超过 1rem）",
           "right: .7rem" in fab_css, fab_css[:120])
     check("云端有原生 ⋮ 菜单时自动让位（否则两个图标会叠）",
@@ -2030,6 +2034,15 @@ def test_feedback() -> None:
                                     src.find(".st-key-fb_fab {") + 120])
     check("云端有 ⋮ 菜单时反馈按钮跟着分享按钮让位",
           'body:has([data-testid="stMainMenu"] button) .st-key-fb_fab { right: 5.8rem; }' in src)
+    check("手机端侧边栏浮层展开时隐藏两个浮动按钮（否则压住侧边栏的收起按钮）",
+          '.stApp:has([data-testid="stSidebar"][data-collapsed="false"]) .st-key-fb_fab,'
+          in src and '.stApp:has([data-testid="stSidebar"][data-collapsed="false"]) .st-key-share_fab'
+          in src)
+    # 隐藏规则必须只在手机端媒体查询里：桌面端侧边栏是钉在左侧的，不遮按钮
+    media_pos = src.rfind("@media (max-width: 640px)", 0, src.find(".st-key-fb_fab"))
+    close_pos = src.find("\n}", src.find("stSidebarCollapseButton"))
+    check("该隐藏规则写在 640px 手机端媒体查询内",
+          0 < media_pos < close_pos and close_pos < src.find("def _feedback_env_info"))
     check("窄屏收紧字号（≤380px）", "@media (max-width: 380px)" in src
           and ".st-key-fb_fab button" in src[src.find("@media (max-width: 380px)"):
                                              src.find("@media (max-width: 380px)") + 200])
