@@ -103,7 +103,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.9.3"
+APP_VERSION = "2.9.4"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -1372,6 +1372,66 @@ _TRIP_NOISE_WORDS = {
     "乘车码", "检票口", "二维码", "中国铁路", "铁路",
 }
 
+# --- 地名语义判定：按「是什么」而不是「在第几行」识别站名 -------------------
+# 位置规则永远追不完版式，但「一个词是不是地名」与版式无关：
+# 城市词表 + 地点后缀 + 车站方位词，三类命中任意一类即视为地名。
+# 没见过的 UI 词（会员码 / 电子发票 / 任何新按钮）因为不像地名而被天然排除，
+# 不需要逐个拉黑 —— 这就是规则引擎能做到的「举一反三」。
+_CITY_LEXICON = set("""
+上海 北京 天津 重庆 石家庄 太原 呼和浩特 沈阳 大连 长春 哈尔滨
+南京 苏州 无锡 常州 镇江 南通 扬州 徐州 盐城 泰州 淮安 连云港 宿迁
+昆山 江阴 宜兴 常熟 张家港 太仓 溧阳 丹阳 如皋 启东 海门 东台 扬中 句容
+杭州 宁波 温州 嘉兴 绍兴 金华 台州 丽水 衢州 舟山 湖州 义乌
+合肥 芜湖 蚌埠 安庆 马鞍山 淮南 阜阳 宿州 六安 滁州
+福州 厦门 泉州 漳州 莆田 三明 南平 龙岩 宁德
+南昌 九江 赣州 上饶 宜春 抚州 吉安 景德镇
+济南 青岛 烟台 威海 潍坊 淄博 临沂 济宁 泰安 日照 聊城 德州 滨州 菏泽
+郑州 洛阳 开封 新乡 焦作 许昌 平顶山 南阳 商丘 信阳 安阳
+武汉 宜昌 襄阳 荆州 黄石 十堰 孝感 荆门 黄冈 咸宁 随州
+长沙 株洲 湘潭 衡阳 岳阳 常德 益阳 郴州 永州 怀化 娄底 邵阳
+广州 深圳 珠海 佛山 东莞 中山 惠州 汕头 湛江 茂名 江门 韶关 肇庆
+南宁 桂林 柳州 玉林 梧州 北海 贵港
+海口 三亚 儋州
+成都 绵阳 德阳 宜宾 南充 乐山 泸州 自贡 攀枝花 达州 遂宁 内江
+贵阳 遵义 六盘水 毕节
+昆明 曲靖 玉溪 大理 丽江 保山
+西安 咸阳 宝鸡 渭南 汉中 延安 榆林 安康
+兰州 天水 酒泉 张掖 武威
+西宁 银川 乌鲁木齐 喀什 伊宁 拉萨 日喀则
+香港 澳门 台北 高雄
+""".split())
+
+# 地点后缀：场馆 / 车站 / 机场 / 校园建筑
+_PLACE_SUFFIX_RE = re.compile(
+    r"(站|机场|航站楼|火车站|高铁站|体育馆|体育场|游泳馆|大剧院|剧院|剧场|"
+    r"音乐厅|文化中心|体育中心|会展中心|广场|公园|食堂|图书馆|礼堂|博物馆|"
+    r"纪念馆|展览馆|美术馆|少年宫|教学楼|实验楼|宿舍|公寓|校区|校园|园区|"
+    r"报告厅|会议室|宾馆|酒店|大厦|大楼|中心|场馆)$")
+# 车站方位词：杭州东 / 昆山南 / 南京南 …（城市名 + 东南西北）
+_PLACE_DIR_RE = re.compile(r"^[\u4e00-\u9fa5]{1,4}[东南西北]$")
+
+
+def _is_station_name(token: str) -> bool:
+    """
+    判断一个词**在语义上**是不是地名 / 场所（与它在版式里的位置无关）。
+
+    三类命中任意一类即为地名：
+      ① 城市词表（覆盖主要城市，站名通常是城市名或城市 + 方位词）；
+      ② 地点后缀（…站 / …体育馆 / …报告厅 …）；
+      ③ 车站方位词（…东 / …南 / …西 / …北，如「杭州东」「昆山南」）。
+    UI 词（乘车码 / 检票口 / 已支付 / 任何没见过的按钮）三类都不占，
+    天然被排除 —— 新词不需要再逐个拉黑。
+
+    注意：不要与本文件后段面向聊天文本的 `_looks_like_place` 混淆——
+    那个判断「像不像地点」用于从通知里挑地点，用的是另一套启发式。
+    """
+    t = token.strip()
+    if not (2 <= len(t) <= 12) or not re.fullmatch(r"[\u4e00-\u9fa5]+", t):
+        return False
+    return (t in _CITY_LEXICON
+            or bool(_PLACE_SUFFIX_RE.search(t))
+            or bool(_PLACE_DIR_RE.match(t)))
+
 
 def _trip_lines(text: str) -> tuple[list[str], str]:
     """把票面文本切成「行列表」与「整段文本」，两种布局判断都要用。"""
@@ -1420,7 +1480,7 @@ def _trip_extras(flat: str, seat: bool = True, upper: str = "",
     price = re.search(r"[¥￥]\s*(\d+(?:\.\d+)?)", flat)
     if price:
         extras.append(f"¥{price.group(1)}")
-    gate = re.search(r"检票口\s*[:：]?\s*([0-9A-Za-z]{1,4}(?:\s?[0-9A-Za-z]{1,4})?)", flat)
+    gate = re.search(r"检票口\s*[:：]?\s*([0-9A-Za-z]{1,4}(?:[ \t]?[0-9A-Za-z]{1,4})?)", flat)
     if gate:
         extras.append("检票口 " + gate.group(1).strip())
     # 退票 / 改签**状态**（「已退票」）才算票面信息；
@@ -1491,11 +1551,14 @@ def _train_trip_events(lines: list[str], flat: str,
             to_city = hit.group(1) if hit else ""
         if not (from_city and to_city):
             # 分行布局（12306 卡片）：两张站名都跟在到达时刻之后，
-            # 顺序 = 先出发站后到达站；只在本张票区域内找
+            # 顺序 = 先出发站后到达站；只在本张票区域内找。
+            # 是不是站名由 _looks_like_place 按**词义**判定，
+            # 不靠噪声表逐个拉黑 —— 没见过的 UI 词也不会混进来。
             cities = [
                 ln.strip() for ln in flat[e2:region_end].split("\n")
                 if ln.strip() and _CITY_LINE_RE.match(ln.strip())
                 and ln.strip() not in _TRIP_NOISE_WORDS
+                and _is_station_name(ln.strip())
             ][:2]
             if len(cities) >= 2:
                 from_city, to_city = from_city or cities[0], to_city or cities[1]
@@ -1505,11 +1568,12 @@ def _train_trip_events(lines: list[str], flat: str,
             # 检票卡片（12306 首页小卡）：站名在时刻**上方**竖排
             # （「杭州东 / 宁波 / 11月1日 / 20:13 / 21:09」），OCR 线性化后
             # 城市行跑到时钟前面。在「上一张票的到达时刻 → 本张出发时刻」
-            # 的窗口里按出现顺序取前两个纯站名行 = 出发站、到达站。
+            # 的窗口里按出现顺序取前两个**长得像地名**的纯中文行。
             upper_cities = [
                 ln.strip() for ln in flat[prev_end:s1].split("\n")
                 if ln.strip() and _CITY_LINE_RE.match(ln.strip())
                 and ln.strip() not in _TRIP_NOISE_WORDS
+                and _is_station_name(ln.strip())
             ][:2]
             if len(upper_cities) >= 2:
                 from_city, to_city = from_city or upper_cities[0], \
@@ -1518,9 +1582,11 @@ def _train_trip_events(lines: list[str], flat: str,
                 from_city = from_city or upper_cities[0]
         if not from_city:
             # 「G7045 09:56 镇江 10:27 常州」单行：站名夹在两段时刻之间
-            from_city = (_cn_place(flat[e1:s2]) or [""])[0]
+            from_city = next((p for p in _cn_place(flat[e1:s2], limit=4)
+                              if _is_station_name(p)), "")
         if not to_city:
-            to_city = (_cn_place(flat[e2:region_end]) or [""])[0]
+            to_city = next((p for p in _cn_place(flat[e2:region_end], limit=4)
+                            if _is_station_name(p)), "")
         if not from_city and not to_city:
             continue
 
@@ -5190,6 +5256,19 @@ AI_SYSTEM_PROMPT = """你是一个严谨的日程结构化引擎，负责把用�
 13. 字段映射：场地/校区/教室/地点 → location（具体房号优先，校区可并入或忽略）；
     教师、课程性质、选课备注、重修标、学分 → note；「每周四 共16次」→ 同时写入
     rrule 与 note。
+14. 【票务 / 会议 / 演出卡片：按语义识别，不按位置】输入可能是一张卡片截图的
+    OCR 文本（机票行程卡、火车票、检票卡、会议分享卡、演出门票）。OCR 会打乱
+    版式顺序，**字段可能出现在任何位置**——判断每个词的角色只能靠语义：
+    - 时间：钟点（20:13）、日期（11月1日 / 2026/11/01）、相对词（明晚8点）；
+    - 地点：城市、车站（…站 / 城市名+东南西北，如「杭州东」）、机场（含航站楼）、
+      场馆（…体育馆 / …中心 / …剧院）；
+    - 标题：车次 / 航班号（G7561、HO1105 这类字母+数字组合）连同「出发 → 到达」、
+      会议主题、【】里的演出名称；
+    - 噪声：界面按钮与状态词（乘车码、检票口、二维码、改签、退票、已支付、
+      订单号、会员码、电子发票、仅供本书面参考之类）——它们既不是标题也不是地点，
+      只能把有用的（座位、订单号、检票口、会议号、链接）写进 note。
+    一张卡 = 一条日程：标题写「车次/航班号 + 出发 → 到达」或「主题 / 演出名」，
+    地点写出发站 / 机场 / 场馆。不要因为某个词出现在固定行号就假定它的角色。
 """
 
 

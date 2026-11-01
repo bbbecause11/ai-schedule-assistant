@@ -904,6 +904,28 @@ def test_time_blocks() -> None:
           and "乘车码" not in gate[0].title and "乘车码" not in gate[0].location,
           gate[0].note if gate else "")
 
+    # 语义化识别（举一反三）：全新的 UI 词（会员码 / 电子发票）不在噪声表里，
+    # 但因为「不像地名」（城市词表 / 地点后缀 / 方位词都不命中）被自动排除；
+    # 站名（徐州 / 厦门北）按词义识别，不靠「出现在第几行」。
+    novel = app.parse_with_rules(
+        "G9999\n铁路12306\n会员码\n徐州\n厦门北\n12月5日\n回\n"
+        "08:00\n09:30\n会员码\n电子发票\n检票口:3A\n02车05F号二等座",
+        anchor=datetime(2026, 11, 1))
+    check("陌生 UI 词（不在噪声表）不会被当成站名",
+          len(novel) == 1 and novel[0].title == "徐州 → 厦门北 G9999",
+          str([(e.title, e.location) for e in novel]))
+    check("地名判定是语义级的（词表 / 后缀 / 方位词），位置无关",
+          app._is_station_name("徐州") and app._is_station_name("厦门北")
+          and not app._is_station_name("会员码")
+          and not app._is_station_name("电子发票"))
+    src_all = open("app.py", encoding="utf-8").read()
+    check("AI 提示词教模型按语义识别卡片（不按位置）",
+          "按语义识别，不按位置" in src_all
+          and "OCR 会打乱" in src_all)
+    check("城市词表与地点后缀判定已内置",
+          "_CITY_LEXICON" in src_all and "_PLACE_SUFFIX_RE" in src_all
+          and "_PLACE_DIR_RE" in src_all)
+
     # 反向保护：普通通知不被演出 / 会议通道劫持
     normal = app.parse_with_rules(
         "11月3日 19:00 迎新晚会彩排\n地点：大学生活动中心", anchor=datetime(2026, 11, 2))
