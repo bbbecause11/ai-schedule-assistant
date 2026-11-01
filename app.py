@@ -7274,19 +7274,19 @@ section[role="dialog"] {
         height: 100dvh !important;
         max-height: 100dvh !important;
         width: min(85vw, 21rem) !important;
-        min-width: 0 !important;
+        min-width: min(85vw, 21rem) !important;
+        max-width: min(85vw, 21rem) !important;
         z-index: 999992 !important;
         box-sizing: border-box;
         transform: translateX(0) !important;
-        transition: transform .3s var(--ease-out) !important;
         will-change: transform;
         margin: 0 !important;
         translate: none !important;
     }
     /* 收起态：面板**保持在屏幕外完整渲染**（Streamlit 原生收起是直接
-       display:none，元素没了就放不出任何动画）。transform 从 0 → -110%
-       靠同一条 transition 平滑滑出；初始加载本来就是收起态，属性没有
-       变化，不会播动画。宽度和展开态一致，内容零重排。 */
+       display:none，元素没了就放不出任何动画）。面板**保持在屏幕外完整
+       渲染**，宽度与展开态一致，内容零重排。初始加载即收起态：transform
+       固定 -110%，无属性变化、不播动画。 */
     .stApp:has([data-testid="stSidebar"][data-collapsed="true"]) [data-testid="stSidebar"] {
         display: flex !important;
         position: fixed !important;
@@ -7295,15 +7295,34 @@ section[role="dialog"] {
         height: 100dvh !important;
         max-height: 100dvh !important;
         width: min(85vw, 21rem) !important;
-        min-width: 0 !important;
+        min-width: min(85vw, 21rem) !important;
+        max-width: min(85vw, 21rem) !important;
         z-index: 999992 !important;
         box-sizing: border-box;
         transform: translateX(-110%) !important;
-        transition: transform .3s var(--ease-out) !important;
         will-change: transform;
         margin: 0 !important;
         translate: none !important;
         pointer-events: none;
+    }
+    /* 滑入/滑出动画由注入的 JS 在 data-collapsed 翻转时挂类触发。
+       不用 CSS transition：实测 Streamlit 翻转状态时会 remount 侧边栏节点
+       （30s 过渡实验下面板瞬间就位/消失），transition 在新节点上永不触发；
+       animation 则会在新节点上正常播放。挂类 350ms 后由 JS 移除，
+       元素回到两态规则的静态 transform —— 与动画终态一致，无跳动。 */
+    .sb-anim-open {
+        animation: sb-slide-in .3s var(--ease-out) both;
+    }
+    .sb-anim-close {
+        animation: sb-slide-out .3s var(--ease-out) both;
+    }
+    @keyframes sb-slide-in {
+        from { transform: translateX(-110%); }
+        to { transform: translateX(0); }
+    }
+    @keyframes sb-slide-out {
+        from { transform: translateX(0); }
+        to { transform: translateX(-110%); }
     }
     /* 侧边栏浮起时给主区域压一层暗色遮罩，视觉上区分前后层级。
        遮罩不拦截点击：Streamlit 没有「外部点击收起侧边栏」的 API，
@@ -8772,6 +8791,33 @@ _COPY_LINK_JS = (
     "document.execCommand('copy');document.body.removeChild(a);}catch(e){}}"
     "if(navigator.clipboard&&window.isSecureContext){"
     "navigator.clipboard.writeText(t).catch(fb);}else{fb();}"
+    "})();</script>"
+)
+
+# 手机端侧边栏滑入/滑出动画的触发器。
+# 为什么需要 JS：实测 Streamlit 在收起/展开翻转 data-collapsed 时会重挂
+# 侧边栏节点，CSS transition 在新节点上永不触发（30s 过渡实验下面板瞬间
+# 就位/消失）；而 CSS animation 在新节点上会正常播放。
+# 做法：MutationObserver 盯 data-collapsed 翻转 → 挂 sb-anim-open/close 类
+# → CSS keyframes 播 0.3s 滑入/滑出 → 400ms 后摘类（回到两态规则的静态
+# transform，与动画终态一致，无跳动）。首次载入只记录状态，不播动画。
+_SIDEBAR_ANIM_JS = (
+    "<script>(function(){"
+    "var last=null,timer=null;"
+    "function el(){return document.querySelector('[data-testid=\"stSidebar\"]');}"
+    "function apply(){var e=el();if(!e)return;"
+    "var c=e.getAttribute('data-collapsed')==='true';"
+    "if(last===null){last=c;return;}"
+    "if(c===last)return;"
+    "last=c;"
+    "e.classList.remove('sb-anim-open','sb-anim-close');"
+    "void e.offsetWidth;"
+    "e.classList.add(c?'sb-anim-close':'sb-anim-open');"
+    "if(timer)clearTimeout(timer);"
+    "timer=setTimeout(function(){e.classList.remove('sb-anim-open','sb-anim-close');},400);"
+    "}"
+    "new MutationObserver(apply).observe(document.body,"
+    "{subtree:true,attributes:true,attributeFilter:['data-collapsed']});"
     "})();</script>"
 )
 
@@ -11544,6 +11590,8 @@ def main() -> None:
     # 先初始化会话状态，_inject_css 才能读到用户选的明暗 / 字号
     init_state()
     _inject_css()
+    # 手机端侧边栏滑入/滑出动画的触发器（监听 data-collapsed 翻转挂动画类）
+    st.html(_SIDEBAR_ANIM_JS, unsafe_allow_javascript=True)
     # 手机浏览器状态栏 / 底部工具栏跟随主题（否则深色下上下是白边）
     _inject_theme_color()
     # 右上角常驻的「问题反馈」胶囊 + 分享按钮（原生 Share 已在 CSS 里隐藏）

@@ -2140,9 +2140,19 @@ def test_layout_optimizations() -> None:
     check("侧边栏布局覆盖只在展开态生效（收起态交给 Streamlit，否则被压成细缝）",
           '.stApp:has([data-testid="stSidebar"][data-collapsed="false"]) [data-testid="stSidebar"] {'
           in src and "width: min(85vw, 21rem) !important;" in src)
-    check("弹出/收起共用同一条 transform 过渡（双向都有动画，且不逐帧重排）",
-          src.count("transition: transform .3s var(--ease-out) !important;") >= 2
-          and "@keyframes sidebar-slide-in" not in src)
+    check("两态规则都钉死宽度三件套（width/min/max 一致，内容零重排）",
+          src.count("width: min(85vw, 21rem) !important;") >= 2
+          and src.count("min-width: min(85vw, 21rem) !important;") >= 2
+          and src.count("max-width: min(85vw, 21rem) !important;") >= 2)
+    check("滑入/滑出动画由注入 JS 挂类触发（transition 在 remount 节点上永不触发）",
+          "_SIDEBAR_ANIM_JS" in src and "sb-anim-open" in src and "sb-anim-close" in src
+          and "MutationObserver" in src and "attributeFilter:['data-collapsed']" in src
+          and "st.html(_SIDEBAR_ANIM_JS, unsafe_allow_javascript=True)" in src)
+    check("动画时长正常（0.3s），无调试残留",
+          "animation: sb-slide-in .3s" in src and "animation: sb-slide-out .3s" in src
+          and "30s linear" not in src and "3s linear" not in src)
+    check("首次载入不播动画（JS 首次只记录状态）",
+          "if(last===null){last=c;return;}" in src)
     check("展开态钉死 Streamlit 原生位移（margin/translate），只留 transform 过渡",
           "margin: 0 !important;" in src and "translate: none !important;" in src)
     check("收起态面板保持在屏幕外渲染（display/width 压住 Streamlit 的 display:none）",
