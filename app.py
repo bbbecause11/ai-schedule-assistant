@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.6"
+APP_VERSION = "2.7.7"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -9696,7 +9696,7 @@ def _render_calendar() -> None:
             head_prev, head_title, head_next = st.columns([1, 3.4, 1], gap="small")
             with head_prev:
                 st.button("‹", key="cal_prev", on_click=_cal_shift, args=(-1,),
-                          width="stretch", help=_tip("‹ 上个月", "翻到上一个月的月历。"))
+                          width="stretch")
             with head_title:
                 _html(
                     '<div class="cal-title">'
@@ -9705,14 +9705,13 @@ def _render_calendar() -> None:
                 )
             with head_next:
                 st.button("›", key="cal_next", on_click=_cal_shift, args=(1,),
-                          width="stretch", help=_tip("› 下个月", "翻到下一个月的月历。"))
+                          width="stretch")
 
             wd_cols = st.columns(7, gap="small")
             for idx, col in enumerate(wd_cols):
                 with col:
                     _html(f'<div class="cal-wd">{"一二三四五六日"[idx]}</div>')
 
-            today = datetime.now().date()
             # 学期起始周：设置后在日历上标注每周是教学第几周
             anchor = _this_monday(st.session_state.get("course_anchor")
                                   or datetime.now().date())
@@ -9739,14 +9738,9 @@ def _render_calendar() -> None:
                         day_events = events_on_day(day)
                         has = len(day_events)
                         # 有安排的日期在日号后加一个中点，作为"有日程"的视觉提示
+                        # （以前这里挂 hover 气泡说明，42 个格子的气泡会互相叠住、
+                        #   还会盖住上面的格子导致点不到，已去掉；当天详情看右侧面板）
                         label = str(day.day) if not has else f"{day.day}·"
-                        tip = (f"{day:%m月%d日} 有 {has} 项安排" if has
-                               else f"{day:%m月%d日} 暂无安排")
-                        if day == today:
-                            tip += "（今天）"
-                        wk_no = (_this_monday(day) - anchor).days // 7 + 1
-                        tip += (f" · 教学第 {wk_no} 周" if wk_no >= 1
-                                else " · 开学前")
                         st.button(
                             label,
                             key=f"cal_day_{day:%Y%m%d}",
@@ -9754,15 +9748,12 @@ def _render_calendar() -> None:
                             args=(day,),
                             width="stretch",
                             type="primary" if day == selected else "secondary",
-                            help=_tip(f"选中 {day:%m月%d日}", tip + "。点一下，右侧会列出这天的全部安排。"),
                         )
 
     with right:
         with st.container(border=True):
             st.button("↩ 回到今天", key="cal_today",
-                      on_click=_cal_goto_today, width="stretch",
-                      help=_tip("↩ 回到今天",
-                                "不管当前翻到哪个月，都直接跳回本月并选中今天。"))
+                      on_click=_cal_goto_today, width="stretch")
 
             sel_events = events_on_day(selected)
             weekday_cn = "一二三四五六日"[selected.weekday()]

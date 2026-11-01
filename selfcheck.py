@@ -1276,6 +1276,16 @@ def test_ai_key_dialog() -> None:
     check("提示气泡限宽（说明文字不再铺成一大块）",
           tip is not None and "max-width" in tip.group(1))
 
+    # 月历是 42 个紧挨着的小按钮：任何 hover 气泡都会盖住相邻格子，
+    # 而且指过去的过程中经过别的格子会连环弹出好几层气泡，所以整块日历不带 help=
+    cal_src = src[src.find("def _render_calendar"):]
+    cal_src = cal_src[:cal_src.find("\ndef ")]
+    check("月历按钮不再挂 hover 气泡（42 个格子会互相叠住）",
+          "help=" not in cal_src, f"仍有 {cal_src.count('help=')} 处 help=")
+    check("月历翻月 / 回到今天按钮仍可用",
+          'key="cal_prev"' in cal_src and 'key="cal_next"' in cal_src
+          and 'key="cal_today"' in cal_src)
+
     # ⑪ 默认提醒：复选框多选，最多 3 个
     check("默认提醒是复选框多选（最多 3 个）",
           "REMIND_MAX = 3" in src
