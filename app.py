@@ -105,7 +105,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.10.2"
+APP_VERSION = "2.10.3"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -8835,7 +8835,12 @@ def _feedback_env_info() -> str:
         agent = str(st.context.headers.get("User-Agent", ""))[:160]
     except Exception:  # noqa: BLE001 - 旧版本 / 无会话上下文
         pass
-    return f"应用版本：v{APP_VERSION}\n提交时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n设备：{agent or '未知'}"
+    # 服务器可能在任何时区（Streamlit Cloud 是 UTC），naive now() 会差 8 小时；
+    # 中国无夏令时，固定 UTC+8 永远正确
+    cn_now = datetime.now(timezone(timedelta(hours=8)))
+    return (f"应用版本：v{APP_VERSION}\n"
+            f"提交时间：{cn_now:%Y-%m-%d %H:%M:%S}（北京时间）\n"
+            f"设备：{agent or '未知'}")
 
 
 def _feedback_mailto(ftype: str, desc: str) -> str:

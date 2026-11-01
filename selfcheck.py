@@ -2058,6 +2058,9 @@ def test_feedback() -> None:
     check("邮件带环境信息（版本号，方便对版本定位）",
           f"应用版本：v{app.APP_VERSION}" in src or "APP_VERSION" in
           src[src.find("_feedback_env_info"):src.find("_feedback_env_info") + 400])
+    env_src = src[src.find("def _feedback_env_info"):src.find("def _feedback_mailto")]
+    check("提交时间用北京时间（云端服务器是 UTC，naive now 会差 8 小时）",
+          "timezone(timedelta(hours=8))" in env_src and "北京时间" in env_src)
 
     # ④ 降级链路：没配 SMTP 不抛异常，退回 mailto
     #    （cfg 传空壳模拟「没配 secrets」——本地配了真 secrets 也不能真发信）
