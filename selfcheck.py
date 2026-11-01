@@ -1290,6 +1290,31 @@ def test_ai_key_dialog() -> None:
           tip is not None and "font-size: .72rem" in tip.group(1),
           "字号要小一点，别喧宾夺主")
 
+    # --- 气泡不能被边框切掉文字（切字 bug 的两个成因都要堵住）---
+    # ① 容器不得限高 / 不得裁剪：Streamlit 自带 overflow:auto + maxHeight，
+    #    文字一换行就裁掉半行，再叠上"隐藏滚动条"就成了"文字被压扁"
+    check("提示气泡不限高（内容多就长高，不裁字）",
+          tip is not None and "max-height: none" in tip.group(1),
+          "限高会把换行的第二行切掉")
+    check("提示气泡不裁剪内容",
+          tip is not None and "overflow: visible" in tip.group(1))
+    # ② 子元素字号必须跟随容器：Streamlit 用 `*{font-size: sm}` 把每个子元素
+    #    顶回 14px，只改容器会让"容器按小字号算高、文字按 14px 排"→ 截断
+    check("气泡内子元素字号跟随容器（否则容器矮、文字高被切）",
+          re.search(r'\[data-testid="stTooltipContent"\] \*,\s*'
+                    r'\[role="tooltip"\] \* \{ font-size: inherit !important; \}', src)
+          is not None)
+    # ③ Popper 定位层也可能带 maxHeight / overflow:hidden，一并放开
+    check("气泡的定位层也不裁剪",
+          'div:has(> [data-testid="stTooltipContent"])' in src
+          and "max-height: none" in src[src.find("div:has(> [data-testid"):
+                                        src.find("div:has(> [data-testid") + 160])
+    # ④ 字号必须用 rem：4 档界面字号是改 html font-size 实现的，
+    #    写成 px 就只有"标准"下正常，放大后会再次挤爆
+    check("气泡字号用 rem（四档字号下都不变形）",
+          tip is not None and "font-size: .72rem" in tip.group(1)
+          and "font-size: 11px" not in src and "font-size: 12px" not in src[src.find("悬停提示气泡"):src.find("悬停提示气泡") + 2200])
+
     # --- 气泡文案：一条一行、最多 24 字，不许再出现三段式长说明 ---
     tip_calls = re.findall(r"_tip\(\s*[^,]+,\s*((?:f?\"(?:[^\"\\\\]|\\\\.)*\"\s*)+)\)",
                            src, re.S)

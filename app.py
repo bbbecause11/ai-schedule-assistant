@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.8"
+APP_VERSION = "2.7.9"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7251,34 +7251,49 @@ textarea:-webkit-autofill, select:-webkit-autofill {
     /* ① 圆角矩形：Streamlit 默认几乎是直角，看起来像块警告框 */
     border-radius: var(--r-md) !important;
     /* ② 限宽 + 小字号：说明文案要短、要轻，不要压住页面内容 */
-    max-width: min(272px, 66vw) !important;
+    max-width: min(300px, 72vw) !important;
     width: max-content !important;
     font-size: .72rem !important;
     line-height: 1.45 !important;
     padding: 7px 10px !important;
-    /* ③ 气泡永不出现滚动条。
-       Streamlit 的 Tooltip 自带 overflow:auto + maxHeight，
-       内容稍长右侧就冒出一条滚动条，很难看。
-       这里把上限放宽，并把滚动条本身隐藏（真需要滚也不显示条）。 */
-    max-height: min(70vh, 420px) !important;
-    overflow-y: auto !important;
-    scrollbar-width: none !important;          /* Firefox */
-    -ms-overflow-style: none !important;       /* 旧 Edge */
+    /* ③ 关键：高度只由内容决定，绝不裁剪、绝不滚动。
+       气泡以前会被边框切掉半行字，原因有两个：
+         a) Streamlit 给气泡内所有子元素强制 `font-size: sm`，
+            只改容器字号会让「容器算高度 / 文字按 14px 排」对不上；
+         b) 它自带 `overflow:auto` + `maxHeight`，文字一换行就把超出部分裁掉，
+            而我们又把滚动条藏了，于是看上去就是"文字被边框压扁"。
+       这里改成：不限高、不裁剪，让气泡跟着文字长。 */
+    max-height: none !important;
+    height: auto !important;
+    overflow: visible !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere;
+    scrollbar-width: none !important;          /* 万一还有内层滚动条 */
+    -ms-overflow-style: none !important;
     /* ④ 关键：气泡永不接收鼠标事件。
        否则气泡盖住上方按钮时，鼠标一进入气泡就既点不到按钮、
        也触发不了「离开图标即关闭」，表现为按钮被冻住。 */
     pointer-events: none !important;
     z-index: 1000000 !important;
 }
+/* 气泡里的每个子元素都跟着容器走同一档字号（否则 Streamlit 的 * 规则
+   会把它们顶回 14px，容器矮、文字高，立刻出现截断） */
+[data-testid="stTooltipContent"] *,
+[role="tooltip"] * { font-size: inherit !important; }
 [data-testid="stTooltipContent"]::-webkit-scrollbar,
 [role="tooltip"]::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
-[data-testid="stTooltipContent"] p, [role="tooltip"] p {
-    margin: 0 0 .28em !important; font-size: inherit !important;
+/* Popper 定位层可能带 maxHeight / overflow:hidden，把内层裁掉。
+   用 :has 精确命中"包着气泡的那一层"，一起放开。 */
+div:has(> [data-testid="stTooltipContent"]),
+div:has(> [role="tooltip"]) {
+    max-height: none !important;
+    overflow: visible !important;
 }
-[data-testid="stTooltipContent"] p:last-child,
-[role="tooltip"] p:last-child { margin-bottom: 0 !important; }
+[data-testid="stTooltipContent"] p, [role="tooltip"] p {
+    margin: 0 !important; font-size: inherit !important; line-height: inherit !important;
+}
 [data-testid="stTooltipContent"] code, [role="tooltip"] code {
-    font-size: .92em !important;
+    font-size: .95em !important;
 }
 [data-testid="stTooltipHoverTarget"] svg { color: var(--muted) !important; fill: currentColor; }
 
