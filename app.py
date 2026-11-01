@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.3"
+APP_VERSION = "2.7.4"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -1734,6 +1734,141 @@ def _block_to_event(blk: dict[str, Any], day: date,
     )
 
 
+# --- 聊天记录式通知（群消息截图）-----------------------------------------
+# 聊天截图的特点：整段是一段话，昵称 / 角色标签 / @全体成员 混在正文里；
+# 日期可能是「明天」「下周五」或「10.30」，地点常写成「集合地点：X」
+# 或「在[大礼堂门口]进行」。逐行解析会把一句话拆成多条、还会把
+# 「时间：」「地点：」当成标题，所以这里整段识别成一条日程。
+_CHAT_HINT_RE = re.compile(
+    r"@全体成员|管理员|群主|#\s*通知|通知|各位同学|全体成员请注意|"
+    r"拍摄任务|活动地点|集合地点|集合时间|团建活动|合影拍摄"
+)
+_CHAT_LOC_LABEL_RE = re.compile(
+    r"(?:集合|活动|拍摄|上课|会议)?地点\s*[:：]\s*([^\n，。；;]{2,40})"
+)
+_CHAT_LOC_INLINE_RE = re.compile(
+    r"(?:将)?在\s*[\[【]?([^\[\]【】\n，。；]{2,24})[\]】]?\s*"
+    r"(?:进行|举行|开赛|集合|拍摄|召开|举办)"
+)
+_CHAT_EVENT_WORD = (r"活动|拍摄|合影|比赛|决赛|团建活动|团建|会议|例会|大会|"
+                    r"讲座|培训|演出|晚会|考试|报名|宣讲|沙龙|分享会|"
+                    r"训练|排练|面试|答辩")
+
+
+def _chat_flatten(text: str) -> str:
+    """把聊天截图的多行正文压成一段，顺手规范全角数字/冒号/波浪号。"""
+    t = text.replace("\r\n", "\n").replace("\r", "\n")
+    t = t.translate(str.maketrans("０１２３４５６７８９：～－—", "0123456789:---"))
+    t = re.sub(r"[ \t\u00a0]+", " ", t)
+    t = re.sub(r"\s*\n\s*", "", t)
+    t = re.sub(r"(?<=\d)\s*:\s*(?=\d)", ":", t)
+    t = re.sub(r"(?<=\d)\s*\.\s*(?=\d)", ".", t)
+    return t.strip()
+
+
+def _chat_finish_title(text: str) -> str:
+    # 先保护版本号 / 学年区间：_clean_title 会把 V16.0 的「16.0」、
+    # 2026-2027 的「26-2027」当成日期删掉，标题就断了。
+    held: list[str] = []
+
+    def _hold(m: "re.Match") -> str:
+        held.append(m.group(0))
+        return f"ZZHOLD{len(held) - 1}ZZ"
+
+    t = re.sub(r"[Vv]\d+(?:\.\d+)+|20\d{2}\s*[-–—]\s*20\d{2}", _hold, text)
+    s = _clean_title(t)
+    for i, v in enumerate(held):
+        s = s.replace(f"ZZHOLD{i}ZZ", v)
+    s = re.sub(r"@?全体成员|各位同学|全体成员请注意|请注意|"
+               r"请以下\d+名同学注意|务必|准时|不见不散", " ", s)
+    # 去掉开头的「#通知」「公告」和表情符号
+    s = re.sub(r"^(?:#?\s*通知|公告)\s*", "", s)
+    s = re.sub(r"^[^\u4e00-\u9fa5A-Za-z0-9]+", "", s)
+    s = re.sub(r"[，,、;；:：\s]+", " ", s).strip()
+    return s[:40]
+
+
+def _chat_title(flat: str) -> str:
+    """从聊天正文里挑出最像「活动名」的一段。"""
+    # ① 「“江六达人秀”拍摄」——OCR 常把标题行排在「拍摄任务：」前面，
+    #    所以先认「引号 + 拍摄」这个更稳的信号。
+    m = re.search(r"[“\"「]([^”\"」\n]{2,30})[”\"」]\s*拍摄", flat)
+    if m:
+        return _chat_finish_title(m.group(1) + "拍摄")
+    # ①b 「拍摄任务：“江六达人秀”拍摄」
+    m = re.search(r"(?:拍摄|活动|会议)?任务\s*[:：]\s*[“\"「]?"
+                  r"([^”\"」\n，。]{2,40})[”\"」]?", flat)
+    if m:
+        cand = m.group(1).strip()
+        if "拍摄" not in cand and flat[m.end():m.end() + 4].startswith("拍摄"):
+            cand += "拍摄"
+        return _chat_finish_title(cand)
+    # ② 【新媒体中心V16.0全体合影拍摄通知】
+    m = re.search(r"[【\[]([^】\]\n]{4,50})[】\]]", flat)
+    if m:
+        cand = re.sub(r"(?:通知|公告)$", "", m.group(1).strip())
+        if re.search(_CHAT_EVENT_WORD, cand):
+            return _chat_finish_title(cand)
+    # ③ 活动名称 / 主题
+    m = re.search(r"(?:活动名称|活动主题|主题|事项)\s*[:：]\s*"
+                  r"([^\n，。；]{2,40})", flat)
+    if m:
+        return _chat_finish_title(m.group(1))
+    # ④ 第一个带事件名词的短句
+    m = re.search(r"([^，。；\n]{0,30}?(?:%s))" % _CHAT_EVENT_WORD, flat)
+    if m:
+        return _chat_finish_title(m.group(1))
+    return ""
+
+
+def _chat_location(flat: str) -> str:
+    m = _CHAT_LOC_LABEL_RE.search(flat)
+    if m:
+        loc = re.split(r"[（(]", m.group(1))[0].strip(" ，,。;；")
+        if loc:
+            return loc
+    m = _CHAT_LOC_INLINE_RE.search(flat)
+    if m:
+        loc = m.group(1).strip(" ，,。;；")
+        if loc:
+            return loc
+    loc, _ = extract_location(flat)
+    return loc
+
+
+def _extract_chat_events(text: str, anchor_day: date,
+                         default_remind: int = -1) -> list[Event]:
+    """整段聊天通知 → 一条日程；不像聊天通知就返回 []。"""
+    flat = _chat_flatten(text)
+    if len(flat) < 12 or not _CHAT_HINT_RE.search(flat):
+        return []
+    day, _, _, _ = parse_date_in_text(flat, anchor_day)
+    tokens = _parse_clock_tokens(flat)
+    if day is None or not tokens:
+        return []
+
+    start_dt = datetime.combine(day, dt_time(tokens[0][0], tokens[0][1]))
+    end_dt = None
+    if len(tokens) >= 2:
+        end_dt = datetime.combine(day, dt_time(tokens[1][0], tokens[1][1]))
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+    if end_dt is None:
+        end_dt = start_dt + timedelta(minutes=DEFAULT_EVENT_MINUTES)
+
+    title = _chat_title(flat) or "未命名日程"
+    return [Event(
+        title=title,
+        start=start_dt,
+        end=end_dt,
+        location=_chat_location(flat),
+        priority=extract_priority(flat),
+        source="text",
+        remind_minutes=default_remind,
+        raw=flat[:400],
+    )]
+
+
 def parse_with_rules(text: str, anchor: datetime | None = None,
                      default_remind: int = -1) -> list[Event]:
     """
@@ -1743,6 +1878,13 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
     """
     anchor_dt = anchor or datetime.now()
     anchor_day = anchor_dt.date()
+
+    # 群消息 / 聊天截图：整段是一段话，先按「一条通知」整体识别，
+    # 避免逐行拆成多条、标题被「时间：」「地点：」污染。
+    chat_events = _extract_chat_events(text, anchor_day, default_remind)
+    if chat_events:
+        return chat_events
+
     events: list[Event] = []
     inherit_date: date | None = None   # 上一行日期小标题，供后续行继承
 

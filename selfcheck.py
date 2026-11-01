@@ -1403,6 +1403,63 @@ def test_loading_indicator() -> None:
           "def _busy(" in src and "_busy_slot" in src)
 
 
+def test_chat_notices() -> None:
+    """聊天截图式群通知：整段识别为一条，标题/地点/时间不被拆碎。"""
+    section("J. 聊天截图式通知（群消息）")
+    import app
+
+    cases = [
+        ("航博园", datetime(2026, 10, 16),
+         "#通知 ✈️\n10月17日江苏航博园活动，请以下21名同学注意：\n"
+         "⏰集合时间：明天上午8:05前（务必准时！）\n"
+         "📍集合地点：五棵松（不要迟到！）",
+         "2026-10-17 08:05", "航博园", "五棵松"),
+        ("达人秀", datetime(2026, 10, 23),
+         "动力2509 韩雪淇 13031954... 管理员\n@全体成员\n"
+         "拍摄任务：“江六达人秀”拍摄\n时间：10.30（下周五）18：30-20：30\n"
+         "地点：西山排球场旁的小广场",
+         "2026-10-30 18:30", "达人秀", "西山排球场"),
+        ("全体合影", datetime(2026, 10, 26),
+         "主席团 沈方鑫 管理员\n@全体成员 【新媒体中心V16.0全体合影拍摄通知】 "
+         "⚠️全体成员请注意，明日(10月27日)中午[12:30]，我们将在[大礼堂门口]"
+         "进行新媒体中心大合照拍摄，合照预计13:00结束。",
+         "2026-10-27 12:30", "合影", "大礼堂"),
+        ("篮球赛", datetime(2026, 11, 1),
+         "辅导员 盛富鹏 群主\n各位同学：\n今天（11月1日）下午3:30，"
+         "第二十五届“新生杯”男子篮球赛决赛将在校体育馆主馆开赛。",
+         "2026-11-01 15:30", "篮球赛", "体育馆"),
+        ("团建", datetime(2026, 10, 20),
+         "新媒体中心2026-2027第一学期第一次团建活动拟于10月24日（星期六）"
+         "下午14:00～16:00举行。\n❗️活动地点：江苏大学六食堂、JSU草坪",
+         "2026-10-24 14:00", "团建", "六食堂"),
+        ("微电影", datetime(2026, 10, 19),
+         "#通知 🎬\n10月20日校园微电影拍摄活动，请以下15名同学注意：\n"
+         "⏰集合时间：明天下午2:30前\n📍集合地点：图书馆报告厅",
+         "2026-10-20 14:30", "微电影", "图书馆报告厅"),
+        ("迎新晚会", datetime(2026, 11, 2),
+         "@全体成员 【迎新晚会彩排通知】 全体成员请注意，明日(11月3日)"
+         "晚上[19:00]，我们将在[大学生活动中心]进行迎新晚会彩排。",
+         "2026-11-03 19:00", "迎新晚会", "大学生活动中心"),
+    ]
+    for name, anchor, text, start, title_kw, loc_kw in cases:
+        evs = app.parse_with_rules(text, anchor=anchor)
+        check(f"{name}：整段识别为 1 条", len(evs) == 1, f"{len(evs)} 条")
+        if not evs:
+            continue
+        e = evs[0]
+        check(f"{name}：开始时间正确",
+              e.start.strftime("%Y-%m-%d %H:%M") == start,
+              e.start.strftime("%Y-%m-%d %H:%M"))
+        check(f"{name}：标题含「{title_kw}」", title_kw in e.title, e.title)
+        check(f"{name}：地点含「{loc_kw}」", loc_kw in e.location, e.location)
+
+    # 反向保护：普通多行日程不能被聊天通道整段吞掉
+    evs = app.parse_with_rules(
+        "10月24日 09:00 高数 三江楼301；10:00 英语 三山楼205",
+        anchor=datetime(2026, 10, 20))
+    check("普通多行日程不被聊天通道劫持", len(evs) == 2, f"{len(evs)} 条")
+
+
 def main() -> int:
     print("=" * 68)
     print(" AI 智能日程收纳工具 · 自动化自查")
@@ -1414,7 +1471,7 @@ def main() -> int:
                test_calendar_and_sample, test_ocr,
                test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_period_table, test_security, test_theme_guard,
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
-               test_loading_indicator):
+               test_loading_indicator, test_chat_notices):
         try:
             fn()
         except Exception:  # noqa: BLE001
