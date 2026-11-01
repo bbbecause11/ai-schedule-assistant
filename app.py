@@ -38,7 +38,9 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dt_time
+from functools import lru_cache
 from typing import Any, Iterable
+from urllib.parse import quote as _url_quote, urlencode as _url_encode
 
 import pandas as pd
 import streamlit as st
@@ -97,7 +99,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.10"
+APP_VERSION = "2.7.11"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -6160,6 +6162,33 @@ _CSS = """
     box-shadow: var(--btn-hover-shadow);
 }
 
+/* 链接按钮（分享面板里的 QQ / 微博）走的是另一套 testid，
+   默认是白底，深色主题下会跳出来一块白 —— 这里跟普通次要按钮对齐 */
+[data-testid="stBaseLinkButton-secondary"],
+[data-testid="stBaseLinkButton-tertiary"] {
+    border-radius: var(--r-pill) !important;
+    min-height: 2.5rem;
+    padding: .4rem 1.1rem;
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    background: var(--btn-bg) !important;
+    border: 1px solid var(--btn-border) !important;
+    color: var(--btn-text) !important;
+    box-shadow: var(--btn-shadow);
+}
+[data-testid="stBaseLinkButton-secondary"]:hover,
+[data-testid="stBaseLinkButton-tertiary"]:hover {
+    background: var(--btn-hover-bg) !important;
+    border-color: var(--btn-hover-border) !important;
+    color: var(--btn-hover-text) !important;
+}
+[data-testid="stBaseLinkButton-secondary"] p,
+[data-testid="stBaseLinkButton-tertiary"] p {
+    color: inherit !important; font-size: inherit !important;
+}
+[data-testid="stBaseLinkButton-secondary"] svg,
+[data-testid="stBaseLinkButton-tertiary"] svg { fill: currentColor !important; }
+
 /* 主按钮：品牌渐变，hover 只做轻微变亮（不位移、不发光） */
 [data-testid="stBaseButton-primary"] {
     background: var(--brand-grad) !important;
@@ -7484,6 +7513,72 @@ div:has(> [role="tooltip"]) {
     filter: brightness(var(--img-brightness));
     transition: filter .2s ease;
 }
+
+/* ---------- 右上角分享按钮 ----------
+   原生 Streamlit 工具栏的 Share（stAppDeployButton，云端才出现）内容写死，
+   只能藏掉，换成我们自己的按钮固定在同一位置。
+   stToolbarActionButton 是宿主环境（如嵌入平台）里的工具栏动作按钮，
+   一并藏掉，免得跟我们的图标并排出现两个"分享"。
+   图标是内联 SVG 做的 mask：不依赖 emoji / 图标字体，缩放都清晰。 */
+[data-testid="stAppDeployButton"],
+[data-testid="stToolbarActionButton"] { display: none !important; }
+
+.st-key-share_fab {
+    position: fixed;
+    top: .55rem;
+    right: 3.1rem;
+    z-index: 1000002;
+    width: auto !important;
+}
+.st-key-share_fab [data-testid="stButton"] { width: auto !important; }
+.st-key-share_fab button {
+    width: 2.15rem !important; height: 2.15rem !important;
+    min-width: 2.15rem !important; min-height: 0 !important;
+    flex: 0 0 auto !important;
+    padding: 0 !important; border-radius: 999px;
+    position: relative;            /* 给图标做绝对居中的定位基准 */
+    display: flex; align-items: center; justify-content: center;
+    background: var(--card-bg) !important;
+    border: 1px solid var(--card-border) !important;
+    box-shadow: var(--card-shadow) !important;
+    color: var(--ink) !important;
+    transition: transform .15s ease, box-shadow .15s ease;
+}
+.st-key-share_fab button:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--pop-shadow) !important;
+}
+/* 按钮文字只是给读屏和搜索用的，视觉上只留图标 */
+.st-key-share_fab button p {
+    position: absolute !important; width: 1px; height: 1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+.st-key-share_fab button::before {
+    content: "";
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: 1.02rem; height: 1.02rem;
+    background: currentColor;
+    -webkit-mask: url("__SHARE_ICON__") center / contain no-repeat;
+    mask: url("__SHARE_ICON__") center / contain no-repeat;
+}
+/* 分享面板里的网址：等宽小字，方便手动选中复制 */
+.share-link {
+    margin: .15rem 0 .55rem;
+    padding: .4rem .55rem;
+    border: 1px dashed var(--card-border);
+    border-radius: var(--r-sm);
+    background: var(--field-bg);
+    color: var(--muted-2);
+    font-size: .72rem; line-height: 1.4;
+    word-break: break-all;
+}
+/* 分享面板：手机上 Streamlit 会把三列自动叠成三行，弹窗比屏幕还高、
+   顶部被切掉。这里强制一行三列（文案都很短，塞得下），并把二维码收小。 */
+.st-key-share_body [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; }
+.st-key-share_body [data-testid="stColumn"] { min-width: 0 !important; }
+.st-key-share_body [data-testid="stImage"] img { max-width: 8.5rem; }
+.st-key-share_body { gap: .1rem !important; }
 </style>
 """
 
@@ -7628,7 +7723,10 @@ def _inject_css() -> None:
     st.markdown(_css_tokens(), unsafe_allow_html=True)
     st.markdown(_font_face_css(), unsafe_allow_html=True)
     st.markdown(_CSS, unsafe_allow_html=True)
-    st.markdown(_CSS_WIDGETS, unsafe_allow_html=True)
+    # 分享图标的 SVG 走占位符替换：CSS 常量在模块顶部定义，
+    # 而 data URI 需要现场编码一次（不编码会破坏 CSS 语法）
+    st.markdown(_CSS_WIDGETS.replace("__SHARE_ICON__", _share_icon_css_url()),
+                unsafe_allow_html=True)
     if _is_dark():
         st.markdown(_CSS_DARK_ONLY, unsafe_allow_html=True)
 
@@ -7853,6 +7951,139 @@ def _tip(name: str, desc: str) -> str:
     现在收成一行：鼠标一停就能看完，不挡下面的内容。
     """
     return f"**{name}**　{desc}"
+
+
+# ---------------------------------------------------------------------------
+# 10.5 分享（右上角弯曲箭头 + 分享面板）
+# ---------------------------------------------------------------------------
+# 国内 App 的分享都长一个样：一个「弯曲箭头」图标，点开是面板，
+# 里面放 微信 / QQ / 微博 / 复制链接。
+#
+# 实现要点：
+#   · Streamlit 自带的右上角 Share（stAppDeployButton）内容写死，改不了，
+#     所以在 CSS 里把它藏掉，换成我们自己的按钮（同样固定在右上角）；
+#   · 图标不用 emoji、也不用 Material 图标字体（各端渲染不一致），
+#     直接内联一段 SVG 当 CSS mask 画在按钮上，任何字号下都清晰；
+#   · 微信没有网页分享接口，桌面端只能给二维码（扫码后在微信里转发），
+#     手机上点「复制链接」再粘给好友也一样顺手。
+
+# 弯曲箭头（微信 / QQ「转发」那种）：一条弧线尾巴 + 一个箭头
+_SHARE_ICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' "
+    "stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'>"
+    "<path d='M4.6 19.4c0-7.3 4.9-11.3 13.1-11.3'/>"
+    "<path d='M12.6 3.3 18.1 8.3l-5.5 5'/></svg>"
+)
+
+
+@lru_cache(maxsize=1)
+def _share_icon_css_url() -> str:
+    """把 SVG 转成 CSS 能用的 data URI（mask 用，只关心透明度）。"""
+    return "data:image/svg+xml;utf8," + _url_quote(_SHARE_ICON_SVG, safe="")
+
+
+def _share_url() -> str:
+    """当前页面网址（去掉查询串，避免把别人的会话参数传出去）。"""
+    try:
+        url = st.context.url or ""
+    except Exception:  # noqa: BLE001 - 旧版本 / 无会话上下文
+        return ""
+    url = str(url).strip()
+    if not url:
+        return ""
+    return url.split("?")[0].split("#")[0]
+
+
+def _share_qr_png(url: str) -> bytes | None:
+    """给微信扫的二维码；segno 没装或生成失败就返回 None（面板会自动降级）。"""
+    if not url:
+        return None
+    try:
+        import segno
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        buf = io.BytesIO()
+        segno.make(url, error="m").save(
+            buf, kind="png", scale=7, border=2,
+            dark="#16161A", light="#FFFFFF",
+        )
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001
+        log(f"二维码生成失败: {traceback.format_exc()}")
+        return None
+
+
+# 复制链接：先试 Clipboard API，失败再退回 execCommand
+# （Streamlit 的按钮要往返一次服务器，用户手势的"瞬时激活"可能已过期）
+_COPY_LINK_JS = (
+    "<script>(function(){"
+    "var t=location.origin+location.pathname;"
+    "function fb(){try{var a=document.createElement('textarea');"
+    "a.value=t;a.setAttribute('readonly','');"
+    "a.style.position='fixed';a.style.top='-1000px';a.style.opacity='0';"
+    "document.body.appendChild(a);a.focus();a.select();"
+    "document.execCommand('copy');document.body.removeChild(a);}catch(e){}}"
+    "if(navigator.clipboard&&window.isSecureContext){"
+    "navigator.clipboard.writeText(t).catch(fb);}else{fb();}"
+    "})();</script>"
+)
+
+
+def _render_share_button() -> None:
+    """右上角的分享按钮（原生 Share 已在 CSS 里隐藏）。"""
+    with st.container(key="share_fab"):
+        if st.button("分享", key="share_open",
+                     help=_tip("分享", "微信 / QQ / 微博 / 复制链接")):
+            _show_share_dialog()
+
+
+@st.dialog("分享给好友", width="small")
+def _show_share_dialog() -> None:
+    """分享面板：微信（二维码）+ QQ + 微博 + 复制链接。"""
+    url = _share_url()
+    title = f"{APP_TITLE} · {APP_SUBTITLE}"
+    summary = "把聊天记录、课表截图里的安排，一键整理成能导入日历的日程表。"
+
+    if not url:
+        st.warning("浏览器没把网址传过来，请直接复制地址栏里的链接分享。")
+        return
+
+    with st.container(key="share_body"):
+        # --- 微信：桌面给二维码，手机也有「复制链接」这条退路 ---
+        qr = _share_qr_png(url)
+        if qr is not None:
+            left, mid, right = st.columns([1, 1, 1])
+            with mid:
+                st.image(qr, width=150)
+            st.caption("微信扫一扫打开，右上角「···」转发给好友或群")
+        else:
+            st.caption("微信：复制下面的链接，粘贴给好友或群")
+
+        st.markdown(
+            f'<div class="share-link">{_escape(url)}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # --- 一键分享到各平台（link_button 会新开标签页）---
+        qq_url = "https://connect.qq.com/widget/shareqq/index.html?" + _url_encode({
+            "url": url, "title": title, "summary": summary, "pics": "",
+        })
+        weibo_url = "https://service.weibo.com/share/share.php?" + _url_encode({
+            "url": url, "title": f"{title} {summary}",
+        })
+
+        c1, c2, c3 = st.columns(3, gap="small")
+        with c1:
+            st.link_button("🐧 QQ", qq_url, width="stretch")
+        with c2:
+            st.link_button("🌐 微博", weibo_url, width="stretch")
+        with c3:
+            if st.button("🔗 复制", key="share_copy", width="stretch"):
+                st.html(_COPY_LINK_JS, unsafe_allow_javascript=True)
+                st.toast("链接已复制，去粘给好友吧")
+
+        st.caption("QQ / 微博在新标签页打开；微信可扫码或复制链接。")
 
 
 # ---------------------------------------------------------------------------
@@ -10342,6 +10573,8 @@ def main() -> None:
     _inject_css()
     # 手机浏览器状态栏 / 底部工具栏跟随主题（否则深色下上下是白边）
     _inject_theme_color()
+    # 右上角常驻的分享按钮（原生 Share 已在 CSS 里隐藏）
+    _render_share_button()
 
     _html(
         '<div class="hero">'

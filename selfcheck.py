@@ -1672,6 +1672,68 @@ def test_all_day() -> None:
           str([i.message for i in app.validate_ics(ics2, [week_allday]).errors]))
 
 
+def test_share() -> None:
+    """右上角分享按钮 + 分享面板（微信二维码 / QQ / 微博 / 复制链接）。"""
+    section("L. 分享")
+    import app
+
+    src = open("app.py", encoding="utf-8").read()
+
+    # ① 原生 Share 藏掉，换成自己的按钮
+    check("隐藏 Streamlit 原生 Share 按钮",
+          '[data-testid="stAppDeployButton"],' in src
+          and "display: none !important;" in src,
+          "原生 Share 的内容写死，改不了，只能藏")
+    check("自定义分享按钮固定在上层（右上角）",
+          ".st-key-share_fab {" in src and "position: fixed" in
+          src[src.find(".st-key-share_fab {"):src.find(".st-key-share_fab {") + 200])
+    check("分享按钮在 main 里渲染",
+          "_render_share_button()" in src and src.count("_render_share_button") >= 2)
+
+    # ② 图标：内联 SVG 做 mask（不依赖 emoji / 图标字体）
+    check("分享图标是内联 SVG mask（弯曲箭头）",
+          "-webkit-mask: url(\"__SHARE_ICON__\")" in src
+          and "_share_icon_css_url" in src)
+    check("注入 CSS 时替换了图标占位符",
+          '_CSS_WIDGETS.replace("__SHARE_ICON__", _share_icon_css_url())' in src)
+    url = app._share_icon_css_url()
+    check("图标 data URI 编码正确（无裸 < > 空格）",
+          url.startswith("data:image/svg+xml;utf8,")
+          and not any(ch in url for ch in "<> \""))
+
+    # ③ 面板内容
+    for label, kw in (("QQ", "connect.qq.com/widget/shareqq"),
+                      ("微博", "service.weibo.com/share/share.php")):
+        check(f"分享面板有「{label}」入口", kw in src)
+    check("分享面板有「复制链接」",
+          'st.button("🔗 复制"' in src and "_COPY_LINK_JS" in src)
+    check("复制链接有 execCommand 兜底（非 HTTPS / 手势过期也能复制）",
+          "execCommand('copy')" in src and "navigator.clipboard" in src)
+    check("微信用二维码（segno 缺失时自动降级）",
+          "segno.make(" in src and "二维码生成失败" in src)
+    check("二维码库写进依赖清单",
+          "segno" in open("requirements.txt", encoding="utf-8").read())
+
+    # ④ 链接按钮要和站内按钮同款（否则深色下是一块白）
+    check("链接按钮套用站内次要按钮样式",
+          '[data-testid="stBaseLinkButton-secondary"]' in src
+          and "var(--btn-bg)" in src[src.find('[data-testid="stBaseLinkButton-secondary"]'):
+                                     src.find('[data-testid="stBaseLinkButton-secondary"]') + 400])
+
+    # ⑤ 手机端：三列不许叠成三行，否则弹窗比屏幕还高
+    check("分享面板在窄屏下保持一行三列",
+          '.st-key-share_body [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; }' in src)
+
+    # ⑥ 网址：去掉查询串再分享
+    check("分享的网址去掉了查询串",
+          'url.split("?")[0].split("#")[0]' in src)
+
+    # ⑦ 真跑一下二维码，确保能生成真正的 PNG
+    png = app._share_qr_png("https://example.streamlit.app/")
+    check("二维码能生成为 PNG", png is not None and png[:4] == b"\x89PNG",
+          "segno 不可用时应返回 None 而不是抛异常")
+
+
 def main() -> int:
     print("=" * 68)
     print(" AI 智能日程收纳工具 · 自动化自查")
@@ -1684,7 +1746,7 @@ def main() -> int:
                test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_period_table, test_security, test_theme_guard,
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
                test_loading_indicator, test_chat_notices,
-               test_output_selfcheck, test_all_day):
+               test_output_selfcheck, test_all_day, test_share):
         try:
             fn()
         except Exception:  # noqa: BLE001
