@@ -103,7 +103,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.9.5"
+APP_VERSION = "2.9.6"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -6398,7 +6398,9 @@ _CSS = """
 /* ---------- 2. 版心与节奏 ---------- */
 .block-container {
     max-width: var(--content-max);
-    padding: var(--space-6) var(--space-5) var(--space-8);
+    /* 顶部内边距必须 ≥ 固定 Header 的实际高度（实测 60px），
+       否则首屏第一张卡片的上缘会被 Header 的实色底盖掉（手机端尤甚） */
+    padding: 4.2rem var(--space-5) var(--space-8);
 }
 /* 只装了 <style> 的注入块不占位。
    `st.markdown("<style>…")` 渲染出来的元素自身高度是 0，但父级 flex 的 gap
@@ -7148,13 +7150,13 @@ section[role="dialog"] {
 
 /* ---------- 14. 响应式 ---------- */
 @media (max-width: 880px) {
-    .block-container { padding: var(--space-5) var(--space-4) var(--space-7); }
+    .block-container { padding: 4.2rem var(--space-4) var(--space-7); }
     .hero { padding: 1.6rem 1.4rem 1.5rem; border-radius: var(--r-lg); }
     .section-title { margin-top: var(--space-6); font-size: 1.1875rem; }
     .metric-row { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
 }
 @media (max-width: 640px) {
-    .block-container { padding: var(--space-4) var(--space-3) var(--space-6); }
+    .block-container { padding: 4.2rem var(--space-3) var(--space-6); }
     /* 窄屏不横向滚动，直接折成两行，四个入口都看得见 */
     .stTabs [data-baseweb="tab-list"], .stTabs [role="tablist"] {
         flex-wrap: wrap;

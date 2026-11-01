@@ -2029,6 +2029,14 @@ def test_layout_optimizations() -> None:
     check("桌面端 Hero 徽标仍然显示（规则写在 640px 媒体查询里）",
           src.find("@media (max-width: 640px)") < src.find(".hero-badge { display: none; }"))
 
+    # ④d 版心顶部内边距必须 ≥ 固定 Header 高度（实测 60px）：
+    #    小于它，首屏第一张卡片的上缘会被 Header 实色底盖掉（手机端尤甚）；
+    #    4.2rem 用 rem 书写，随界面字号同步缩放（特大字号 Header 也会变高）
+    check("版心顶部内边距 ≥ 4rem（否则卡片上缘被固定 Header 盖住）",
+          "padding: 4.2rem var(--space-5) var(--space-8);" in src
+          and "padding: 4.2rem var(--space-4) var(--space-7);" in src
+          and "padding: 4.2rem var(--space-3) var(--space-6);" in src)
+
     # ⑤ 二维码悬停不再出现空工具条（Streamlit 的 stElementToolbar 空壳）
     check("分享面板隐藏图片元素工具条（二维码上方的空气泡）",
           '.st-key-share_body [data-testid="stElementToolbar"] { display: none !important; }' in src)
