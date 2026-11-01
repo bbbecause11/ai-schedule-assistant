@@ -2140,13 +2140,15 @@ def test_layout_optimizations() -> None:
     check("侧边栏布局覆盖只在展开态生效（收起态交给 Streamlit，否则被压成细缝）",
           '.stApp:has([data-testid="stSidebar"][data-collapsed="false"]) [data-testid="stSidebar"] {'
           in src and "width: min(85vw, 21rem) !important;" in src)
-    check("弹出动画用 keyframes 位移（GPU 合成，不触发逐帧重排）",
-          "@keyframes sidebar-slide-in" in src
-          and "animation: sidebar-slide-in .3s var(--ease-out) both;" in src)
-    check("展开态钉死 Streamlit 原生过渡与位移（否则两股动画叠加会抽搐）",
-          "transition: none !important;" in src
-          and "margin: 0 !important;" in src
-          and "translate: none !important;" in src)
+    check("弹出/收起共用同一条 transform 过渡（双向都有动画，且不逐帧重排）",
+          src.count("transition: transform .3s var(--ease-out) !important;") >= 2
+          and "@keyframes sidebar-slide-in" not in src)
+    check("展开态钉死 Streamlit 原生位移（margin/translate），只留 transform 过渡",
+          "margin: 0 !important;" in src and "translate: none !important;" in src)
+    check("收起态面板保持在屏幕外渲染（display/width 压住 Streamlit 的 display:none）",
+          '.stApp:has([data-testid="stSidebar"][data-collapsed="true"]) [data-testid="stSidebar"] {'
+          in src and "transform: translateX(-110%) !important;" in src
+          and "pointer-events: none;" in src)
     # 隐藏规则必须只在手机端媒体查询里：桌面端侧边栏是钉在左侧的，不遮按钮
     media_pos = src.rfind("@media (max-width: 640px)", 0, src.find(".st-key-fb_fab"))
     close_pos = src.find("\n}", src.find("stSidebarCollapseButton"))

@@ -105,7 +105,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.10.7"
+APP_VERSION = "2.10.8"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7263,7 +7263,11 @@ section[role="dialog"] {
        一条细缝、文字竖排溢出。收起态完全交给 Streamlit。
        弹出动画用 keyframes 位移：宽度一次到位、内容零重排，只走 GPU 合成，
        不会再出现「文字两行变一行、按钮往上跳」。 */
+    /* 展开态：fixed 浮层 + 固定宽度（内容零重排）+ 滑入到位。
+       Streamlit 原生的 margin / translate 位移全部钉死（它们会和
+       transform 过渡叠加造成抽搐），只留 transform 这一个过渡。 */
     .stApp:has([data-testid="stSidebar"][data-collapsed="false"]) [data-testid="stSidebar"] {
+        display: flex !important;
         position: fixed !important;
         top: 0 !important;
         left: 0 !important;
@@ -7273,19 +7277,33 @@ section[role="dialog"] {
         min-width: 0 !important;
         z-index: 999992 !important;
         box-sizing: border-box;
-        animation: sidebar-slide-in .3s var(--ease-out) both;
+        transform: translateX(0) !important;
+        transition: transform .3s var(--ease-out) !important;
         will-change: transform;
-        /* 关键：把 Streamlit 自己会动的属性全部钉死。它的展开过渡
-           （margin-left / translate / width 等）和我们的滑入动画叠加时，
-           元素等于被两股力同时拖动 —— 就是「抽搐一下」。这里让画面上
-           只剩 keyframes 这一个动画。 */
-        transition: none !important;
         margin: 0 !important;
         translate: none !important;
     }
-    @keyframes sidebar-slide-in {
-        from { transform: translateX(-110%); }
-        to { transform: translateX(0); }
+    /* 收起态：面板**保持在屏幕外完整渲染**（Streamlit 原生收起是直接
+       display:none，元素没了就放不出任何动画）。transform 从 0 → -110%
+       靠同一条 transition 平滑滑出；初始加载本来就是收起态，属性没有
+       变化，不会播动画。宽度和展开态一致，内容零重排。 */
+    .stApp:has([data-testid="stSidebar"][data-collapsed="true"]) [data-testid="stSidebar"] {
+        display: flex !important;
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        height: 100dvh !important;
+        max-height: 100dvh !important;
+        width: min(85vw, 21rem) !important;
+        min-width: 0 !important;
+        z-index: 999992 !important;
+        box-sizing: border-box;
+        transform: translateX(-110%) !important;
+        transition: transform .3s var(--ease-out) !important;
+        will-change: transform;
+        margin: 0 !important;
+        translate: none !important;
+        pointer-events: none;
     }
     /* 侧边栏浮起时给主区域压一层暗色遮罩，视觉上区分前后层级。
        遮罩不拦截点击：Streamlit 没有「外部点击收起侧边栏」的 API，
