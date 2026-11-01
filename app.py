@@ -99,7 +99,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.11"
+APP_VERSION = "2.7.12"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7574,11 +7574,23 @@ div:has(> [role="tooltip"]) {
     word-break: break-all;
 }
 /* 分享面板：手机上 Streamlit 会把三列自动叠成三行，弹窗比屏幕还高、
-   顶部被切掉。这里强制一行三列（文案都很短，塞得下），并把二维码收小。 */
+   顶部被切掉。这里强制一行三列（文案都很短，塞得下），并把二维码收小。
+   注意间距别压太狠：圆角胶囊按钮和上面的网址框只隔 1~2px 时，
+   视觉上会像"按钮压在文字上"，所以要留出正常间隙。 */
 .st-key-share_body [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; }
 .st-key-share_body [data-testid="stColumn"] { min-width: 0 !important; }
-.st-key-share_body [data-testid="stImage"] img { max-width: 8.5rem; }
-.st-key-share_body { gap: .1rem !important; }
+.st-key-share_body [data-testid="stImage"] img { max-width: 8rem; }
+.st-key-share_body { gap: .5rem !important; }
+/* 网址框上下各留一点，别让按钮/说明贴到它的边线上 */
+.st-key-share_body .share-link { margin: .1rem 0 .2rem; }
+/* 关键：st.markdown 出来的容器自带 margin-bottom:-16px（Streamlit 用它抵消
+   段落间距）。我们的分享面板里放的是自定义 div，没有段落间距，
+   这个负边距会把容器算矮 16px —— 下面的按钮就会压到网址框上。
+   只在这个面板内清零，不影响站内其它排布。 */
+.st-key-share_body [data-testid="stMarkdownContainer"] {
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+}
 </style>
 """
 
@@ -8055,7 +8067,7 @@ def _show_share_dialog() -> None:
         if qr is not None:
             left, mid, right = st.columns([1, 1, 1])
             with mid:
-                st.image(qr, width=150)
+                st.image(qr, width=132)
             st.caption("微信扫一扫打开，右上角「···」转发给好友或群")
         else:
             st.caption("微信：复制下面的链接，粘贴给好友或群")

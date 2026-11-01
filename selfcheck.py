@@ -1724,6 +1724,16 @@ def test_share() -> None:
     check("分享面板在窄屏下保持一行三列",
           '.st-key-share_body [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; }' in src)
 
+    # ⑤b 竖排间距不能压太狠：圆角胶囊按钮和网址框只隔 1~2px 时，
+    #     视觉上就是「按钮压在文字上」（真实踩过，用户截图反馈过）
+    body_css = src[src.find(".st-key-share_body {"):src.find(".st-key-share_body {") + 120]
+    check("分享面板竖排间距不小于 0.4rem（否则按钮压住网址框）",
+          "gap: .5rem" in body_css or "gap: .45rem" in body_css, body_css[:80])
+    # ⑤c st.markdown 的容器自带 margin-bottom:-16px，会把网址框的高度吃掉 16px，
+    #     导致下面的按钮盖上来 —— 面板内必须清零
+    check("分享面板内清掉了 stMarkdownContainer 的负边距",
+          '.st-key-share_body [data-testid="stMarkdownContainer"]' in src)
+
     # ⑥ 网址：去掉查询串再分享
     check("分享的网址去掉了查询串",
           'url.split("?")[0].split("#")[0]' in src)
