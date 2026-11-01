@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.9"
+APP_VERSION = "2.7.10"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7241,10 +7241,16 @@ textarea:-webkit-autofill, select:-webkit-autofill {
 [data-testid="stToast"] * { color: var(--toast-fg) !important; }
 [data-testid="stToast"] svg { fill: currentColor !important; }
 
-/* ---------- 悬停提示气泡 ---------- */
+/* ---------- 悬停提示气泡 ----------
+   DOM 结构（实测）：
+     <div role="tooltip" style="position:fixed; transform:translate(...)">   ← 定位层
+         <div data-testid="stTooltipContent">                                ← 真正的气泡
+             <div data-testid="stMarkdownContainer">…</div>
+   结论：**外观只能画在内层**。两层都画会套出"双层气泡"（外层那圈多余轮廓）。
+   定位层只保留"别裁剪、别挡鼠标"，视觉一律清空。 */
 [data-testid="stTooltipContent"], [data-testid="stTooltipContent"] *,
 [role="tooltip"], [role="tooltip"] * { color: var(--tip-fg) !important; }
-[data-testid="stTooltipContent"], [role="tooltip"] {
+[data-testid="stTooltipContent"] {
     background: var(--tip-bg) !important;
     border: 1px solid var(--tip-bd) !important;
     box-shadow: var(--pop-shadow) !important;
@@ -7256,19 +7262,13 @@ textarea:-webkit-autofill, select:-webkit-autofill {
     font-size: .72rem !important;
     line-height: 1.45 !important;
     padding: 7px 10px !important;
-    /* ③ 关键：高度只由内容决定，绝不裁剪、绝不滚动。
-       气泡以前会被边框切掉半行字，原因有两个：
-         a) Streamlit 给气泡内所有子元素强制 `font-size: sm`，
-            只改容器字号会让「容器算高度 / 文字按 14px 排」对不上；
-         b) 它自带 `overflow:auto` + `maxHeight`，文字一换行就把超出部分裁掉，
-            而我们又把滚动条藏了，于是看上去就是"文字被边框压扁"。
-       这里改成：不限高、不裁剪，让气泡跟着文字长。 */
+    /* ③ 高度只由内容决定，绝不裁剪、绝不滚动（否则第二行会被边框切掉） */
     max-height: none !important;
     height: auto !important;
     overflow: visible !important;
     white-space: normal !important;
     overflow-wrap: anywhere;
-    scrollbar-width: none !important;          /* 万一还有内层滚动条 */
+    scrollbar-width: none !important;
     -ms-overflow-style: none !important;
     /* ④ 关键：气泡永不接收鼠标事件。
        否则气泡盖住上方按钮时，鼠标一进入气泡就既点不到按钮、
@@ -7276,10 +7276,22 @@ textarea:-webkit-autofill, select:-webkit-autofill {
     pointer-events: none !important;
     z-index: 1000000 !important;
 }
-/* 气泡里的每个子元素都跟着容器走同一档字号（否则 Streamlit 的 * 规则
-   会把它们顶回 14px，容器矮、文字高，立刻出现截断） */
-[data-testid="stTooltipContent"] *,
-[role="tooltip"] * { font-size: inherit !important; }
+/* 定位层：不画背景/边框/内边距，否则会套出第二层气泡框 */
+[role="tooltip"]:not([data-testid="stTooltipContent"]) {
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    pointer-events: none !important;
+}
+/* 气泡里的每个子元素都跟着气泡走同一档字号（否则 Streamlit 的 * 规则
+   会把它们顶回 14px，容器矮、文字高，立刻出现截断）。
+   注意：不能写 `[role="tooltip"] *`——那条会把气泡自己也匹配进去，
+   让它去继承 16px 的定位层，字号反而变大。 */
+[data-testid="stTooltipContent"] * { font-size: inherit !important; }
 [data-testid="stTooltipContent"]::-webkit-scrollbar,
 [role="tooltip"]::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
 /* Popper 定位层可能带 maxHeight / overflow:hidden，把内层裁掉。
@@ -7291,6 +7303,16 @@ div:has(> [role="tooltip"]) {
 }
 [data-testid="stTooltipContent"] p, [role="tooltip"] p {
     margin: 0 !important; font-size: inherit !important; line-height: inherit !important;
+}
+/* 气泡里的 markdown 容器自带 margin-bottom: -16px（Streamlit 用负边距抵消
+   段落间距）。我们的 p 已经没有外边距了，这个负边距会把气泡高度算成
+   「一行文字 - 16px」，文字就从底部溢出、看着像不居中/被压住。
+   只清零它的外边距，注意别碰气泡自己的 padding。 */
+[data-testid="stTooltipContent"] [data-testid="stMarkdownContainer"],
+[role="tooltip"] [data-testid="stMarkdownContainer"],
+[data-testid="stTooltipContent"] > * {
+    margin: 0 !important;
+    min-height: 0 !important;
 }
 [data-testid="stTooltipContent"] code, [role="tooltip"] code {
     font-size: .95em !important;

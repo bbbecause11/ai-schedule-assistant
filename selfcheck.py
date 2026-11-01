@@ -1268,8 +1268,12 @@ def test_ai_key_dialog() -> None:
           and "新日程默认提前多久提醒，导出 .ics 时写入 VALARM" not in src)
 
     # ⑩ 悬停提示气泡：不能盖住按钮并挡住点击
-    tip = re.search(r'\[data-testid="stTooltipContent"\],\s*\[role="tooltip"\]\s*'
-                    r'\{([^}]*)\}', src, re.S)
+    # 实测 DOM：<div role="tooltip">（定位层） > <div data-testid="stTooltipContent">（气泡本身）
+    #            > <div data-testid="stMarkdownContainer"> > <p>
+    # 外观只能画在 data-testid 这一层，定位层必须保持透明，否则套出双层气泡框。
+    tip_css = src[src.find("/* ---------- 悬停提示气泡"):src.find("/* ---------- 提示条 st.success")]
+    tip = re.search(r'\[data-testid="stTooltipContent"\]\s*\{([^}]*)\}', tip_css, re.S)
+    check("提示气泡的主样式挂在 stTooltipContent 上", tip is not None)
     check("提示气泡设置了 pointer-events: none（遮住按钮时也不挡点击）",
           tip is not None and "pointer-events: none" in tip.group(1),
           "否则鼠标移进气泡后既点不到按钮，也触发不了离开即关闭")
@@ -1290,7 +1294,7 @@ def test_ai_key_dialog() -> None:
           tip is not None and "font-size: .72rem" in tip.group(1),
           "字号要小一点，别喧宾夺主")
 
-    # --- 气泡不能被边框切掉文字（切字 bug 的两个成因都要堵住）---
+    # --- 气泡不能被边框切掉文字（切字 bug 的成因都要堵住）---
     # ① 容器不得限高 / 不得裁剪：Streamlit 自带 overflow:auto + maxHeight，
     #    文字一换行就裁掉半行，再叠上"隐藏滚动条"就成了"文字被压扁"
     check("提示气泡不限高（内容多就长高，不裁字）",
@@ -1301,9 +1305,7 @@ def test_ai_key_dialog() -> None:
     # ② 子元素字号必须跟随容器：Streamlit 用 `*{font-size: sm}` 把每个子元素
     #    顶回 14px，只改容器会让"容器按小字号算高、文字按 14px 排"→ 截断
     check("气泡内子元素字号跟随容器（否则容器矮、文字高被切）",
-          re.search(r'\[data-testid="stTooltipContent"\] \*,\s*'
-                    r'\[role="tooltip"\] \* \{ font-size: inherit !important; \}', src)
-          is not None)
+          '[data-testid="stTooltipContent"] * { font-size: inherit !important; }' in src)
     # ③ Popper 定位层也可能带 maxHeight / overflow:hidden，一并放开
     check("气泡的定位层也不裁剪",
           'div:has(> [data-testid="stTooltipContent"])' in src
@@ -1313,7 +1315,22 @@ def test_ai_key_dialog() -> None:
     #    写成 px 就只有"标准"下正常，放大后会再次挤爆
     check("气泡字号用 rem（四档字号下都不变形）",
           tip is not None and "font-size: .72rem" in tip.group(1)
-          and "font-size: 11px" not in src and "font-size: 12px" not in src[src.find("悬停提示气泡"):src.find("悬停提示气泡") + 2200])
+          and "font-size: 11px" not in tip_css and "font-size: 12px" not in tip_css)
+
+    # --- 居中 / 单层：真实 DOM 里踩过的两个坑 ---
+    # ⑤ 定位层不能跟着画背景：否则气泡外面又套一圈同色边框，像两层气泡
+    check("气泡的定位层不画背景（否则出现双层气泡框）",
+          '[role="tooltip"]:not([data-testid="stTooltipContent"])' in tip_css
+          and "background: transparent !important" in tip_css)
+    # ⑥ markdown 容器自带 margin-bottom:-16px，会把气泡高度算成「一行-16px」，
+    #    文字从底部溢出、看起来不居中
+    check("清掉气泡内 markdown 容器的负边距（否则文字不居中/溢出）",
+          re.search(r'\[data-testid="stMarkdownContainer"\][^{]*\{[^}]*margin: 0 !important',
+                    tip_css, re.S) is not None)
+    # ⑦ 别用 `[role="tooltip"] *` 设字号：它会把气泡自己也匹配进去，
+    #    让气泡去继承 16px 的定位层，字反而变大
+    check("字号规则不能误伤气泡自身（禁写 [role=tooltip] *）",
+          '[role="tooltip"] * { font-size: inherit' not in tip_css)
 
     # --- 气泡文案：一条一行、最多 24 字，不许再出现三段式长说明 ---
     tip_calls = re.findall(r"_tip\(\s*[^,]+,\s*((?:f?\"(?:[^\"\\\\]|\\\\.)*\"\s*)+)\)",
