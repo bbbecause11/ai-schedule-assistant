@@ -103,7 +103,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.9.6"
+APP_VERSION = "2.9.7"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -3280,8 +3280,12 @@ def _rail_period_rows(blocks: list[OcrBlock], header_bottom: float,
         return seq
     return cands if len(cands) >= 3 else seq if len(seq) >= 3 else []
 
-# 课表单元格里「地点」的写法五花八门：W9阶 / W文约209 / W2机房 / 科教城体育场。
-_LOC_TOKEN_RE = re.compile(r"[Ww]\s*([^\s,，。;；/]{1,14})")
+# 课表单元格里「地点」的写法五花八门：W9阶 / W文约209 / W2机房 / WJ1117 / 科教城体育场。
+# W 是楼号的一部分，必须完整保留在 location 里（曾经把 W 吃掉只留「9阶」，用户点破）。
+# 前瞻限定 W 后面必须是数字/中文/大写字母——这样英文教师名（Wang、Wen）里的
+# 小写 W 不会被误认成楼号，正则会自动跳过它去找真正的地点。
+_LOC_TOKEN_RE = re.compile(
+    r"([Ww])\s*(?=[\d\u4e00-\u9fffA-Z])([^\s,，。;；/]{1,14})")
 _LOC_HINT_RE = re.compile(r"(楼|场|馆|室|机房|中心|校区|阶|实验室|实验楼|教\d)")
 
 # 周次的写法：2-6,9-18 / 17~18 / 1-16单周。分隔符只认逗号——认空格的话
@@ -4603,7 +4607,7 @@ def _split_course_cell(text: str) -> dict[str, Any]:
     拆一个课程条目：课程名 / 教师 / 地点 / 周次 / 单双周。
 
     典型输入：「高等数学(一)(上)卜 庆刚 W9阶 2-6,9-18, /」
-    典型输出：title=高等数学(一)(上) teacher=卜庆刚 location=9阶 weeks=[(2,6),(9,18)]
+    典型输出：title=高等数学(一)(上) teacher=卜庆刚 location=W9阶 weeks=[(2,6),(9,18)]
 
     解析顺序是踩坑踩出来的，别随手调换：
     ① 清洗（括号里的空格、破折号、末尾分隔符、错位的房间号）
@@ -4783,10 +4787,10 @@ def _split_course_cell(text: str) -> dict[str, Any]:
         info["title"] = title or left
         return info
 
-    # --- ③ 地点：先摘掉 W 前缀标记（W9阶 / W文约209 / W2机房） ------------
+    # --- ③ 地点：W 前缀是楼号的一部分，完整保留（W9阶 / W文约209 / WJ1117） --
     m = _LOC_TOKEN_RE.search(raw)
     if m:
-        loc = m.group(1).strip().rstrip(",，、.")
+        loc = (m.group(1) + m.group(2)).strip().rstrip(",，、.")
         if loc:
             info["location"] = loc
             raw = (raw[:m.start()] + " " + raw[m.end():]).strip()
@@ -5277,7 +5281,9 @@ AI_SYSTEM_PROMPT = """你是一个严谨的日程结构化引擎，负责把用�
       场馆（…体育馆 / …中心 / …剧院）；
     - 教室：各校有自己的写法——「中文楼名+房号」（三江楼304、三江楼 305）、
       「字母代号楼+房号」（W9-304、w9 305、W9楼201，常州大学科教城等校区用这类代号）、
-      「X+数字+号楼」（京江2号楼2205）。这些全是 location，不是标题的一部分；
+      「W前缀楼号」（W9阶、W文约101、WJ1117、W2机房——W 是楼号的一部分，
+      必须完整保留在 location 里，不能丢掉 W）、「X+数字+号楼」（京江2号楼2205）。
+      这些全是 location，不是标题的一部分；
       判断标准是「像不像一个房间/场所」，与学校无关、与位置无关；
     - 标题：车次 / 航班号（G7561、HO1105 这类字母+数字组合）连同「出发 → 到达」、
       会议主题、【】里的演出名称；
