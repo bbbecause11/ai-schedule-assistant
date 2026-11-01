@@ -105,7 +105,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.10.1"
+APP_VERSION = "2.10.2"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -8944,7 +8944,14 @@ def _show_feedback_dialog() -> None:
                 st.session_state.pending_toast = "反馈已发送，谢谢你！🙏"
                 return                                  # 返回即关闭弹窗
             # SMTP 没配或发失败：退回 mailto，让访客用自己的邮件应用发
-            st.warning("自动发送没成功，改用你的邮件应用发送（截图请手动附上）：")
+            if msg.startswith("未配置"):
+                st.warning(
+                    "这个站点还没有配置自动发信通道（开发者需要在 Streamlit Cloud "
+                    "的 Secrets 里加入 [smtp] 段，见 README「问题反馈邮箱配置」）。"
+                    "先用你的邮件应用发送，截图请手动附上：")
+            else:
+                st.warning("自动发送没成功（网络或发件账号问题），"
+                           "改用你的邮件应用发送，截图请手动附上：")
             st.link_button("📧 打开邮件应用发送",
                            _feedback_mailto(ftype, desc), width="stretch")
             st.caption(f"收件邮箱：{_FEEDBACK_TO}（也可复制下面的内容发过去）")
