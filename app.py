@@ -103,7 +103,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.9.1"
+APP_VERSION = "2.9.2"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -1366,6 +1366,8 @@ _TRIP_NOISE_WORDS = {
     "当日有效", "餐饮", "特产", "车票", "订单号", "乘车日期", "检票", "支付",
     "周一", "周二", "周三", "周四", "周五", "周六", "周日", "周六日",
     "当天", "当日", "次日", "出发", "到达", "电子票", "纸质票", "报销凭证",
+    "已支付", "待支付", "现金支付", "本人车票", "餐饮特产", "租车约车",
+    "免费乘车儿童申报",
 }
 
 
@@ -1394,114 +1396,159 @@ def _trip_year_hint(day: date, flat: str) -> date:
         return day
 
 
-def _trip_extras(flat: str, seat: bool = True) -> list[str]:
-    """从票面补齐座位 / 订单号 / 票价，放进备注。"""
+def _trip_extras(flat: str, seat: bool = True, upper: str = "",
+                 order_fallback: bool = True) -> list[str]:
+    """从票面补齐座位 / 订单号 / 票价，放进备注。
+
+    订单号在 12306 订单页里位于卡片**上方**（下一行就是出发时刻），
+    所以先在 ``upper``（上一张票的到达时刻 → 本张出发时刻之间）找；
+    ``order_fallback=False`` 时（中间那张票）不再回退到卡片区域——
+    区域里出现的订单号其实是**下一张票**的，挂上来只会张冠李戴。
+    """
     extras: list[str] = []
     if seat:
-        m = re.search(r"([一二三]等座\s*\d{1,3}\s*车\s*\d{1,3}\s*[A-F]?\s*号?)", flat)
+        m = re.search(r"([一二三]等座\s*\d{1,3}\s*车\s*\d{1,3}\s*[A-F]?\s*号?|\d{1,2}车\s*\d{1,3}[A-F]?\s*号)", flat)
         if m:
             extras.append(m.group(1).replace(" ", ""))
-    order = re.search(r"订单号\s*[:：]\s*([A-Za-z0-9]{6,})", flat)
+    order = (re.search(r"订单号\s*[:：]\s*([A-Za-z0-9]{6,})", upper)
+             or (re.search(r"订单号\s*[:：]\s*([A-Za-z0-9]{6,})", flat)
+                 if order_fallback else None))
     if order:
         extras.append(f"订单号 {order.group(1)}")
     price = re.search(r"[¥￥]\s*(\d+(?:\.\d+)?)", flat)
     if price:
         extras.append(f"¥{price.group(1)}")
-    if re.search(r"已?退票", flat):
-        extras.append("已退票")
+    # 退票 / 改签**状态**（「已退票」）才算票面信息；
+    # 「改签」「退票」是每张票都有的按钮文字，不能当成状态
+    for flag in ("已退票", "已改签"):
+        if flag in flat:
+            extras.append(flag)
     return extras
 
 
-def _train_trip_event(lines: list[str], flat: str,
-                      anchor_day: date) -> tuple[Event | None, set[str]]:
-    """火车票 → 一条事件。没有车次时返回 (None, set())。"""
-    train_m = None
-    for cand in _TRIP_TRAIN_RE.finditer(flat):
-        if _train_like(cand, flat):
-            train_m = cand
-            break
-    if not train_m:
-        return None, set()
+def _train_trip_events(lines: list[str], flat: str,
+                       anchor_day: date) -> tuple[list[Event], set[str]]:
+    """
+    火车票（一张截图可含多张）→ 每张完整车票一条事件。
 
-    # 车次前后的时刻。不锚定行首，因此「09:56 镇江 G7045 10:27 常州」这类
-    # 单行布局与「每行一个碎片」的分行布局都能命中。
+    12306「本人车票」页多张票上下排布，每张的结构是
+    「出发时刻 … 车次 … 到达时刻」，站名行和日期行跟在到达时刻之后。
+    以每个车次为锚：向前取最近的出发时刻、向后取最近的到达时刻；
+    站名与日期只在**本张票的区域**（本车次 → 下一张票的出发时刻）内找，
+    防止把下一张票的站名 / 日期抓过来。
+    """
+    trains = [m for m in _TRIP_TRAIN_RE.finditer(flat) if _train_like(m, flat)]
+    if not trains:
+        return [], set()
+
     clocks = [
         (m.start(), m.end(), int(m.group(1)), int(m.group(2)))
         for m in re.finditer(r"(?<!\d)(\d{1,2})\s*[:：]\s*(\d{2})(?!\d)", flat)
     ]
-    before = [c for c in clocks if c[1] <= train_m.start()]
-    after = [c for c in clocks if c[0] >= train_m.end()]
-    if before and after:          # 「09:56 镇江 G7045 10:27 常州」
-        s1, e1, h1, m1 = before[-1]
-        s2, e2, h2, m2 = after[0]
-    elif len(after) >= 2:         # 「G7045 09:56 镇江 10:27 常州」：车次在最前
-        s1, e1, h1, m1 = after[0]
-        s2, e2, h2, m2 = after[1]
-    else:
-        return None, set()
 
-    # --- 出发站 / 到达站 ------------------------------------------------
-    from_city = ""
-    to_city = ""
-    mid = flat[e1:train_m.start()].strip()
-    if re.fullmatch(r"[\u4e00-\u9fa5]{2,6}", mid):
-        # 单行布局：出发站夹在出发时间与车次之间，到达站紧跟到达时间
-        from_city = mid
-        same_line_tail = flat[e2:].split("\n")[0]
-        hit = re.match(r"\s*([\u4e00-\u9fa5]{2,6})", same_line_tail)
-        to_city = hit.group(1) if hit else ""
-    else:
-        # 分行布局（12306）：站名跟在到达时间之后，先出发站后到达站
-        t2_line_idx = flat.count("\n", 0, s2)
-        tail_lines = lines[t2_line_idx + 1:]
-        cities = [
-            ln for ln in tail_lines
-            if _CITY_LINE_RE.match(ln) and ln not in _TRIP_NOISE_WORDS
-        ][:2]
-        from_city = cities[0] if cities else ""
-        to_city = cities[1] if len(cities) > 1 else ""
-
-    # 「G7045 09:56 镇江 10:27 常州」整行单行布局：站名夹在两段时刻之间，
-    # 上面按行找站名的逻辑拿不到，这里按「时刻之间的中文串」兜底
-    if not from_city:
-        from_city = (_cn_place(flat[e1:s2]) or [""])[0]
-    if not to_city:
-        to_city = (_cn_place(flat[e2:]) or [""])[0]
-
-    # 日期：优先用全文里带年份的完整日期，再用票面上独立的年份纠偏
-    day, _, _, _ = parse_date_in_text(flat, anchor_day)
-    day = _trip_year_hint(day or anchor_day, flat)
-
-    start_dt = datetime.combine(day, datetime.min.time()).replace(hour=h1 % 24, minute=m1)
-    end_dt = datetime.combine(day, datetime.min.time()).replace(hour=h2 % 24, minute=m2)
-    if end_dt <= start_dt:                     # 跨天车次，如 23:30 → 06:00
-        end_dt += timedelta(days=1)
-
-    # 从原文补齐座位 / 订单号 / 票价，放进备注
-    extras = _trip_extras(flat)
-
-    title = " → ".join(p for p in (from_city, to_city) if p)
-    title = f"{title} {train_m.group(1)}".strip() if title else f"乘坐 {train_m.group(1)}"
-
-    ev = Event(
-        title=title,
-        start=start_dt,
-        end=end_dt,
-        location=" → ".join(p for p in (from_city, to_city) if p),
-        note="｜".join(extras)[:120],
-        priority="高",
-        vague=False,
-        source="text",
-        raw=f"{train_m.group(1)} {h1:02d}:{m1:02d}-{h2:02d}:{m2:02d}",
-    )
-
-    # 已消费的行：出发时刻、到达时刻、车次所在行，以及被用作站名的行
+    events: list[Event] = []
     consumed: set[str] = set()
-    for offset in (s1, s2, train_m.start()):
-        consumed.add(lines[flat.count("\n", 0, offset)])
-    consumed.add(f"@train:{train_m.group(1)}")   # 分号切分会改写行文本，按车次兜底
-    consumed.update(c for c in (from_city, to_city) if c)
-    return ev, consumed
+    for idx, train_m in enumerate(trains):
+        before = [c for c in clocks if c[1] <= train_m.start()]
+        after = [c for c in clocks if c[0] >= train_m.end()]
+        if before and after:      # 「09:56 镇江 G7045 10:27 常州」
+            s1, e1, h1, m1 = before[-1]   # 最近的出发时刻（状态栏时间更远，不会被选中）
+            s2, e2, h2, m2 = after[0]     # 最近的到达时刻
+        elif len(after) >= 2:     # 「G7045 09:56 镇江 10:27 常州」：车次在最前
+            s1, e1, h1, m1 = after[0]
+            s2, e2, h2, m2 = after[1]
+        else:
+            continue
+
+        # 本张票的区域：到下一张票的出发时刻 / 车次为止
+        if idx + 1 < len(trains):
+            nxt = trains[idx + 1]
+            nxt_dep = [c for c in clocks if c[1] <= nxt.start()]
+            region_end = min(nxt.start(), nxt_dep[-1][0]) if nxt_dep else nxt.start()
+        else:
+            region_end = len(flat)
+
+        # --- 出发站 / 到达站 ------------------------------------------------
+        from_city = ""
+        to_city = ""
+        mid = flat[e1:train_m.start()].strip()
+        if re.fullmatch(r"[\u4e00-\u9fa5]{2,6}", mid):
+            # 单行布局：出发站夹在出发时刻与车次之间，到达站紧跟到达时刻
+            from_city = mid
+            same_line_tail = flat[e2:].split("\n")[0]
+            hit = re.match(r"\s*([\u4e00-\u9fa5]{2,6})", same_line_tail)
+            to_city = hit.group(1) if hit else ""
+        if not (from_city and to_city):
+            # 分行布局（12306 卡片）：两张站名都跟在到达时刻之后，
+            # 顺序 = 先出发站后到达站；只在本张票区域内找
+            cities = [
+                ln.strip() for ln in flat[e2:region_end].split("\n")
+                if ln.strip() and _CITY_LINE_RE.match(ln.strip())
+                and ln.strip() not in _TRIP_NOISE_WORDS
+            ][:2]
+            if len(cities) >= 2:
+                from_city, to_city = from_city or cities[0], to_city or cities[1]
+            elif cities:
+                from_city = from_city or cities[0]
+        if not from_city:
+            # 「G7045 09:56 镇江 10:27 常州」单行：站名夹在两段时刻之间
+            from_city = (_cn_place(flat[e1:s2]) or [""])[0]
+        if not to_city:
+            to_city = (_cn_place(flat[e2:region_end]) or [""])[0]
+        if not from_city and not to_city:
+            continue
+
+        # --- 日期：本张票区域里到达时刻之后的第一个日期 ----------------------
+        day = None
+        for m in re.finditer(
+                r"20\d{2}\s*[./年]\s*\d{1,2}\s*[./月]\s*\d{1,2}日?"
+                r"|\d{1,2}月\d{1,2}日|\d{1,2}-\d{1,2}", flat[e2:region_end]):
+            d = parse_date_in_text(m.group(0), anchor_day)[0]
+            if d:
+                day = d
+                break
+        if day is None:
+            day, _, _, _ = parse_date_in_text(flat, anchor_day)
+        day = _trip_year_hint(day or anchor_day, flat[:region_end])
+
+        start_dt = datetime.combine(
+            day, datetime.min.time()).replace(hour=h1 % 24, minute=m1)
+        end_dt = datetime.combine(
+            day, datetime.min.time()).replace(hour=h2 % 24, minute=m2)
+        if end_dt <= start_dt:                     # 跨天车次，如 23:30 → 06:00
+            end_dt += timedelta(days=1)
+
+        # 座位 / 票价 / 退票状态：卡片区域内找；订单号常在卡片**上方**一行，
+        # 向上找但不越过上一张票的到达时刻（否则会拿到别人的订单号）
+        prev_end = 0
+        if idx > 0:
+            prev_arr = [c for c in clocks if c[0] >= trains[idx - 1].end()]
+            if prev_arr:
+                prev_end = prev_arr[0][1]
+        extras = _trip_extras(flat[s1:region_end], upper=flat[prev_end:s1],
+                              order_fallback=(idx + 1 == len(trains)))
+
+        title = " → ".join(p for p in (from_city, to_city) if p)
+        title = f"{title} {train_m.group(1)}".strip() if title else f"乘坐 {train_m.group(1)}"
+
+        events.append(Event(
+            title=title,
+            start=start_dt,
+            end=end_dt,
+            location=" → ".join(p for p in (from_city, to_city) if p),
+            note="｜".join(extras)[:120],
+            priority="高",
+            vague=False,
+            source="text",
+            raw=f"{train_m.group(1)} {h1:02d}:{m1:02d}-{h2:02d}:{m2:02d}",
+        ))
+
+        # 已消费的行：出发时刻、到达时刻、车次所在行，以及被用作站名的行
+        for offset in (s1, s2, train_m.start()):
+            consumed.add(lines[flat.count("\n", 0, offset)])
+        consumed.add(f"@train:{train_m.group(1)}")
+        consumed.update(c for c in (from_city, to_city) if c)
+    return events, consumed
 
 
 def _cn_place(seg: str, limit: int = 1) -> list[str]:
@@ -1607,19 +1654,22 @@ def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[
         return [], set()
     # 有「航空 / 机场 / 登机」字样时先按机票处理：
     # 机票里也可能出现「T2」这种航站楼编号，别被车次规则抢走。
-    order = ((_flight_trip_event, _train_trip_event)
-             if _TRIP_FLIGHT_HINT_RE.search(flat)
-             else (_train_trip_event, _flight_trip_event))
+    if _TRIP_FLIGHT_HINT_RE.search(flat):
+        order = (_flight_trip_event, _train_trip_events)
+    else:
+        order = (_train_trip_events, _flight_trip_event)
     for extractor in order:
-        ev, consumed = extractor(lines, flat, anchor_day)
-        if ev is not None:
+        evs, consumed = extractor(lines, flat, anchor_day)
+        if evs:
+            if not isinstance(evs, list):   # 单事件提取器（机票）统一成列表
+                evs = [evs]
             # 票面上单独成行的日期 / 年份（「07-27」「2026」「11月18日 2026」）
-            # 已经被这条行程吸收，再逐行解析只会漏出「未命名日程」
+            # 已经被这些行程吸收，再逐行解析只会漏出「未命名日程」
             for ln in lines:
                 if ln and parse_date_in_text(ln, anchor_day)[0] \
                         and not _parse_clock_tokens(ln):
                     consumed.add(ln)
-            return [ev], consumed
+            return evs, consumed
     return [], set()
 
 
@@ -2505,9 +2555,14 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
         ):
             continue
 
-        # 整行只有一个时刻（如「09:56」）的碎片，单独成条没有意义
-        if _BARE_CLOCK_RE.match(line) and not date_explicit:
-            continue
+        # 整行只有一个时刻（如「09:56」）的碎片，单独成条没有意义；
+        # 手机截图的**状态栏时间**（「11:52」「11:52 79+」）也属于这类：
+        # 去掉时刻后连一个中文都没有的行，不配单独成一条日程
+        if not date_explicit and len(tokens) == 1:
+            residue = re.sub(r"\d{1,2}\s*[:：]\s*\d{2}", "", line)
+            if (not re.search(r"[\u4e00-\u9fa5]", residue)
+                    and not re.search(r"ddl|deadline|截止|到期", line, re.I)):
+                continue
 
         start_dt: datetime | None = None
         end_dt: datetime | None = None

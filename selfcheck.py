@@ -865,6 +865,26 @@ def test_time_blocks() -> None:
           and "镇江" in t1l[0].location,
           str([(e.start, e.end, e.title, e.location) for e in t1l]))
 
+    # 12306「本人车票」页：一张截图多张票，每张各出一条
+    multi = app.parse_with_rules(
+        "11:52\n79+\n本人车票\n13:09\nK782\n16:35\n昆山\n南京\n10月31日(周六)\n"
+        "已支付\n成人票\n硬座 14车 013号\n¥40.5\n改签\n退票\n"
+        "乘车日期：2026年11月1日 周日\n订单号：E984335980\n复制\n车票当日当次有效\n"
+        "04:26\nK1149\n08:36\n南京\n11月1日(周日)\n昆山\n已支付\n硬座 06车 070号\n"
+        "订单号：E989624393\n10:10\nG7589\n11:34\n昆山南\n11月1日(周日)\n杭州东",
+        anchor=datetime(2026, 11, 1))
+    check("多票截图识别出 3 条行程",
+          len(multi) == 3,
+          str([(e.title, f"{e.start:%m-%d %H:%M}") for e in multi]))
+    check("每张票的日期各归各（不都挂到第一张的日期）",
+          [f"{e.start:%m-%d}" for e in multi] == ["10-31", "11-01", "11-01"],
+          str([f"{e.start:%m-%d}" for e in multi]))
+    check("状态栏时间（11:52）不会变成日程",
+          all(f"{e.start:%H:%M}" != "11:52" for e in multi) and len(multi) == 3)
+    check("「退票」按钮文字不再误标为「已退票」状态",
+          all("已退票" not in e.note for e in multi),
+          str([e.note for e in multi]))
+
     # 反向保护：普通通知不被演出 / 会议通道劫持
     normal = app.parse_with_rules(
         "11月3日 19:00 迎新晚会彩排\n地点：大学生活动中心", anchor=datetime(2026, 11, 2))
