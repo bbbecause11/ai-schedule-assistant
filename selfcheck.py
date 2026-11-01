@@ -698,6 +698,69 @@ def test_time_blocks() -> None:
     trip = app.parse_with_rules("G7045 09:56 镇江 10:27 常州 2026年10月31日")
     check("车票仍识别为 1 条行程", len(trip) == 1, str([e.title for e in trip]))
 
+    # 12306 订单页：车次单独占一行，前后没有「乘/站」字样，靠票据特征词兜底
+    t12306 = app.parse_with_rules(
+        "订单号：EN94148162\n复制\n车票当日当次有效\n19:42\nG7520\n20:05\n"
+        "常州\n10月31日(周六)\n镇江\n已退票\n成人票\n二等座02车01F号")
+    check("12306 订单页（车次独占一行）识别为 1 条行程",
+          len(t12306) == 1, str([e.title for e in t12306]))
+    check("12306 行程日期取自票面（10-31）",
+          bool(t12306) and t12306[0].start.strftime("%m-%d") == "10-31",
+          t12306[0].start.strftime("%Y-%m-%d") if t12306 else "")
+    check("座位 / 订单号 / 退票状态写进备注",
+          bool(t12306) and "已退票" in t12306[0].note
+          and "EN94148162" in t12306[0].note,
+          t12306[0].note if t12306 else "")
+
+    # 机票行程卡：航班号 + 起飞/降落 + 机场（含航站楼），整段合成一条
+    flight = app.parse_with_rules(
+        "去点评\n07-27\n吉祥航空 HO1105\n2026\n"
+        "08:45 上海浦东T2\n10:50 厦门高崎 T4")
+    check("机票行程卡识别为 1 条（不再拆成起飞/降落两条）",
+          len(flight) == 1, str([e.title for e in flight]))
+    check("机票标题带航班号与航线",
+          bool(flight)
+          and flight[0].title == "HO1105 上海浦东T2 → 厦门高崎T4",
+          flight[0].title if flight else "")
+    check("机票日期取票面年份（07-27 · 2026）",
+          bool(flight)
+          and flight[0].start.strftime("%Y-%m-%d") == "2026-07-27",
+          flight[0].start.strftime("%Y-%m-%d") if flight else "")
+    check("机票地点是出发机场（含航站楼）",
+          bool(flight) and flight[0].location == "上海浦东T2",
+          flight[0].location if flight else "")
+
+    # 订单号 EN94148162 是「2 字母 + 8 位数字」，不能被当成航班号
+    check("订单号不会被当成航班号",
+          bool(flight) and "EN" not in flight[0].title)
+    import re as _re
+    m_class = _re.search(r"(?<![A-Za-z0-9])([GDCKZT]\d{1,4})(?!\d)", "计算机楼C102")
+    check("教室编号仍不算车次",
+          m_class is not None and not app._train_like(m_class, "计算机楼C102"))
+
+    # 过期 ≠ 丢失：normalize 把过期条目带回报告，补录时 keep_past 放行
+    now = datetime(2026, 11, 1, 15, 0)
+    past_ev = app.Event("HO1105", datetime(2026, 7, 27, 8, 45),
+                        datetime(2026, 7, 27, 10, 50))
+    future_ev = app.Event("开会", datetime(2026, 11, 3, 9),
+                          datetime(2026, 11, 3, 10))
+    kept, rep = app.normalize_events([past_ev, future_ev], now=now)
+    check("过期日程默认被过滤", [e.title for e in kept] == ["开会"],
+          str([e.title for e in kept]))
+    check("被过滤的条目会带回报告（页面上要能说清识别到了什么）",
+          [e.title for e in rep.get("expired_events", [])] == ["HO1105"])
+    kept2, _rep2 = app.normalize_events([past_ev, future_ev], now=now,
+                                        keep_past=True)
+    check("补录模式（keep_past）不过滤过去行程",
+          [e.title for e in kept2] == ["HO1105", "开会"])
+
+    # 报告文案：只有过期时不再误写「全部为重复日程」，并给出补录入口
+    src_all = open("app.py", encoding="utf-8").read()
+    check("全部过期时不再误报「全部为重复日程」",
+          'rep["all_duplicate"] = dup > 0' in src_all and '"all_expired"' in src_all)
+    check("报告里提供「仍然添加」补录入口",
+          "add_expired" in src_all and "def _cb_add_expired" in src_all)
+
     # 反例：字段不足 2 行时不做归并（避免误伤单条日程）
     single = "10月31日 14:00 实验室安全培训\n场地：实验楼A201"
     check("字段不足 2 行时不触发归并",

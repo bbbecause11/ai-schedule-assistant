@@ -103,7 +103,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.8.2"
+APP_VERSION = "2.8.3"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -1317,6 +1317,17 @@ def _looks_like_date_only(line: str) -> bool:
 # 逐行解析会产出一堆「未命名日程」。这里先用整体视角识别一段行程，
 # 合成一条事件，并把用掉的行标记出来，避免重复入库。
 _TRIP_TRAIN_RE = re.compile(r"(?<![A-Za-z0-9])([GDCKZT]\d{1,4})(?!\d)")
+# 航班号：两位航司代码 + 3~4 位数字（HO1105 / CZ3101 / MU5101）。
+# 订单号（EN94148162）是 2 字母 + 8 位数字，被 (?!\d) 挡掉，不会误判成航班。
+_TRIP_FLIGHT_RE = re.compile(r"(?<![A-Za-z0-9])([A-Z]{2}\d{3,4})(?!\d)")
+# 机票截图特征词：只有出现这些词，才把「两段时刻 + 航站楼」当成一段航程
+_TRIP_FLIGHT_HINT_RE = re.compile(
+    r"航空|航班|机场|登机|值机|航站楼|起飞|降落|电子客票|登机牌")
+# 车票特征词：12306 / 携程的票面里，车次常常单独占一行，
+# 前后既没有「乘」也没有「站」，只能靠这些词兜底。
+_TRIP_TICKET_HINT_RE = re.compile(
+    r"车票|火车票|高铁|动车|城际|二等座|一等座|商务座|无座|检票|订单号|"
+    r"改签|退票|乘车|车站|站台|始发|终到")
 
 
 def _train_like(m: "re.Match", flat: str) -> bool:
@@ -1331,7 +1342,21 @@ def _train_like(m: "re.Match", flat: str) -> bool:
         return False
     before = flat[max(0, m.start() - 4):m.start()]
     ctx = flat[m.start():m.end() + 10]
-    return ("乘" in before or "站" in ctx)
+    if "乘" in before or "站" in ctx:
+        return True
+    # 票面布局（车次独占一行）没有任何「乘 / 站」上下文，
+    # 但整段是票据（有订单号 / 二等座 / 检票…）时仍然要认。
+    return bool(_TRIP_TICKET_HINT_RE.search(flat))
+
+
+def _flight_like(m: "re.Match", flat: str) -> bool:
+    """候选航班号像不像真的航班号：必须有航空/机场类上下文。"""
+    if not _TRIP_FLIGHT_HINT_RE.search(flat):
+        return False
+    after = flat[m.end():m.end() + 3]
+    if re.match(r"[楼室馆层区幢栋房]", after):
+        return False
+    return True
 _BARE_CLOCK_RE = re.compile(r"^\s*(\d{1,2})\s*[:：]\s*(\d{2})\s*$")
 _CITY_LINE_RE = re.compile(r"^[\u4e00-\u9fa5]{2,6}$")
 # 车票界面上大量非日程文案，识别站名时要排除
@@ -1344,23 +1369,59 @@ _TRIP_NOISE_WORDS = {
 }
 
 
-def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[str]]:
-    """
-    识别「车次 + 出发时间 + 到达时间 + 出发站 + 到达站」构成的一段行程。
+def _trip_lines(text: str) -> tuple[list[str], str]:
+    """把票面文本切成「行列表」与「整段文本」，两种布局判断都要用。"""
+    lines = [ln.strip() for ln in
+             text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return lines, "\n".join(lines)
 
-    只在文本里出现车次（G/D/C/K/Z/T + 数字）时才介入，普通日程完全不受影响。
-    返回 (行程事件列表, 已被消费的行文本集合)。
-    """
-    lines = [ln.strip() for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
-    flat = "\n".join(lines)
 
+def _trip_year_hint(day: date, flat: str) -> date:
+    """
+    票面把年、月日拆成两行是常态（「07-27」上面/下面单独一行「2026」），
+    parse_date_in_text 只能按「今年」猜。这里用票面里独立出现的 20XX 兜底，
+    跨年的机票才不会整整差一年。
+    """
+    m = re.search(r"(?<!\d)(20\d{2})(?!\d)", flat)
+    if not m:
+        return day
+    year = int(m.group(1))
+    if year == day.year or abs(year - day.year) > 1:
+        return day
+    try:
+        return day.replace(year=year)
+    except ValueError:            # 2 月 29 日落到平年
+        return day
+
+
+def _trip_extras(flat: str, seat: bool = True) -> list[str]:
+    """从票面补齐座位 / 订单号 / 票价，放进备注。"""
+    extras: list[str] = []
+    if seat:
+        m = re.search(r"([一二三]等座\s*\d{1,3}\s*车\s*\d{1,3}\s*[A-F]?\s*号?)", flat)
+        if m:
+            extras.append(m.group(1).replace(" ", ""))
+    order = re.search(r"订单号\s*[:：]\s*([A-Za-z0-9]{6,})", flat)
+    if order:
+        extras.append(f"订单号 {order.group(1)}")
+    price = re.search(r"[¥￥]\s*(\d+(?:\.\d+)?)", flat)
+    if price:
+        extras.append(f"¥{price.group(1)}")
+    if re.search(r"已?退票", flat):
+        extras.append("已退票")
+    return extras
+
+
+def _train_trip_event(lines: list[str], flat: str,
+                      anchor_day: date) -> tuple[Event | None, set[str]]:
+    """火车票 → 一条事件。没有车次时返回 (None, set())。"""
     train_m = None
     for cand in _TRIP_TRAIN_RE.finditer(flat):
         if _train_like(cand, flat):
             train_m = cand
             break
     if not train_m:
-        return [], set()
+        return None, set()
 
     # 车次前后的时刻。不锚定行首，因此「09:56 镇江 G7045 10:27 常州」这类
     # 单行布局与「每行一个碎片」的分行布局都能命中。
@@ -1371,7 +1432,7 @@ def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[
     before = [c for c in clocks if c[1] <= train_m.start()]
     after = [c for c in clocks if c[0] >= train_m.end()]
     if not before or not after:
-        return [], set()
+        return None, set()
 
     s1, e1, h1, m1 = before[-1]
     s2, e2, h2, m2 = after[0]
@@ -1397,9 +1458,9 @@ def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[
         from_city = cities[0] if cities else ""
         to_city = cities[1] if len(cities) > 1 else ""
 
-    # 日期：优先用全文里带年份的完整日期
+    # 日期：优先用全文里带年份的完整日期，再用票面上独立的年份纠偏
     day, _, _, _ = parse_date_in_text(flat, anchor_day)
-    day = day or anchor_day
+    day = _trip_year_hint(day or anchor_day, flat)
 
     start_dt = datetime.combine(day, datetime.min.time()).replace(hour=h1 % 24, minute=m1)
     end_dt = datetime.combine(day, datetime.min.time()).replace(hour=h2 % 24, minute=m2)
@@ -1407,16 +1468,7 @@ def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[
         end_dt += timedelta(days=1)
 
     # 从原文补齐座位 / 订单号 / 票价，放进备注
-    extras: list[str] = []
-    seat = re.search(r"([一二三]等座\s*\d{1,3}\s*车\s*\d{1,3}\s*[A-F]?\s*号?)", flat)
-    if seat:
-        extras.append(seat.group(1).replace(" ", ""))
-    order = re.search(r"订单号\s*[:：]\s*([A-Za-z0-9]{6,})", flat)
-    if order:
-        extras.append(f"订单号 {order.group(1)}")
-    price = re.search(r"[¥￥]\s*(\d+(?:\.\d+)?)", flat)
-    if price:
-        extras.append(f"¥{price.group(1)}")
+    extras = _trip_extras(flat)
 
     title = " → ".join(p for p in (from_city, to_city) if p)
     title = f"{title} {train_m.group(1)}".strip() if title else f"乘坐 {train_m.group(1)}"
@@ -1439,7 +1491,110 @@ def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[
         consumed.add(lines[flat.count("\n", 0, offset)])
     consumed.add(f"@train:{train_m.group(1)}")   # 分号切分会改写行文本，按车次兜底
     consumed.update(c for c in (from_city, to_city) if c)
-    return [ev], consumed
+    return ev, consumed
+
+
+def _city_after_clock(flat: str, pos: int) -> str:
+    """取时刻同一行紧跟的地名：「08:45 上海浦东T2」→ 上海浦东T2。"""
+    tail = flat[pos:].split("\n")[0]
+    m = re.match(r"\s*([\u4e00-\u9fa5]{2,10}(?:\s*T\d)?)", tail)
+    if not m:
+        return ""
+    return re.sub(r"\s+T(\d)", r"T\1", m.group(1).strip())
+
+
+def _flight_trip_event(lines: list[str], flat: str,
+                       anchor_day: date) -> tuple[Event | None, set[str]]:
+    """
+    机票行程卡 / 登机牌 → 一条事件。
+
+    携程、航旅纵横的行程卡结构是：日期、航司 + 航班号、起飞时刻 + 出发机场（含航站楼）、
+    降落时刻 + 到达机场。逐行解析会把起飞、降落拆成两条「以机场为标题」的日程，
+    所以这里整段合成一条：标题带航班号与航线，地点取出发机场。
+    """
+    flight_m = None
+    for cand in _TRIP_FLIGHT_RE.finditer(flat):
+        if _flight_like(cand, flat):
+            flight_m = cand
+            break
+    if not flight_m:
+        return None, set()
+
+    clocks = [
+        (m.start(), m.end(), int(m.group(1)), int(m.group(2)))
+        for m in re.finditer(r"(?<!\d)(\d{1,2})\s*[:：]\s*(\d{2})(?!\d)", flat)
+    ]
+    if len(clocks) < 2:
+        return None, set()
+
+    after = [c for c in clocks if c[0] >= flight_m.end()]
+    before = [c for c in clocks if c[1] <= flight_m.start()]
+    if len(after) >= 2:                 # 「HO1105」在上，起飞/降落在下（常见）
+        s1, e1, h1, m1 = after[0]
+        s2, e2, h2, m2 = after[1]
+    elif before and after:              # 「08:45 HO1105 … 10:50」单行布局
+        s1, e1, h1, m1 = before[-1]
+        s2, e2, h2, m2 = after[0]
+    else:
+        s1, e1, h1, m1 = clocks[0]
+        s2, e2, h2, m2 = clocks[1]
+
+    from_city = _city_after_clock(flat, e1)
+    to_city = _city_after_clock(flat, e2)
+
+    day, _, _, _ = parse_date_in_text(flat, anchor_day)
+    day = _trip_year_hint(day or anchor_day, flat)
+
+    start_dt = datetime.combine(day, datetime.min.time()).replace(hour=h1 % 24, minute=m1)
+    end_dt = datetime.combine(day, datetime.min.time()).replace(hour=h2 % 24, minute=m2)
+    if end_dt <= start_dt:              # 红眼航班：23:40 → 次日 01:30
+        end_dt += timedelta(days=1)
+
+    code = flight_m.group(1)
+    route = " → ".join(p for p in (from_city, to_city) if p)
+    title = f"{code} {route}".strip() if route else f"航班 {code}"
+
+    ev = Event(
+        title=title,
+        start=start_dt,
+        end=end_dt,
+        location=from_city or route,
+        note="｜".join(_trip_extras(flat, seat=False))[:120],
+        priority="高",
+        vague=False,
+        source="text",
+        raw=f"{code} {h1:02d}:{m1:02d}-{h2:02d}:{m2:02d}",
+    )
+
+    consumed: set[str] = set()
+    for offset in (s1, s2, flight_m.start()):
+        consumed.add(lines[flat.count("\n", 0, offset)])
+    consumed.add(f"@flight:{code}")
+    consumed.update(c for c in (from_city, to_city) if c)
+    return ev, consumed
+
+
+def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[str]]:
+    """
+    识别「班次 + 出发时间 + 到达时间 + 出发地 + 到达地」构成的一段行程。
+
+    只在文本里出现车次（G/D/C/K/Z/T + 数字）或航班号（2 字母 + 3~4 位数字）
+    时才介入，普通日程完全不受影响。
+    返回 (行程事件列表, 已被消费的行文本集合)。
+    """
+    lines, flat = _trip_lines(text)
+    if not flat.strip():
+        return [], set()
+    # 有「航空 / 机场 / 登机」字样时先按机票处理：
+    # 机票里也可能出现「T2」这种航站楼编号，别被车次规则抢走。
+    order = ((_flight_trip_event, _train_trip_event)
+             if _TRIP_FLIGHT_HINT_RE.search(flat)
+             else (_train_trip_event, _flight_trip_event))
+    for extractor in order:
+        ev, consumed = extractor(lines, flat, anchor_day)
+        if ev is not None:
+            return [ev], consumed
+    return [], set()
 
 
 # ---------------------------------------------------------------------------
@@ -2010,13 +2165,16 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
     events.extend(block_events)
     has_blocks = bool(block_events)
 
-    consumed_trains = {c[7:] for c in trip_consumed if c.startswith("@train:")}
+    # 「@train:G7520」「@flight:HO1105」这类标记：票面上的班次行在分号切分后
+    # 文本会变，按班次号兜底跳过，别让它再被逐行解析成一条日程。
+    consumed_codes = {c.split(":", 1)[1] for c in trip_consumed
+                      if c.startswith(("@train:", "@flight:"))}
     for line in _split_candidates(text):
         line = line[:400]
         if (line.strip() in trip_consumed or line.strip() in block_consumed
-                or (consumed_trains and re.search(
+                or (consumed_codes and re.search(
                     r"(?<![A-Za-z0-9])(?:%s)(?!\d)" % "|".join(
-                        re.escape(t) for t in consumed_trains), line))):
+                        re.escape(t) for t in consumed_codes), line))):
             continue
         # 已按时间块归并过的文档，字段行一律不再单独成条
         if has_blocks and _field_of(line) is not None:
@@ -4995,14 +5153,17 @@ def _title_similarity(a: str, b: str) -> float:
 # 7. 去重 / 冲突检测 / 过期过滤
 # ---------------------------------------------------------------------------
 
-def normalize_events(events: list[Event], now: datetime | None = None) -> tuple[list[Event], dict[str, Any]]:
+def normalize_events(events: list[Event], now: datetime | None = None,
+                     keep_past: bool = False) -> tuple[list[Event], dict[str, Any]]:
     """
     对日程集合做：过期过滤 → 去重 → 冲突检测。
 
-    返回 (处理后的列表, 统计报告)。
+    keep_past=True 时不做过期过滤 —— 补录「已经过去的行程」（机票、车票）用。
+    过期的那几条会连对象一起放进报告里，好在页面上给出「识别到了什么」。
     """
     now = now or datetime.now()
-    report = {"expired": 0, "duplicated": 0, "conflicts": 0}
+    report = {"expired": 0, "duplicated": 0, "conflicts": 0,
+              "expired_events": []}
 
     # --- 7.0 循环日程：只标注来源，绝不改写规则 ------------------------
     # 旧实现在这里给所有「没有 COUNT」的循环日程硬补 COUNT=16，
@@ -5024,7 +5185,12 @@ def normalize_events(events: list[Event], now: datetime | None = None) -> tuple[
             fresh.append(ev)
             continue
         if ev.end < now - timedelta(minutes=1):
+            if keep_past:
+                fresh.append(ev)
+                continue
             report["expired"] += 1
+            if len(report["expired_events"]) < 20:
+                report["expired_events"].append(ev)
             continue
         fresh.append(ev)
 
@@ -8289,15 +8455,17 @@ def render_clear_all_control(origin: str, label: str = "🗑️ 清空全部日�
     render_clear_all_confirm(origin)
 
 
-def _push_events(new_events: list[Event], source_label: str) -> dict[str, Any]:
+def _push_events(new_events: list[Event], source_label: str,
+                 keep_past: bool = False) -> dict[str, Any]:
     """
     把新解析出的日程追加进会话（不覆盖已有内容），并做归一化处理。
 
+    keep_past=True 用于补录历史行程：不去掉已经过去的条目。
     返回本次操作报告。
     """
     before_count = len(st.session_state.events)
     combined = list(st.session_state.events) + new_events
-    normalized, report = normalize_events(combined)
+    normalized, report = normalize_events(combined, keep_past=keep_past)
 
     # 计算真正新增的条数（按 uid 差集）
     old_uids = {ev.uid for ev in st.session_state.events}
@@ -8316,6 +8484,30 @@ def _push_events(new_events: list[Event], source_label: str) -> dict[str, Any]:
     st.session_state.editor_key += 1
     st.session_state.editor_hash = ""
     return report
+
+
+def _cb_add_expired() -> None:
+    """
+    把被「过期过滤」挡掉的日程补录进来（用户点「仍然添加」时触发）。
+
+    机票 / 火车票截图常常是行程结束才整理，日期早于今天很正常；
+    keep_past=True 让这批条目跳过过期过滤。
+    """
+    rep = st.session_state.get("last_report") or {}
+    pending = rep.get("expired_events") or []
+    if not pending:
+        return
+    new_report = _push_events(pending, "补录历史", keep_past=True)
+    new_report.update({
+        "engine": "补录历史",
+        "ai_error": "",
+        "warnings": [],
+        "ocr_count": 0,
+        "timetable_cells": 0,
+        "image_rules": 0,
+    })
+    new_report["vague"] = sum(1 for ev in st.session_state.events if ev.vague)
+    st.session_state.last_report = new_report
 
 
 def _recompute_conflicts() -> None:
@@ -8487,7 +8679,13 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
     st.session_state.last_report = report
 
     if report["added"] == 0 and report["raw_count"] > 0:
-        st.session_state.last_report["all_duplicate"] = True
+        rep = st.session_state.last_report
+        dup = report.get("duplicated", 0)
+        # 以前不管什么原因没新增，都写「全部为重复日程」——
+        # 但票据日期早于今天时是被「过期过滤」丢掉的，跟重复毫无关系，
+        # 用户看到这行只会以为解析失败。这里分开记。
+        rep["all_duplicate"] = dup > 0
+        rep["all_expired"] = report.get("expired", 0) > 0 and dup == 0
 
 
 # ---------------------------------------------------------------------------
@@ -9526,8 +9724,26 @@ def _render_parse_report(report: dict[str, Any]) -> None:
         chips.append(_chip(f"按图片重复规则 {report['image_rules']} 条", "ok"))
     if report.get("all_duplicate"):
         chips.append(_chip("全部为重复日程，未新增", "warn"))
+    if report.get("all_expired"):
+        chips.append(_chip(f"时间已过，未加入 {report.get('expired', 0)} 条", "warn"))
     if chips:
         _html('<div style="margin-bottom:10px;">' + "".join(chips) + "</div>")
+
+    # 过期 ≠ 解析失败：把「识别到了什么」写清楚，并给一条补录通道，
+    # 否则用户只会看到「新增 0 条」，以为机票/车票根本没识别出来。
+    if report.get("all_expired"):
+        expired = report.get("expired_events") or []
+        detail = "、".join(
+            f"{ev.title}（{ev.start:%m-%d %H:%M}）" for ev in expired[:3])
+        more = f" 等 {len(expired)} 条" if len(expired) > 3 else ""
+        _html(
+            '<div class="notice notice-warn">'
+            '⏳ <b>识别成功</b>，但这些日程的时间已经过去，默认不加入日历：'
+            f'{_escape(detail)}{_escape(more)}。'
+            '补录已经完成的行程，可以点下面的按钮。</div>'
+        )
+        st.button("仍然添加这几条（补录历史行程）", key="add_expired",
+                  on_click=_cb_add_expired)
 
     if report.get("timetable_cells") and not st.session_state.get("course_anchor_set"):
         _html(
