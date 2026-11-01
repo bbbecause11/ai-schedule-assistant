@@ -2135,6 +2135,19 @@ def test_layout_optimizations() -> None:
           and "padding: 4.2rem var(--space-4) var(--space-7);" in src
           and "padding: 4.2rem var(--space-3) var(--space-6);" in src)
 
+    # ④e 手机端侧边栏弹出动画：宽度一次到位 + transform 位移
+    #    （宽度过渡会逐帧重排：文字两行变一行、按钮上跳——用户实测反馈过）
+    check("手机端侧边栏宽度一次到位（弹出过程内容零重排）",
+          "width: min(85vw, 21rem) !important;" in src)
+    check("侧边栏滑入动画用 transform 位移（GPU 合成，不触发 reflow）",
+          "transition: transform .3s var(--ease-out) !important;" in src
+          and "transform: translateX(-110%) !important;" in src)
+    # 隐藏规则必须只在手机端媒体查询里：桌面端侧边栏是钉在左侧的，不遮按钮
+    media_pos = src.rfind("@media (max-width: 640px)", 0, src.find(".st-key-fb_fab"))
+    close_pos = src.find("\n}", src.find("stSidebarCollapseButton"))
+    check("该隐藏规则写在 640px 手机端媒体查询内",
+          0 < media_pos < close_pos and close_pos < src.find("def _feedback_env_info"))
+
     # ⑤ 二维码悬停不再出现空工具条（Streamlit 的 stElementToolbar 空壳）
     check("分享面板隐藏图片元素工具条（二维码上方的空气泡）",
           '.st-key-share_body [data-testid="stElementToolbar"] { display: none !important; }' in src)
