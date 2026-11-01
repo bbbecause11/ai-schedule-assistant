@@ -103,7 +103,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.9.2"
+APP_VERSION = "2.9.3"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -1368,6 +1368,8 @@ _TRIP_NOISE_WORDS = {
     "当天", "当日", "次日", "出发", "到达", "电子票", "纸质票", "报销凭证",
     "已支付", "待支付", "现金支付", "本人车票", "餐饮特产", "租车约车",
     "免费乘车儿童申报",
+    # 检票卡片（12306 首页小卡）里的 UI 词，不是站名
+    "乘车码", "检票口", "二维码", "中国铁路", "铁路",
 }
 
 
@@ -1418,6 +1420,9 @@ def _trip_extras(flat: str, seat: bool = True, upper: str = "",
     price = re.search(r"[¥￥]\s*(\d+(?:\.\d+)?)", flat)
     if price:
         extras.append(f"¥{price.group(1)}")
+    gate = re.search(r"检票口\s*[:：]?\s*([0-9A-Za-z]{1,4}(?:\s?[0-9A-Za-z]{1,4})?)", flat)
+    if gate:
+        extras.append("检票口 " + gate.group(1).strip())
     # 退票 / 改签**状态**（「已退票」）才算票面信息；
     # 「改签」「退票」是每张票都有的按钮文字，不能当成状态
     for flag in ("已退票", "已改签"):
@@ -1467,6 +1472,12 @@ def _train_trip_events(lines: list[str], flat: str,
             region_end = min(nxt.start(), nxt_dep[-1][0]) if nxt_dep else nxt.start()
         else:
             region_end = len(flat)
+        # 本张票区域的起点：上一张票的到达时刻结束处（首页向上没有别家内容）
+        prev_end = 0
+        if idx > 0:
+            prev_arr = [c for c in clocks if c[0] >= trains[idx - 1].end()]
+            if prev_arr:
+                prev_end = prev_arr[0][1]
 
         # --- 出发站 / 到达站 ------------------------------------------------
         from_city = ""
@@ -1490,6 +1501,21 @@ def _train_trip_events(lines: list[str], flat: str,
                 from_city, to_city = from_city or cities[0], to_city or cities[1]
             elif cities:
                 from_city = from_city or cities[0]
+        if not (from_city and to_city):
+            # 检票卡片（12306 首页小卡）：站名在时刻**上方**竖排
+            # （「杭州东 / 宁波 / 11月1日 / 20:13 / 21:09」），OCR 线性化后
+            # 城市行跑到时钟前面。在「上一张票的到达时刻 → 本张出发时刻」
+            # 的窗口里按出现顺序取前两个纯站名行 = 出发站、到达站。
+            upper_cities = [
+                ln.strip() for ln in flat[prev_end:s1].split("\n")
+                if ln.strip() and _CITY_LINE_RE.match(ln.strip())
+                and ln.strip() not in _TRIP_NOISE_WORDS
+            ][:2]
+            if len(upper_cities) >= 2:
+                from_city, to_city = from_city or upper_cities[0], \
+                    to_city or upper_cities[1]
+            elif upper_cities:
+                from_city = from_city or upper_cities[0]
         if not from_city:
             # 「G7045 09:56 镇江 10:27 常州」单行：站名夹在两段时刻之间
             from_city = (_cn_place(flat[e1:s2]) or [""])[0]
@@ -1498,11 +1524,12 @@ def _train_trip_events(lines: list[str], flat: str,
         if not from_city and not to_city:
             continue
 
-        # --- 日期：本张票区域里到达时刻之后的第一个日期 ----------------------
+        # --- 日期：本张票区域里出发时刻之后的第一个日期 ----------------------
+        # （检票卡片的「11月1日」夹在两个时刻之间，所以从出发时刻起扫）
         day = None
         for m in re.finditer(
                 r"20\d{2}\s*[./年]\s*\d{1,2}\s*[./月]\s*\d{1,2}日?"
-                r"|\d{1,2}月\d{1,2}日|\d{1,2}-\d{1,2}", flat[e2:region_end]):
+                r"|\d{1,2}月\d{1,2}日|\d{1,2}-\d{1,2}", flat[e1:region_end]):
             d = parse_date_in_text(m.group(0), anchor_day)[0]
             if d:
                 day = d
@@ -1518,13 +1545,7 @@ def _train_trip_events(lines: list[str], flat: str,
         if end_dt <= start_dt:                     # 跨天车次，如 23:30 → 06:00
             end_dt += timedelta(days=1)
 
-        # 座位 / 票价 / 退票状态：卡片区域内找；订单号常在卡片**上方**一行，
-        # 向上找但不越过上一张票的到达时刻（否则会拿到别人的订单号）
-        prev_end = 0
-        if idx > 0:
-            prev_arr = [c for c in clocks if c[0] >= trains[idx - 1].end()]
-            if prev_arr:
-                prev_end = prev_arr[0][1]
+        # 座位 / 票价 / 退票状态：卡片区域内找；订单号常在卡片**上方**一行
         extras = _trip_extras(flat[s1:region_end], upper=flat[prev_end:s1],
                               order_fallback=(idx + 1 == len(trains)))
 

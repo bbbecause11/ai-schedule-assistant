@@ -885,6 +885,25 @@ def test_time_blocks() -> None:
           all("已退票" not in e.note for e in multi),
           str([e.note for e in multi]))
 
+    # 检票卡片（12306 首页小卡）：站名在时刻**上方**，卡片里满是 UI 词
+    gate = app.parse_with_rules(
+        "G7561\n铁路12306\n中国铁路\n杭州东\n宁波\n11月1日\n回\n"
+        "20:13\n21:09\n乘车码\n检票口:24B 25B\n02车01B号二等座\n"
+        "以上信息仅供参考，请以现场公告为准。", anchor=datetime(2026, 11, 1))
+    check("检票卡片识别为 1 条（站名取自时刻上方）",
+          len(gate) == 1
+          and gate[0].start.strftime("%m-%d %H:%M") == "11-01 20:13"
+          and gate[0].end.strftime("%H:%M") == "21:09",
+          str([(e.start, e.end, e.title) for e in gate]))
+    check("检票卡片标题是「站名 → 站名 车次」，不是「乘车码 → 乘车码」",
+          bool(gate) and gate[0].title == "杭州东 → 宁波 G7561",
+          gate[0].title if gate else "")
+    check("座位与检票口进备注（乘车码 / 中国铁路 等 UI 词被排除）",
+          bool(gate) and "02车01B号" in gate[0].note
+          and "检票口 24B 25B" in gate[0].note
+          and "乘车码" not in gate[0].title and "乘车码" not in gate[0].location,
+          gate[0].note if gate else "")
+
     # 反向保护：普通通知不被演出 / 会议通道劫持
     normal = app.parse_with_rules(
         "11月3日 19:00 迎新晚会彩排\n地点：大学生活动中心", anchor=datetime(2026, 11, 2))
