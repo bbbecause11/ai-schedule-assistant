@@ -103,7 +103,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.9.0"
+APP_VERSION = "2.9.1"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -2127,7 +2127,8 @@ def _chat_location(flat: str) -> str:
 # 「会议时间 19 00 (GMT+ )」这种乱码），主题行反而因没有时间被丢掉。
 # 这里整卡合成一条：主题做标题，会议号与入会链接放进备注。
 _MEET_HINT_RE = re.compile(
-    r"腾讯会议|钉钉会议|飞书会议|Zoom|会议号|会议\s?ID|入会链接|会议邀请|会议密钥")
+    r"腾讯会议|Tencent Meeting|钉钉会议|飞书会议|Zoom|会议号|会议\s?ID|"
+    r"入会链接|会议邀请|会议密钥|[Ss]tarted\s+by")
 _MEET_THEME_RE = re.compile(r"(?:会议主题|会议名称|主题)\s*[:：]\s*([^\n，。；]{2,40})")
 _MEET_TIME_RE = re.compile(r"(?:会议时间|时间)\s*[:：]\s*([^\n]+)")
 _MEET_ID_RE = re.compile(r"(?:会议号|会议\s?ID|会议密码)\s*[:：]?\s*([0-9][0-9\s\-]{5,})")
@@ -2167,38 +2168,88 @@ def _extract_meeting_event(text: str, anchor_day: date,
                 or parse_recurrence(cand)[0]):
             time_line = cand
             break
-    if not time_line:
-        return []
 
-    day, _, _, _ = parse_date_in_text(time_line, anchor_day)
-    # 去掉「(GMT+08:00)」这类时区尾巴，避免 08:00 被当成第三个时刻
-    clock_src = re.sub(r"[(（]\s*(?:GMT|UTC)[^)）]*[)）]", " ", time_line)
-    tokens = _parse_clock_tokens(clock_src)
-    if not tokens:
-        return []
+    # 「Started by 冯昊诚 / 364 293 371 / 18:23 … 19:23 / 2026/11/01」这种
+    # 腾讯会议新版式根本没有「时间：」字段——时刻、日期、会议号都是独立行。
+    # 没找到时间行时退回整卡提取，绝不能因为字段缺失而放弃整条日程。
+    if time_line:
+        day, _, _, _ = parse_date_in_text(time_line, anchor_day)
+        # 去掉「(GMT+08:00)」这类时区尾巴，避免 08:00 被当成第三个时刻
+        clock_src = re.sub(r"[(（]\s*(?:GMT|UTC)[^)）]*[)）]", " ", time_line)
+        tokens = _parse_clock_tokens(clock_src)
+        if not tokens:
+            return []
+    else:
+        # 兜底版式必须足够「像一张分享卡」才介入：
+        # 要么有「Started by」开头，要么有独立成行的三位分组会议号
+        # （364 293 371）。普通日程里只是「提到」腾讯会议的不算——
+        # 否则「11月30日 晚上8点半 腾讯会议 和学长请教保研经验」
+        # 这种正常一行日程会被整段吞掉。
+        started = re.search(r"Started\s*by", flat, re.I)
+        id_line = re.search(r"(?<!\d)\d{3}[\s\-]\d{3}[\s\-]\d{3}(?!\d)", flat)
+        if not (started or id_line) or len(lines) > 16:
+            return []
+        clock_src = re.sub(r"[(（]\s*(?:GMT|UTC)[^)）]*[)）]", " ", flat)
+        tokens = _parse_clock_tokens(clock_src)
+        if len(tokens) < 2:
+            return []
+        day, _, _, _ = parse_date_in_text(clock_src, anchor_day)
 
-    rrule, _label = parse_recurrence(time_line)   # 「每周三 19:30-21:00」循环会议
+    rrule, _label = parse_recurrence(time_line or "")   # 「每周三 19:30」循环会议
     day = day or anchor_day
     if rrule and day == anchor_day:
         # 「每周三」没写具体日期：推进到最近的那个星期几，别挂在今天
         day = _next_weekday(day, rrule)
 
+    # 「Started by」版式的起止日期各在时钟下方：跨天会议（23:30 → 次日 00:30）
+    # 会出现两个不同日期，取第二个当结束日
+    end_day = day
+    if not time_line:
+        seen: list[date] = []
+        for m in re.finditer(
+                r"20\d{2}\s*[./年]\s*\d{1,2}\s*[./月]\s*\d{1,2}日?|\d{1,2}月\d{1,2}日",
+                clock_src):
+            d = parse_date_in_text(m.group(0), anchor_day)[0]
+            if d and d not in seen:
+                seen.append(d)
+        if len(seen) >= 2:
+            day, end_day = seen[0], seen[1]
+
     start_dt = datetime.combine(day, dt_time(tokens[0][0], tokens[0][1]))
     end_dt = None
     if len(tokens) >= 2:
-        end_dt = datetime.combine(day, dt_time(tokens[1][0], tokens[1][1]))
-        if end_dt <= start_dt:
+        end_dt = datetime.combine(end_day, dt_time(tokens[1][0], tokens[1][1]))
+        # 结束日期来自票面第二行日期（跨天会议）时日期已是次日，
+        # 不能再 +1；只有同一日期内「00:30 < 23:30」才滚动一天
+        if end_dt <= start_dt and end_day == day:
             end_dt += timedelta(days=1)
     if end_dt is None:
         end_dt = start_dt + timedelta(minutes=DEFAULT_EVENT_MINUTES)
 
     tm = _MEET_THEME_RE.search(flat)
-    title = tm.group(1).strip() if tm else "线上会议"
+    if tm:
+        title = tm.group(1).strip()
+    else:
+        # 没有「会议主题」字段：用 App 名 + 发起人（「Started by 冯昊诚」）
+        sm = re.search(r"Started\s*by\s*([^\n]+)", flat, re.I)
+        app_name = ("腾讯会议" if re.search(r"腾讯会议|Tencent Meeting", flat, re.I)
+                    else "钉钉会议" if "钉钉" in flat
+                    else "飞书会议" if "飞书" in flat else "线上会议")
+        title = f"{app_name}（{sm.group(1).strip()} 发起）" if sm else app_name
 
     extras: list[str] = []
     mid = _MEET_ID_RE.search(flat)
     if mid:
         extras.append("会议号 " + re.sub(r"[\s\-]", "", mid.group(1))[:20])
+    else:
+        # 独立成行的会议号：「364 293 371」
+        m2 = re.search(r"(?<!\d)(\d{3})[\s\-]?(\d{3})[\s\-]?(\d{3})(?!\d)", flat)
+        if m2:
+            extras.append("会议号 " + "".join(m2.groups()))
+    if not tm:
+        sm = re.search(r"Started\s*by\s*([^\n]+)", flat, re.I)
+        if sm:
+            extras.append(f"发起人 {sm.group(1).strip()[:12]}")
     link = re.search(r"https?://\S+", flat)
     if link:
         extras.append(link.group(0)[:80])

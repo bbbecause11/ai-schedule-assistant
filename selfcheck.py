@@ -797,6 +797,43 @@ def test_time_blocks() -> None:
           len(meet_d) == 1 and meet_d[0].start.strftime("%m-%d") == "11-09",
           str([(e.start, e.title) for e in meet_d]))
 
+    # 腾讯会议「Started by」版式：没有「时间：」字段，时刻 / 日期 / 会议号
+    # 都是独立行（真实用户截图的布局）
+    started = app.parse_with_rules(
+        "Started by 冯昊诚\n364 293 371\n18:23\n19:23\n1 hrs\n"
+        "2026/11/01\n(GMT+08:00)\n2026/11/01\n腾讯会议",
+        anchor=datetime(2026, 11, 1))
+    check("「Started by」版式识别为 1 条（不再产出 08:00 乱码）",
+          len(started) == 1
+          and started[0].start.strftime("%Y-%m-%d %H:%M") == "2026-11-01 18:23",
+          str([(e.start, e.title) for e in started]))
+    check("「Started by」标题带 App 名与发起人",
+          bool(started) and started[0].title == "腾讯会议（冯昊诚 发起）",
+          started[0].title if started else "")
+    check("独立成行的会议号进了备注",
+          bool(started) and "364293371" in started[0].note,
+          started[0].note if started else "")
+    check("GMT+08:00 里的 08:00 不会被当成时刻",
+          bool(started) and started[0].start.strftime("%H:%M") == "18:23")
+
+    overnight = app.parse_with_rules(
+        "Started by 李文\n777 888 999\n23:30\n00:30\n1 hrs\n"
+        "2026/11/20\n(GMT+08:00)\n2026/11/21\n腾讯会议",
+        anchor=datetime(2026, 11, 1))
+    check("跨天会议：结束日期取票面第二行日期（23:30 → 次日 00:30）",
+          len(overnight) == 1
+          and overnight[0].start.strftime("%m-%d %H:%M") == "11-20 23:30"
+          and overnight[0].end.strftime("%m-%d %H:%M") == "11-21 00:30",
+          str([(e.start, e.end) for e in overnight]))
+
+    # 反向保护：普通日程里只是「提到」腾讯会议，不能被兜底版式吞掉
+    mention = app.parse_with_rules(
+        "11月30日 晚上8点半 腾讯会议 和学长请教保研经验", anchor=datetime(2026, 11, 1))
+    check("普通日程提到「腾讯会议」不被会议通道吞掉",
+          len(mention) == 1 and mention[0].title != "腾讯会议"
+          and mention[0].location != "线上会议",
+          str([(e.title, e.location) for e in mention]))
+
     # --- 演出门票（演唱会 / 话剧 / 音乐节） -----------------------------
     show = app.parse_with_rules(
         "大麦\n【周杰伦嘉年华世界巡回演唱会-上海站】\n时间：2026.12.12 周六 19:00\n"
