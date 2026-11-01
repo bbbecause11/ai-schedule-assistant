@@ -926,6 +926,29 @@ def test_time_blocks() -> None:
           "_CITY_LEXICON" in src_all and "_PLACE_SUFFIX_RE" in src_all
           and "_PLACE_DIR_RE" in src_all)
 
+    # 教室地点的跨校形态：常州大学科教城用字母代号楼（W9），江苏大学用楼名+房号
+    cls = app.parse_with_rules("11月5日 14:00 高等数学 W9-304",
+                               anchor=datetime(2026, 11, 1))
+    check("字母代号楼（W9-304）识别为地点、不混进标题",
+          len(cls) == 1 and cls[0].location == "W9-304"
+          and cls[0].title == "高等数学",
+          str([(e.title, e.location) for e in cls]))
+    cls2 = app.parse_with_rules("11月7日 14:00 大学物理 三江楼 305",
+                                anchor=datetime(2026, 11, 1))
+    check("楼名+房号（三江楼 305）识别为地点",
+          len(cls2) == 1 and "三江楼" in cls2[0].location
+          and cls2[0].title == "大学物理",
+          str([(e.title, e.location) for e in cls2]))
+    _train_txt = "11月8日 09:56 镇江 G7045 10:27 常州"
+    _train_loc = app.parse_with_rules(_train_txt,
+                                      anchor=datetime(2026, 11, 1))[0].location
+    check("车次（无分隔符 字母+数字）不会被当成教室",
+          "G7045" not in _train_loc and "W" not in _train_loc,
+          repr(_train_loc))
+    check("AI 提示词包含教学楼代号说明（W9-304 / 三江楼304）",
+          "W9-304" in src_all and "三江楼304" in src_all
+          and "字母代号楼" in src_all)
+
     # 反向保护：普通通知不被演出 / 会议通道劫持
     normal = app.parse_with_rules(
         "11月3日 19:00 迎新晚会彩排\n地点：大学生活动中心", anchor=datetime(2026, 11, 2))
