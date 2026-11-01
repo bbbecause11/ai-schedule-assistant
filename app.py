@@ -7084,6 +7084,13 @@ def _inject_theme_color() -> None:
     用 st.html(unsafe_allow_javascript=True) 直接在当前页面里执行脚本，
     往 <head> 补一个 meta。每次 rerun 都带着当前主题色重设一次，
     切换明暗主题即时生效。
+
+    ⚠️ 只对 Android Chrome / Edge 等 Chromium 浏览器有效。
+    iOS Safari **所有版本都忽略 theme-color**：它上下两条栏属于 Safari
+    自己的 UI，跟随 iPhone 的「深色模式」；Safari 26 起还会在首次绘制时
+    采样一次页面背景色（Streamlit 首屏是白底），之后不再更新。
+    所以 iPhone 上想让上下栏变黑，只能开系统深色模式或把站点添加到主屏幕
+    （PWA 全屏，没有底部工具栏），网页本身无法强制。
     """
     color = _token("body-bg")
     dark = _is_dark()
