@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.7"
+APP_VERSION = "2.7.8"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7248,20 +7248,32 @@ textarea:-webkit-autofill, select:-webkit-autofill {
     background: var(--tip-bg) !important;
     border: 1px solid var(--tip-bd) !important;
     box-shadow: var(--pop-shadow) !important;
-    /* ① 限宽：说明文字较长时不再铺成一大块 */
-    max-width: min(320px, 68vw) !important;
+    /* ① 圆角矩形：Streamlit 默认几乎是直角，看起来像块警告框 */
+    border-radius: var(--r-md) !important;
+    /* ② 限宽 + 小字号：说明文案要短、要轻，不要压住页面内容 */
+    max-width: min(272px, 66vw) !important;
     width: max-content !important;
-    font-size: .78rem !important;
-    line-height: 1.5 !important;
-    padding: 8px 11px !important;
-    /* ② 关键：气泡永不接收鼠标事件。
+    font-size: .72rem !important;
+    line-height: 1.45 !important;
+    padding: 7px 10px !important;
+    /* ③ 气泡永不出现滚动条。
+       Streamlit 的 Tooltip 自带 overflow:auto + maxHeight，
+       内容稍长右侧就冒出一条滚动条，很难看。
+       这里把上限放宽，并把滚动条本身隐藏（真需要滚也不显示条）。 */
+    max-height: min(70vh, 420px) !important;
+    overflow-y: auto !important;
+    scrollbar-width: none !important;          /* Firefox */
+    -ms-overflow-style: none !important;       /* 旧 Edge */
+    /* ④ 关键：气泡永不接收鼠标事件。
        否则气泡盖住上方按钮时，鼠标一进入气泡就既点不到按钮、
        也触发不了「离开图标即关闭」，表现为按钮被冻住。 */
     pointer-events: none !important;
     z-index: 1000000 !important;
 }
+[data-testid="stTooltipContent"]::-webkit-scrollbar,
+[role="tooltip"]::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
 [data-testid="stTooltipContent"] p, [role="tooltip"] p {
-    margin: 0 0 .35em !important; font-size: inherit !important;
+    margin: 0 0 .28em !important; font-size: inherit !important;
 }
 [data-testid="stTooltipContent"] p:last-child,
 [role="tooltip"] p:last-child { margin-bottom: 0 !important; }
@@ -7799,10 +7811,11 @@ def _tip(name: str, desc: str) -> str:
     """
     按钮 / 控件的悬停说明文案。
 
-    约定：第一行先点明「这是哪个按钮」，空一行再写它做什么，
-    这样鼠标停一会儿弹出的提示能第一眼对上控件。
+    约定：一行写完 —— 加粗的控件名 + 一句短说明（不超过 20 字）。
+    以前是「名字 / 空行 / 两句话」的三段式，气泡又高又宽，还经常要滚动，
+    现在收成一行：鼠标一停就能看完，不挡下面的内容。
     """
-    return f"**{name}**\n\n{desc}"
+    return f"**{name}**　{desc}"
 
 
 # ---------------------------------------------------------------------------
@@ -7927,8 +7940,7 @@ def render_clear_all_button(origin: str, label: str = "🗑️ 清空全部日�
         width="stretch",
         on_click=_cb_request_clear,
         args=(origin,),
-        help=_tip(label, "清空已录入的全部日程、解析报告、输入框内容和已选图片，"
-                         "回到刚打开页面的空白状态。点一次只会亮出确认条，确定后才会真删。"),
+        help=_tip(label, "清空日程、输入与图片，需再确认"),
     )
 
 
@@ -7947,12 +7959,11 @@ def render_clear_all_confirm(origin: str) -> None:
     with c_yes:
         st.button("确定清空", key=f"clear_yes_{origin}", type="primary",
                   width="stretch", on_click=_reset_all,
-                  help=_tip("确定清空", "确认执行清空：日程、报告、输入框与图片一次性归零，"
-                                        "无法撤销。"))
+                  help=_tip("确定清空", "确认后立即清空，无法撤销"))
     with c_no:
         st.button("取消", key=f"clear_no_{origin}", width="stretch",
                   on_click=_cb_cancel_clear,
-                  help=_tip("取消", "放弃这次清空，所有数据保持原样。"))
+                  help=_tip("取消", "不动任何数据"))
 
 
 def render_clear_all_control(origin: str, label: str = "🗑️ 清空全部日程") -> None:
@@ -8418,9 +8429,7 @@ def _render_period_editor() -> None:
     # 「共 N 节」也跟过去，形成「加一节 → 看生效节数 → 再加一节」的闭环。
     with st.columns([1, 3])[0]:
         st.button("↺ 恢复默认模板", key="period_reset", on_click=_cb_reset_periods,
-                  help=_tip("恢复默认模板",
-                            "把作息表重置成内置的 12 节通用模板"
-                            "（第 1 节 08:00-08:45 起）。"))
+                  help=_tip("恢复默认模板", "恢复内置的 12 节作息模板"))
 
     # 表头（窄屏隐藏 —— 竖排布局每行自带标签）
     hdr = st.columns([2, 2, 2, 1])
@@ -8498,8 +8507,7 @@ def _render_period_editor() -> None:
         else:
             st.caption(f"注入 AI 的话：{_period_table_text()[:40]}…")
         if st.button("＋ 添加一节", key="period_add", width="stretch",
-                     help=_tip("添加一节",
-                               "在表格末尾加一行，填上这节课的名称和起止时间。")):
+                     help=_tip("添加一节", "末尾加一行，填名称与起止时间")):
             st.session_state.period_rows_count = count + 1
             st.rerun(scope="fragment")
 
@@ -8749,27 +8757,21 @@ def _show_ai_key_dialog() -> None:
     st.selectbox(
         "服务商", AI_PROVIDER_OPTIONS, key="ai_provider_pick",
         on_change=_cb_pick_provider,
-        help=_tip("服务商", "先选你用的是哪家服务商，再填它的 API Key。"
-                            "选了会自动填好下面的接口地址和模型名；"
-                            "选「-」表示不指定（手动填，或用环境变量里的配置）。"),
+        help=_tip("服务商", "选好会自动填地址和模型名"),
     )
     st.text_input(
         "API Key", type="password", key="ai_key_input",
         placeholder="-",
-        help=_tip("API Key", "大模型服务的密钥。填完点「保存并启用」生效。"
-                             "只保存在本页内存，刷新后需要重新填写。"),
+        help=_tip("API Key", "只存在本页内存，刷新需重填"),
     )
     st.text_input(
         "接口地址（Base URL）",
         key="ai_base_input", placeholder="-",
-        help=_tip("接口地址", "填到兼容层为止，程序会自动接上 /chat/completions。"
-                             "例如 DeepSeek 填 https://api.deepseek.com/v1。"
-                             "留空则用 DeepSeek 官方地址。"),
+        help=_tip("接口地址", "填到 /v1 即可，路径自动补全"),
     )
     st.text_input(
         "模型名", key="ai_model_input", placeholder="-",
-        help=_tip("模型名", "要用的模型标识。留空则用 deepseek-chat。"
-                             "不确定的话先点「测试连接」，报错会告诉你怎么改。"),
+        help=_tip("模型名", "留空用默认；可点「测试连接」验证"),
     )
 
     status = st.session_state.get("ai_key_status") or ""
@@ -9059,7 +9061,7 @@ def render_ingest_tab() -> None:
                 "每周二第3-4节 数据结构 计算机楼C401\n"
                 "11月20日 23:59 前提交课程论文 DDL"
             ),
-            help=f"单次最多 {MAX_TEXT_CHARS} 字。支持聊天记录、备忘录、课表等自由格式。",
+            help=f"最多 {MAX_TEXT_CHARS} 字，支持任意格式",
         )
 
     with col_right:
@@ -9072,9 +9074,7 @@ def render_ingest_tab() -> None:
             # key 里带 nonce：清空时 n+1，等于换一个全新的上传控件，
             # 已选的旧图片会一起消失，不会被下一次解析重复 OCR
             key=f"upload_{st.session_state.uploader_nonce}",
-            help=_tip("② 上传日程截图",
-                      "支持 PNG / JPG / WEBP / BMP，单张不超过 10MB，最多 3 张。\n"
-                      "图片只在本机内存里做 OCR，识别完即丢弃，不会上传。"),
+            help=_tip("② 上传日程截图", "PNG / JPG，最多 3 张，仅本机识别"),
         )
         if images:
             st.caption(f"已选择 {len(images)} 张图片（最多识别前 3 张）")
@@ -9103,24 +9103,18 @@ def render_ingest_tab() -> None:
     with btn_cols[0]:
         do_parse = st.button(
             "✨ 开始解析", type="primary", width="stretch",
-            help=_tip("✨ 开始解析",
-                      "解析左侧文字和已上传的截图，把识别出的日程追加到日程表。"
-                      "不会覆盖已有内容；重复的条目会自动去重。"),
+            help=_tip("✨ 开始解析", "解析文字与截图，追加并自动去重"),
         )
     with btn_cols[1]:
         st.button(
             "📚 加载示例", width="stretch",
             on_click=_cb_load_sample,
-            help=_tip("📚 加载示例",
-                      "把一段混排的江苏大学课表 / 班群通知 / DDL 示例填进文本框，"
-                      "适合快速体验功能。填完再点「开始解析」。"),
+            help=_tip("📚 加载示例", "填入混合示例，再点「开始解析」"),
         )
     with btn_cols[2]:
         st.button(
             "🧹 清空文本框", width="stretch", on_click=_cb_clear_input,
-            help=_tip("🧹 清空文本框",
-                      "只擦掉左侧文字和已选的截图，**已录入的日程不受影响**。"
-                      "想连日程一起清掉，用右边的「🗑️ 清空全部日程」。"),
+            help=_tip("🧹 清空文本框", "只清文字和图片，不动已录入日程"),
         )
     with btn_cols[3]:
         render_clear_all_button("ingest", label="🗑️ 清空全部日程")
@@ -9520,8 +9514,7 @@ def _render_recur_panel() -> None:
         index=uids.index(st.session_state.recur_target_uid),
         key="recur_pick_label",
         on_change=_on_recur_pick_change,
-        help=_tip("选择要设置重复的日程",
-                  "先挑一条日程，再决定它是否重复、多久重复一次、总共重复几次。"),
+        help=_tip("选择要设置重复的日程", "先选日程，再设重复"),
     )
     target_ev = next((e for e in st.session_state.events
                       if e.uid == st.session_state.recur_target_uid), None)
@@ -9529,8 +9522,7 @@ def _render_recur_panel() -> None:
     enabled = st.toggle(
         "是否重复",
         key="recur_enabled",
-        help=_tip("是否重复",
-                  "关闭＝这条日程只发生一次；开启后可以设置重复频率、开始日期与次数。"),
+        help=_tip("是否重复", "关闭＝只发生一次"),
     )
 
     if enabled:
@@ -9539,9 +9531,7 @@ def _render_recur_panel() -> None:
             RECUR_FREQ_OPTIONS,
             key="recur_freq",
             horizontal=True,
-            help=_tip("重复频率",
-                      "每周重复 / 每两周重复 / 每天重复。切换频率不会改变星期几，"
-                      "「每周一三五」改成每两周后仍然是一、三、五，只是隔周。"),
+            help=_tip("重复频率", "每周 / 每两周 / 每天，星期几不变"),
         )
 
         # ---- 循环开始日期 -------------------------------------------------
@@ -9557,9 +9547,7 @@ def _render_recur_panel() -> None:
                 key="recur_start_date",
                 format="YYYY-MM-DD",
                 label_visibility="collapsed",
-                help=_tip("循环开始日期",
-                          "这一天算作循环的第 1 次。改它会连同年月日一起平移整条日程，"
-                          "时分和时长保持不变，星期几也会跟着重算。"),
+                help=_tip("循环开始日期", "算循环第 1 次，改组会平移整条"),
             )
         with w_col:
             _html(
@@ -9586,8 +9574,7 @@ def _render_recur_panel() -> None:
                 st.button(
                     "－", key="recur_minus", on_click=_bump_recur_count, args=(-1,),
                     width="stretch", disabled=count <= RECUR_COUNT_MIN,
-                    help=_tip("－ 减少一次",
-                              f"把重复次数减 1，最少 {RECUR_COUNT_MIN} 次。"),
+                    help=_tip("－ 减少一次", f"重复次数 -1（最少 {RECUR_COUNT_MIN} 次）"),
                 )
             with c_num:
                 _html(
@@ -9604,8 +9591,7 @@ def _render_recur_panel() -> None:
                 st.button(
                     "＋", key="recur_plus", on_click=_bump_recur_count, args=(1,),
                     width="stretch", disabled=count >= RECUR_COUNT_MAX,
-                    help=_tip("＋ 增加一次",
-                              f"把重复次数加 1，最多 {RECUR_COUNT_MAX} 次。"),
+                    help=_tip("＋ 增加一次", f"重复次数 +1（最多 {RECUR_COUNT_MAX} 次）"),
                 )
 
         # 实时预览：点「应用」前就能看到最终规则与结束日期
@@ -9648,15 +9634,12 @@ def _render_recur_panel() -> None:
             "✅ 应用重复设置", key="apply_recur", type="primary", width="stretch",
             on_click=_apply_recur_setting,
             args=(picked_uid, enabled, freq, count, start_pick),
-            help=_tip("✅ 应用重复设置",
-                      "把上面的开关、频率、开始日期和次数写进这条日程，"
-                      "并同步到导出的 .ics 里。"),
+            help=_tip("✅ 应用重复设置", "写回这条日程并同步到 .ics"),
         )
     with b2:
         st.button(
             "🚫 取消这条的重复", key="remove_recur", width="stretch",
-            help=_tip("🚫 取消这条的重复",
-                      "把这条日程改回只发生一次，不会删除日程本身。"),
+            help=_tip("🚫 取消这条的重复", "改回单次，不删除日程"),
             on_click=_apply_recur_setting,
             args=(picked_uid, False, freq, count, start_pick),
         )
@@ -9813,9 +9796,7 @@ def render_schedule_tab() -> None:
         )
         if st.button(
             "📚 一键加载示例日程", type="primary",
-            help=_tip("📚 一键加载示例日程",
-                      "跳过录入步骤，直接把示例课表解析成 14 条日程，"
-                      "用来快速看看表格、日历和导出长什么样。"),
+            help=_tip("📚 一键加载示例日程", "直接生成示例日程，快速看效果"),
         ):
             sample = parse_with_rules(build_sample_text())
             _push_events(sample, "示例数据")
@@ -9956,8 +9937,7 @@ def render_schedule_tab() -> None:
             with c1:
                 if st.button(
                     "删除选中这一条", key="del_btn",
-                    help=_tip("删除选中这一条",
-                              "从日程表里删掉下拉框选中的那一条，其他日程不受影响。"),
+                    help=_tip("删除选中这一条", "只删选中的这一条"),
                 ):
                     target = options[picked]
                     st.session_state.events = [
@@ -10041,9 +10021,7 @@ def render_export_tab() -> None:
             "日历名称",
             value=st.session_state.calendar_name,
             key="cal_name_input",
-            help=_tip("日历名称",
-                      "导入手机 / Outlook 后显示的日历分组名，留空则用「我的 AI 日程」。\n"
-                      "只影响 .ics 里的 X-WR-CALNAME，不改变文件里的日程内容。"),
+            help=_tip("日历名称", "导入后显示的日历分组名"),
         )
         st.session_state.calendar_name = (name or "").strip() or "我的 AI 日程"
     with col2:
@@ -10109,9 +10087,7 @@ def render_export_tab() -> None:
                 mime="text/calendar",
                 type="primary",
                 width="stretch",
-                help=_tip("📅 下载 .ics 日历",
-                          "标准 iCalendar 格式，双击就能导入 iPhone / 安卓 / Outlook 日历，"
-                          "提醒和重复规则一并写入。"),
+                help=_tip("📅 下载 .ics 日历", "可导入手机 / 电脑日历"),
             )
         else:
             st.error(ics_error or "ICS 生成失败")
@@ -10123,9 +10099,7 @@ def render_export_tab() -> None:
                 file_name=f"ai_schedule_{stamp}.csv",
                 mime="text/csv",
                 width="stretch",
-                help=_tip("📊 下载 CSV 表格",
-                          "每行一条日程的表格文件，带 UTF-8 BOM，"
-                          "用 Excel / WPS 直接打开不会乱码。"),
+                help=_tip("📊 下载 CSV 表格", "Excel / WPS 打开不乱码"),
             )
     with dl3:
         if allow_download and md_text:
@@ -10135,8 +10109,7 @@ def render_export_tab() -> None:
                 file_name=f"ai_schedule_{stamp}.md",
                 mime="text/markdown",
                 width="stretch",
-                help=_tip("📝 下载 Markdown",
-                          "按日期分组的纯文本表格，适合贴进笔记、文档或提交材料里。"),
+                help=_tip("📝 下载 Markdown", "按日期分组的纯文本表格"),
             )
 
     # --- 预览（只展示通过自检的文件）---

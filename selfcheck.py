@@ -1275,6 +1275,35 @@ def test_ai_key_dialog() -> None:
           "否则鼠标移进气泡后既点不到按钮，也触发不了离开即关闭")
     check("提示气泡限宽（说明文字不再铺成一大块）",
           tip is not None and "max-width" in tip.group(1))
+    # 气泡是圆角矩形：Streamlit 默认圆角极小，深色下看着像一块直角警告框
+    check("提示气泡是圆角矩形",
+          tip is not None and "border-radius: var(--r-md)" in tip.group(1),
+          "气泡要圆角，不要直角")
+    # Streamlit 的 Tooltip 自带 overflow:auto + maxHeight，多两句就冒滚动条
+    check("提示气泡不显示滚动条",
+          tip is not None and "scrollbar-width: none" in tip.group(1),
+          "气泡里不该出现纵向滑动条")
+    check("提示气泡隐藏 webkit 滚动条",
+          "::-webkit-scrollbar { width: 0 !important; height: 0 !important;"
+          in src)
+    check("提示气泡字号 ≤ .72rem",
+          tip is not None and "font-size: .72rem" in tip.group(1),
+          "字号要小一点，别喧宾夺主")
+
+    # --- 气泡文案：一条一行、最多 24 字，不许再出现三段式长说明 ---
+    tip_calls = re.findall(r"_tip\(\s*[^,]+,\s*((?:f?\"(?:[^\"\\\\]|\\\\.)*\"\s*)+)\)",
+                           src, re.S)
+    descs = []
+    for raw in tip_calls:
+        for lit in re.findall(r'f?"((?:[^"\\]|\\.)*)"', raw):
+            # f-string 里的 {RECUR_COUNT_MIN} 之类是占位，不算字数
+            descs.append(re.sub(r"\{[^}]*\}", "", lit))
+    check("气泡文案都不超过 24 字",
+          descs and max(len(d) for d in descs) <= 24,
+          "最长的一条：" + max(descs, key=len) if descs else "没找到任何 _tip 文案")
+    check("气泡改成「名字 + 一句」的单行格式",
+          'return f"**{name}**　{desc}"' in src,
+          "不要再用「名字 / 空行 / 长段」的三段式")
 
     # 月历是 42 个紧挨着的小按钮：任何 hover 气泡都会盖住相邻格子，
     # 而且指过去的过程中经过别的格子会连环弹出好几层气泡，所以整块日历不带 help=
