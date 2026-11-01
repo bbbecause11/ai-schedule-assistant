@@ -97,7 +97,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #             桌面 ~1200px 宽，手机几乎满屏；深浅主题底色各自适配。
 #          ③ 支持「添加一节」「删除某节」「恢复默认模板」，操作条放表格上方
 #             （12 行很长，放底部要滚动才够得着）。
-APP_VERSION = "2.7.5"
+APP_VERSION = "2.7.6"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -211,6 +211,31 @@ class Event:
         return self.start.date() != self.end.date()
 
     @property
+    def is_all_day(self) -> bool:
+        """
+        是否为「整日事件」（全天 / 整天）。
+
+        程序内部用 00:00–23:59 这个区间表示"一整天"（.ics 的整日语义就是
+        当天 00:00 到次日 00:00 之前）。但对用户不能显示成 00:00-23:59，
+        所以统一认定成整日事件：界面、CSV、Markdown 都写「全天」，
+        .ics 写成 DTSTART;VALUE=DATE / DTEND;VALUE=DATE。
+        """
+        if self.end <= self.start:
+            return False
+        if (self.start.hour, self.start.minute) != (0, 0):
+            return False
+        # 当天 23:59 收尾，或次日 00:00 收尾（.ics 里的不含端写法）
+        return (self.end.hour, self.end.minute) in {(23, 59), (0, 0)}
+
+    @property
+    def all_day_last_date(self) -> date:
+        """整日事件实际占用的最后一天（把「次日 00:00」折算回前一天）。"""
+        last = self.end.date()
+        if (self.end.hour, self.end.minute) == (0, 0) and last > self.start.date():
+            last -= timedelta(days=1)
+        return last
+
+    @property
     def status(self) -> str:
         """人类可读的校验状态，用于表格展示。"""
         if self.conflict:
@@ -241,8 +266,9 @@ class Event:
         """从 data_editor 的一行还原 Event，尽量保留不可见字段。"""
         base = fallback or cls(title="", start=datetime.now(), end=datetime.now())
         base.title = str(row.get("标题") or base.title or "未命名日程").strip()
-        base.start = _coerce_datetime(row.get("开始"), base.start)
-        base.end = _coerce_datetime(row.get("结束"), base.end)
+        # 时间格可能是「2026-11-01 09:00」，也可能是整日写法「2026-11-01 全天」
+        base.start, base.end = _coerce_span(row.get("开始"), row.get("结束"),
+                                            base.start, base.end)
         base.location = str(row.get("地点") or "")
         base.note = str(row.get("备注") or "")
         pri = str(row.get("优先级") or "中")
@@ -274,6 +300,30 @@ def _cell_text(row: dict[str, Any], key: str) -> str:
         pass
     text = str(value).strip()
     return "" if text.lower() in {"nan", "none", "<na>"} else text
+
+
+def _when_text(ev: "Event", short: bool = False, at_end: bool = False) -> str:
+    """
+    单个时间点的文案：整日事件写「全天」，其余写具体时刻。
+
+    统一走这个函数，避免表格、日历、下拉框各写一套格式后
+    又漏掉「全天」这一种。`at_end=True` 取结束时间。
+    """
+    dt = ev.end if at_end else ev.start
+    if ev.is_all_day:
+        return f"{dt:%m-%d} 全天" if short else f"{dt:%Y-%m-%d} 全天"
+    return f"{dt:%m-%d %H:%M}" if short else f"{dt:%Y-%m-%d %H:%M}"
+
+
+def _span_text(ev: "Event") -> str:
+    """一段日程的时间区间文案：整日事件只写「全天」，不再显示 00:00-23:59。"""
+    if ev.is_all_day:
+        if ev.all_day_last_date == ev.start.date():
+            return "全天"
+        return f"全天 · {ev.start:%m-%d} → {ev.all_day_last_date:%m-%d}"
+    if ev.is_multiday:
+        return f"{ev.start:%m-%d %H:%M} → {ev.end:%m-%d %H:%M}"
+    return f"{ev.start:%H:%M}-{ev.end:%H:%M}"
 
 
 def _as_remind_list(value: Any) -> list[int]:
@@ -330,6 +380,54 @@ def _coerce_datetime(value: Any, default: datetime) -> datetime:
         return ts.to_pydatetime().replace(tzinfo=None)
     except Exception:
         return default
+
+
+# 表格/导出里「一整天」的写法：用户可以在时间格里直接写「全天」
+_ALL_DAY_CELL_RE = re.compile(r"全天|整天|整日")
+
+
+def _is_all_day_cell(value: Any) -> bool:
+    """表格单元格里是否写了「全天 / 整天 / 整日」。"""
+    if isinstance(value, (datetime, date)):
+        return False
+    text = _cell_text({"v": value}, "v")
+    return bool(_ALL_DAY_CELL_RE.search(text))
+
+
+def _cell_date(value: Any) -> date | None:
+    """从「2026-11-01 全天」这类文本里抠出日期；抠不到返回 None。"""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = _ALL_DAY_CELL_RE.sub(" ", _cell_text({"v": value}, "v")).strip()
+    if not text:
+        return None
+    try:
+        ts = pd.to_datetime(text, errors="coerce")
+    except Exception:  # noqa: BLE001
+        return None
+    return None if pd.isna(ts) else ts.date()
+
+
+def _coerce_span(start_val: Any, end_val: Any,
+                 start_default: datetime, end_default: datetime
+                 ) -> tuple[datetime, datetime]:
+    """
+    解析表格里「开始 / 结束」两格，支持两种写法：
+
+      · 具体时刻：`2026-11-01 09:00`（也接受 Timestamp / 日期）
+      · 整日：    `2026-11-01 全天` —— 等价于当天 00:00–23:59
+
+    只要有一格写了「全天」，整条就按当天整日处理（日期取能读到的那一格）；
+    读不到日期时沿用原值，绝不把用户的日程改没。
+    """
+    if _is_all_day_cell(start_val) or _is_all_day_cell(end_val):
+        day = _cell_date(start_val) or _cell_date(end_val) or start_default.date()
+        return (datetime.combine(day, dt_time.min),
+                datetime.combine(day, dt_time.max).replace(microsecond=0))
+    return (_coerce_datetime(start_val, start_default),
+            _coerce_datetime(end_val, end_default))
 
 
 # ---------------------------------------------------------------------------
@@ -4967,11 +5065,21 @@ def normalize_events(events: list[Event], now: datetime | None = None) -> tuple[
 
 
 def find_conflict_pairs(events: list[Event]) -> list[tuple[Event, Event]]:
-    """返回所有冲突的日程对，用于在页面上逐条展示。"""
+    """
+    返回所有冲突的日程对，用于在页面上逐条展示。
+
+    全天日程不参与冲突判定：它占的是「一整天」这个日历行，
+    而 00:00–23:59 的区间会与当天每一条定时日程重叠，
+    真按区间算的话，加一条全天活动就会把整天全标红。
+    """
     ordered = sorted(events, key=lambda e: e.start)
     pairs: list[tuple[Event, Event]] = []
     for i, a in enumerate(ordered):
+        if a.is_all_day:
+            continue
         for b in ordered[i + 1:]:
+            if b.is_all_day:
+                continue
             # 已按开始时间排序，一旦后一条的开始不早于前一条的结束即可提前终止
             if b.start >= a.end and not a.is_multiday and not b.is_multiday:
                 break
@@ -5032,6 +5140,21 @@ def _ics_dt(dt: datetime) -> str:
     return aware.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _ics_all_day_range(ev: "Event") -> tuple[str, str]:
+    """
+    整日事件在 .ics 里的日期区间。
+
+    整日事件的 DTEND 是「不含端」（次日 00:00），所以最后一天要 +1 天。
+    这样导入日历后拿到的是真正的「全天」块，而不是一条
+    00:00–23:59 横跨整天的普通事件。
+    """
+    first = ev.start.date()
+    last = ev.all_day_last_date
+    if last < first:
+        last = first
+    return f"{first:%Y%m%d}", f"{last + timedelta(days=1):%Y%m%d}"
+
+
 def _ics_duration(minutes: int) -> str:
     if minutes <= 0:
         return "PT0S"
@@ -5042,13 +5165,17 @@ def _ics_duration(minutes: int) -> str:
     return f"PT{minutes}M"
 
 
-def _rrule_with_until(rrule: str, start: datetime, weeks: int) -> str:
+def _rrule_with_until(rrule: str, start: datetime, weeks: int,
+                      all_day: bool = False) -> str:
     """
     给循环规则补上结束条件，避免无限重复污染用户日历。
 
     优先级：COUNT（用户显式指定次数） > UNTIL（按学期周数兜底）。
     RFC 5545 规定 COUNT 与 UNTIL 互斥，同时出现时部分客户端会丢弃整条规则，
     所以这里一旦检测到 COUNT 就原样返回，绝不追加 UNTIL。
+
+    整日事件的 DTSTART 是 DATE 类型，UNTIL 也必须写成 DATE
+    （`UNTIL=20270222`），否则部分日历客户端会直接忽略这条循环规则。
     """
     if not rrule:
         return ""
@@ -5057,6 +5184,8 @@ def _rrule_with_until(rrule: str, start: datetime, weeks: int) -> str:
     if "UNTIL" in rrule.upper():
         return rrule
     until = start + timedelta(weeks=weeks)
+    if all_day:
+        return f"{rrule};UNTIL={until:%Y%m%d}"
     until_dt = until.replace(hour=23, minute=59, second=0, microsecond=0)
     return f"{rrule};UNTIL={_ics_dt(until_dt)}"
 
@@ -5099,13 +5228,26 @@ def build_ics(events: list[Event], calendar_name: str = "AI 智能日程",
             description_parts.append("[注意] 该日程与其他日程存在时间冲突")
         description_parts.append("由 AI 智能日程收纳工具生成")
 
+        if ev.is_all_day:
+            # 整日事件：写日期（VALUE=DATE），不写时刻。
+            # RFC 5545 规定 DTEND 不含端，所以结束日是「最后一天 + 1」。
+            ad_start, ad_end = _ics_all_day_range(ev)
+            time_lines = [
+                f"DTSTART;VALUE=DATE:{ad_start}",
+                f"DTEND;VALUE=DATE:{ad_end}",
+            ]
+        else:
+            time_lines = [
+                f"DTSTART:{_ics_dt(ev.start)}",
+                # 零时长事件（如 DDL 截止点）在多数日历中不可见，补 1 分钟使其可见
+                f"DTEND:{_ics_dt(ev.end if ev.end > ev.start else ev.start + timedelta(minutes=1))}",
+            ]
+
         lines += [
             "BEGIN:VEVENT",
             f"UID:{uid}",
             f"DTSTAMP:{stamp}",
-            f"DTSTART:{_ics_dt(ev.start)}",
-            # 零时长事件（如 DDL 截止点）在多数日历中不可见，补 1 分钟使其可见
-            f"DTEND:{_ics_dt(ev.end if ev.end > ev.start else ev.start + timedelta(minutes=1))}",
+            *time_lines,
             f"SUMMARY:{_ics_escape(ev.title)}",
         ]
         if ev.location:
@@ -5113,7 +5255,7 @@ def build_ics(events: list[Event], calendar_name: str = "AI 智能日程",
         lines.append(f"DESCRIPTION:{_ics_escape(chr(10).join(description_parts))}")
         lines.append(f"PRIORITY:{PRIORITY_ICS.get(ev.priority, 5)}")
         if ev.rrule:
-            lines.append(f"RRULE:{_rrule_with_until(ev.rrule, ev.start, recur_weeks)}")
+            lines.append(f"RRULE:{_rrule_with_until(ev.rrule, ev.start, recur_weeks, ev.is_all_day)}")
             # 「2-6,9-18 周」这种不连续周次：RRULE 会一路排下去，
             # 中间的 7、8 周必须用 EXDATE 排掉，否则日历里会凭空多出两次课。
             skip_weeks = sorted({int(w) for w in (ev.recur_skip or "").split(",")
@@ -5162,9 +5304,11 @@ def build_csv(events: list[Event], default_remind: int | list[int] = 15) -> byte
             remind_text = _remind_label(ev.remind_minutes)
         writer.writerow([
             ev.title,
-            ev.start.strftime("%Y-%m-%d %H:%M"),
-            ev.end.strftime("%Y-%m-%d %H:%M"),
-            ev.duration_minutes,
+            # 整日事件只写「日期 + 全天」，不再出现 00:00 / 23:59 这种占位时刻
+            f"{ev.start:%Y-%m-%d} 全天" if ev.is_all_day else f"{ev.start:%Y-%m-%d %H:%M}",
+            f"{ev.end:%Y-%m-%d} 全天" if ev.is_all_day else f"{ev.end:%Y-%m-%d %H:%M}",
+            # 整日就是完整一天；内部 00:00–23:59 只差 1 分钟，直接按 1440 记
+            1440 if ev.is_all_day else ev.duration_minutes,
             ev.location,
             ev.priority,
             ev.note,
@@ -5202,7 +5346,12 @@ def build_markdown(events: list[Event], default_remind: int | list[int] = 15) ->
         out.append("| 时间 | 标题 | 地点 | 优先级 | 备注 | 状态 |")
         out.append("| --- | --- | --- | --- | --- | --- |")
         for ev in items:
-            if ev.is_multiday:
+            if ev.is_all_day:
+                # 全天日程就写「全天」，不再显示 00:00-23:59
+                span = "全天"
+                if ev.all_day_last_date != ev.start.date():
+                    span = f"全天（{ev.start:%m-%d} → {ev.all_day_last_date:%m-%d}）"
+            elif ev.is_multiday:
                 span = f"{ev.start:%m-%d %H:%M} → {ev.end:%m-%d %H:%M}"
             else:
                 span = f"{ev.start:%H:%M} - {ev.end:%H:%M}"
@@ -5310,6 +5459,7 @@ def validate_events(events: list[Event]) -> CheckReport:
 
 _ICS_LINE_MAX = 75
 _ICS_DT_RE = re.compile(r"\d{8}T\d{6}Z?")
+_ICS_DATE_RE = re.compile(r"\d{8}")     # 整日事件的 VALUE=DATE 写法
 
 
 def validate_ics(ics_text: str, events: list[Event]) -> CheckReport:
@@ -5343,7 +5493,9 @@ def validate_ics(ics_text: str, events: list[Event]) -> CheckReport:
     uids: set[str] = set()
     for idx, block in enumerate(blocks, 1):
         for field_name in ("UID", "DTSTAMP", "DTSTART", "DTEND", "SUMMARY"):
-            if f"{field_name}:" not in block:
+            # 整日事件写的是 `DTSTART;VALUE=DATE:20261101`（带参数），
+            # 所以两种写法都要认，否则全天日程会被误判成缺字段。
+            if f"{field_name}:" not in block and f"{field_name};" not in block:
                 rep.issues.append(CheckIssue(
                     "error", f"第 {idx} 个事件缺少 {field_name}"))
         m = re.search(r"UID:([^\r\n]+)", block)
@@ -5353,10 +5505,21 @@ def validate_ics(ics_text: str, events: list[Event]) -> CheckReport:
                 rep.issues.append(CheckIssue(
                     "error", f"第 {idx} 个事件：UID 重复（{uid[:24]}）"))
             uids.add(uid)
-        ds = re.search(r"DTSTART:([^\r\n]+)", block)
-        de = re.search(r"DTEND:([^\r\n]+)", block)
-        if ds and de and _ICS_DT_RE.match(ds.group(1)) and _ICS_DT_RE.match(de.group(1)):
-            if de.group(1) < ds.group(1):
+        ds = re.search(r"DTSTART(?:;[^:\r\n]+)?:([^\r\n]+)", block)
+        de = re.search(r"DTEND(?:;[^:\r\n]+)?:([^\r\n]+)", block)
+        if ds and de:
+            ds_val, de_val = ds.group(1).strip(), de.group(1).strip()
+            same_kind = (
+                (_ICS_DT_RE.fullmatch(ds_val) is not None
+                 and _ICS_DT_RE.fullmatch(de_val) is not None)
+                or (_ICS_DATE_RE.fullmatch(ds_val) is not None
+                    and _ICS_DATE_RE.fullmatch(de_val) is not None)
+            )
+            if not same_kind:
+                rep.issues.append(CheckIssue(
+                    "error", f"第 {idx} 个事件：DTSTART / DTEND 格式不一致"
+                             f"（{ds_val[:20]} / {de_val[:20]}）"))
+            elif de_val < ds_val:
                 rep.issues.append(CheckIssue(
                     "error", f"第 {idx} 个事件：DTEND 早于 DTSTART"))
         if block.count("BEGIN:VALARM") != block.count("END:VALARM"):
@@ -5370,6 +5533,14 @@ def validate_ics(ics_text: str, events: list[Event]) -> CheckReport:
         if rrule and not rrule.group(1).startswith("FREQ="):
             rep.issues.append(CheckIssue(
                 "error", f"第 {idx} 个事件：RRULE 不是 FREQ= 开头"))
+
+    # 整日事件必须写成 VALUE=DATE，否则日历里会变成 00:00-23:59 的普通事件
+    n_all_day_expected = sum(1 for ev in events if ev.is_all_day)
+    n_all_day_actual = unfolded.count("DTSTART;VALUE=DATE:")
+    if n_all_day_expected != n_all_day_actual:
+        rep.issues.append(CheckIssue(
+            "error", f"全天日程未按整日格式导出：应有 {n_all_day_expected} 条，"
+                     f"实际 {n_all_day_actual} 条"))
     return rep
 
 
@@ -5404,16 +5575,28 @@ def _render_check_report(report: CheckReport, title: str,
 
 
 def events_to_dataframe(events: list[Event]) -> pd.DataFrame:
-    """把 Event 列表转成 data_editor 可用的 DataFrame。"""
+    """
+    把 Event 列表转成表格可用的 DataFrame。
+
+    「开始 / 结束」两列是**文本**而不是 datetime：
+    整日事件要显示成「2026-11-01 全天」，而 datetime 列只能按固定格式
+    渲染成 00:00 / 23:59——那正是用户看到的噪音。
+    编辑后的文本由 `_coerce_span` 解析回来，两种写法都认。
+    """
     columns = ["uid", "标题", "开始", "结束", "地点", "优先级", "备注",
                "循环", "rrule_raw", "提醒", "状态"]
-    if not events:
-        # 空表也要指定 dtype，否则 DatetimeColumn 渲染会异常
-        empty = pd.DataFrame({c: pd.Series(dtype="object") for c in columns})
-        empty["开始"] = pd.Series(dtype="datetime64[ns]")
-        empty["结束"] = pd.Series(dtype="datetime64[ns]")
-        return empty[columns]
-    return pd.DataFrame([ev.to_row() for ev in events], columns=columns)
+    rows: list[dict[str, Any]] = []
+    for ev in events:
+        row = ev.to_row()
+        row["开始"] = _when_text(ev)
+        row["结束"] = _when_text(ev, at_end=True)
+        rows.append(row)
+    df = pd.DataFrame(rows, columns=columns)
+    if df.empty:
+        # 空表也要固定 dtype，否则表格列类型会漂移
+        for col in columns:
+            df[col] = pd.Series(dtype="object")
+    return df[columns]
 
 
 def _df_signature(df: pd.DataFrame) -> str:
@@ -8990,7 +9173,7 @@ def render_ingest_tab() -> None:
         rows = []
         for ev in recent:
             rows.append({
-                "时间": f"{ev.start:%m-%d %H:%M} - {ev.end:%m-%d %H:%M}",
+                "时间": _span_text(ev),
                 "标题": ev.title,
                 "地点": ev.location or "—",
                 "状态": ev.status,
@@ -9115,7 +9298,7 @@ def _style_events(df: pd.DataFrame, events: list[Event]) -> Any:
 def _recur_options() -> dict[str, str]:
     """重复设置下拉的选项：可读标签 → 日程 uid。"""
     return {
-        f"{ev.start:%m-%d %H:%M} | {ev.title}": ev.uid
+        f"{_when_text(ev, short=True)} | {ev.title}": ev.uid
         for ev in sorted(st.session_state.events, key=lambda e: e.start)
     }
 
@@ -9434,8 +9617,12 @@ def _render_recur_panel() -> None:
             count,
         )
         last_dt = _nth_occurrence(preview, start_for_preview, count)
+        # 整日日程的「开始时刻」是 00:00 占位，展示时写「全天」
+        first_label = (f"{start_for_preview:%Y-%m-%d} 全天"
+                       if target_ev is not None and target_ev.is_all_day
+                       else f"{start_for_preview:%Y-%m-%d %H:%M}")
         st.caption(
-            f"第 1 次：**{start_for_preview:%Y-%m-%d %H:%M}**"
+            f"第 1 次：**{first_label}**"
             f"（周{'一二三四五六日'[start_pick.weekday()]}）"
             f"　·　规则：**{describe_recurrence(preview)}**"
             + (f"　·　预计最后一次 {last_dt:%Y-%m-%d}" if last_dt else "")
@@ -9594,6 +9781,7 @@ def _render_calendar() -> None:
                 for ev in sel_events:
                     cls = "bad" if ev.conflict else ("vague" if ev.vague else "")
                     flag = "🔴 " if ev.conflict else ("⚠️ " if ev.vague else "")
+                    when = "全天" if ev.is_all_day else f"{ev.start:%H:%M}"
                     extra = ""
                     if ev.location:
                         extra += f'<div class="s">📍 {_escape(ev.location)}</div>'
@@ -9602,7 +9790,7 @@ def _render_calendar() -> None:
                                   f'{_escape(describe_recurrence(ev.rrule))}</div>')
                     chunks.append(
                         f'<div class="cal-ev {cls}">'
-                        f'<div class="t">{ev.start:%H:%M}</div>'
+                        f'<div class="t">{when}</div>'
                         f'<div><div class="m">{flag}{_escape(ev.title)}</div>{extra}</div>'
                         f'</div>'
                     )
@@ -9671,8 +9859,8 @@ def render_schedule_tab() -> None:
         with st.expander(f"🔴 检测到 {len(pairs)} 组时间冲突，点击查看", expanded=True):
             for a, b in pairs[:10]:
                 st.markdown(
-                    f"- **{a.start:%m-%d %H:%M}–{a.end:%H:%M}** {a.title} "
-                    f"　⚡ 与　**{b.start:%m-%d %H:%M}–{b.end:%H:%M}** {b.title} 重叠"
+                    f"- **{_span_text(a)}** {a.title} "
+                    f"　⚡ 与　**{_span_text(b)}** {b.title} 重叠"
                 )
             st.caption("提示：冲突只做提醒，不会自动删除任何日程，请按需手动调整。")
 
@@ -9681,6 +9869,8 @@ def render_schedule_tab() -> None:
     st.caption("改单元格后自动保存。删整行：选中行后按 Delete 键，或点表格右上角工具栏里的删除图标；"
                "也可以展开下方「删除日程」逐条删或一键清空。"
                "「重复」列为只读展示，要调整请用下方「重复设置」面板。"
+               "时间写成 `2026-11-01 09:00`；整日活动写 `2026-11-01 全天`，"
+               "导出的日历就是真正的全天事件。"
                "🔴 红色=时间冲突　🟡 黄色=时间待核对")
 
     # 预览交付前先自检：字段缺失 / 时间倒挂 / UID 重复先在这里拦下
@@ -9692,8 +9882,11 @@ def render_schedule_tab() -> None:
     editor_cols = {
         "uid": None,
         "标题": st.column_config.TextColumn("标题", width="medium", required=True),
-        "开始": st.column_config.DatetimeColumn("开始", format="YYYY-MM-DD HH:mm", step=300),
-        "结束": st.column_config.DatetimeColumn("结束", format="YYYY-MM-DD HH:mm", step=300),
+        # 时间列用文本而不是 DatetimeColumn：DatetimeColumn 只能按固定格式
+        # 渲染成 00:00 / 23:59，全天日程就没法显示成「全天」。
+        # 编辑后的文本由 _coerce_span 解析，两种写法都认。
+        "开始": st.column_config.TextColumn("开始", width="medium"),
+        "结束": st.column_config.TextColumn("结束", width="medium"),
         "地点": st.column_config.TextColumn("地点", width="small"),
         "优先级": st.column_config.SelectboxColumn("优先级", options=PRIORITY_LEVELS, width="small"),
         "备注": st.column_config.TextColumn("备注", width="medium"),
@@ -9763,7 +9956,7 @@ def render_schedule_tab() -> None:
     st.markdown("")
     with st.expander("🗑️ 删除日程（单条 / 全部清空）", expanded=True):
         options = {
-            f"{ev.start:%m-%d %H:%M} | {ev.title}": ev.uid
+            f"{_when_text(ev, short=True)} | {ev.title}": ev.uid
             for ev in sorted(st.session_state.events, key=lambda e: e.start)
         }
         if options:
@@ -9827,10 +10020,11 @@ def _render_week_view(events: list[Event]) -> None:
                     bg, fg = "var(--cal-vague-bg)", "var(--warn-strong)"
                 else:
                     bg, fg = "var(--chip-info-bg)", "var(--chip-info-fg)"
+                when = "全天" if ev.is_all_day else f"{ev.start:%H:%M}"
                 st.markdown(
                     f'<div style="background:{bg};color:{fg};border-radius:var(--r-sm);'
                     f'padding:6px 7px;margin-bottom:5px;font-size:.6875rem;line-height:1.35;">'
-                    f'<b>{ev.start:%H:%M}</b><br>{_escape(ev.title[:12])}</div>',
+                    f'<b>{when}</b><br>{_escape(ev.title[:12])}</div>',
                     unsafe_allow_html=True,
                 )
 

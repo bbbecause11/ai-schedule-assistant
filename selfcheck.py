@@ -1497,6 +1497,100 @@ def test_output_selfcheck() -> None:
           in src and "if allow_download:" in src)
 
 
+def test_all_day() -> None:
+    """全天日程：00:00–23:59 在界面与导出里统一写成「全天」。"""
+    section("K3. 全天日程（00:00-23:59 → 全天）")
+    import app
+
+    day = date(2026, 11, 1)
+    allday = app.Event("江苏大学大学生 AI 创新大赛决赛",
+                       datetime.combine(day, datetime.min.time()),
+                       datetime.combine(day, datetime.max.time()).replace(microsecond=0))
+    normal = app.Event("上课", datetime(2026, 11, 1, 9), datetime(2026, 11, 1, 10, 30))
+
+    check("00:00–23:59 判定为全天", allday.is_all_day)
+    check("普通时段不判定为全天", not normal.is_all_day)
+    check("次日 00:00 收尾也判定为全天",
+          app.Event("x", datetime(2026, 11, 1, 0, 0),
+                    datetime(2026, 11, 2, 0, 0)).is_all_day)
+    check("零时长事件不会误判为全天",
+          not app.Event("ddl", datetime(2026, 11, 1, 0, 0),
+                        datetime(2026, 11, 1, 0, 0)).is_all_day)
+
+    # --- .ics：必须写成 VALUE=DATE，DTEND 不含端 ---
+    ics = app.build_ics([allday, normal], "测试", 0, 16)
+    lines = ics.split("\r\n")
+    check("全天日程导出 DTSTART;VALUE=DATE",
+          "DTSTART;VALUE=DATE:20261101" in lines, str([l for l in lines if l.startswith("DTSTART")]))
+    check("全天日程 DTEND 是次日（不含端）",
+          "DTEND;VALUE=DATE:20261102" in lines)
+    check("普通日程仍写具体时刻",
+          any(l.startswith("DTSTART:2026") for l in lines))
+    check("全天 + 普通混排时 ICS 自检通过",
+          app.validate_ics(ics, [allday, normal]).ok,
+          str([i.message for i in app.validate_ics(ics, [allday, normal]).errors]))
+    check("全天日程被写成普通时刻时自检报错",
+          not app.validate_ics(ics.replace("DTSTART;VALUE=DATE:20261101",
+                                           "DTSTART:20261101T000000Z"),
+                               [allday, normal]).ok)
+
+    # --- CSV / Markdown ---
+    row = app.build_csv([allday], [30]).decode("utf-8-sig").splitlines()[1]
+    check("CSV 写「日期 + 全天」", "2026-11-01 全天" in row, row)
+    check("CSV 不再出现 00:00 / 23:59", "00:00" not in row and "23:59" not in row, row)
+    check("CSV 时长按完整一天记 1440", ",1440," in row, row)
+    md = app.build_markdown([allday], [30])
+    check("Markdown 写「全天」",
+          any(l.startswith("| 全天 |") for l in md.splitlines()), md[:200])
+
+    # --- 表格：显示「全天」，编辑后还能解析回来 ---
+    df = app.events_to_dataframe([allday, normal])
+    check("表格时间列显示「2026-11-01 全天」",
+          str(df.loc[0, "开始"]) == "2026-11-01 全天", str(df.loc[0, "开始"]))
+    check("表格不再显示 00:00 / 23:59",
+          "00:00" not in str(df.loc[0, "开始"]) and "23:59" not in str(df.loc[0, "结束"]))
+    back, _, _ = app.dataframe_to_events(df, [allday, normal])
+    check("表格往返后仍是全天", back[0].is_all_day, str(back[0].start))
+    check("表格往返后普通日程时间不变",
+          (back[1].start, back[1].end) == (normal.start, normal.end))
+
+    # 用户把某条改成「2026-11-05 全天」→ 变成那天整日
+    edited = df.copy()
+    edited.loc[1, "开始"] = "2026-11-05 全天"
+    edited.loc[1, "结束"] = "2026-11-05 全天"
+    moved, _, _ = app.dataframe_to_events(edited, [allday, normal])
+    check("在表格里写「YYYY-MM-DD 全天」可改成整日",
+          moved[1].is_all_day and moved[1].start.date() == date(2026, 11, 5),
+          f"{moved[1].start} ~ {moved[1].end}")
+
+    # 文本里写「全天」解析出来的也必须吃掉 00:00–23:59
+    parsed = app.parse_with_rules("11月1日 全天 大礼堂 AI 创新大赛决赛", anchor=datetime(2026, 10, 28))
+    check("解析「全天」得到整日事件",
+          bool(parsed) and parsed[0].is_all_day,
+          str([(e.start, e.end) for e in parsed]))
+
+    # 全天日程不参与冲突判定（否则当天所有定时日程都会被标红）
+    busy = app.Event("上课", datetime(2026, 11, 1, 9), datetime(2026, 11, 1, 10, 30))
+    check("全天日程不与当天定时日程冲突",
+          app.find_conflict_pairs([allday, busy]) == [],
+          str(app.find_conflict_pairs([allday, busy])))
+    two = app.Event("开会", datetime(2026, 11, 1, 10), datetime(2026, 11, 1, 11))
+    check("两条定时日程重叠仍然算冲突",
+          len(app.find_conflict_pairs([busy, two])) == 1)
+
+    # 整日 + 循环：DTSTART 是 DATE，UNTIL 也必须是 DATE（RFC 5545 值类型一致）
+    week_allday = app.Event("每周一 全天例会",
+                            datetime(2026, 11, 2, 0, 0), datetime(2026, 11, 2, 23, 59),
+                            rrule="FREQ=WEEKLY;BYDAY=MO")
+    ics2 = app.build_ics([week_allday], "t", 0, 16)
+    rrule_line = next(l for l in ics2.split("\r\n") if l.startswith("RRULE:"))
+    check("整日循环日程的 UNTIL 是日期而非时间戳",
+          rrule_line.endswith("UNTIL=20270222"), rrule_line)
+    check("整日循环日程 ICS 自检通过",
+          app.validate_ics(ics2, [week_allday]).ok,
+          str([i.message for i in app.validate_ics(ics2, [week_allday]).errors]))
+
+
 def main() -> int:
     print("=" * 68)
     print(" AI 智能日程收纳工具 · 自动化自查")
@@ -1509,7 +1603,7 @@ def main() -> int:
                test_ai_layer, test_merge, test_timetable, test_time_blocks, test_recurrence, test_course_cell, test_period_table, test_security, test_theme_guard,
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
                test_loading_indicator, test_chat_notices,
-               test_output_selfcheck):
+               test_output_selfcheck, test_all_day):
         try:
             fn()
         except Exception:  # noqa: BLE001
