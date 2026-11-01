@@ -103,7 +103,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.8.3"
+APP_VERSION = "2.9.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -1327,7 +1327,7 @@ _TRIP_FLIGHT_HINT_RE = re.compile(
 # 前后既没有「乘」也没有「站」，只能靠这些词兜底。
 _TRIP_TICKET_HINT_RE = re.compile(
     r"车票|火车票|高铁|动车|城际|二等座|一等座|商务座|无座|检票|订单号|"
-    r"改签|退票|乘车|车站|站台|始发|终到")
+    r"改签|退票|乘车|车站|站台|始发|终到|铁路|12306|列车|硬座|硬卧|软卧")
 
 
 def _train_like(m: "re.Match", flat: str) -> bool:
@@ -1431,11 +1431,14 @@ def _train_trip_event(lines: list[str], flat: str,
     ]
     before = [c for c in clocks if c[1] <= train_m.start()]
     after = [c for c in clocks if c[0] >= train_m.end()]
-    if not before or not after:
+    if before and after:          # 「09:56 镇江 G7045 10:27 常州」
+        s1, e1, h1, m1 = before[-1]
+        s2, e2, h2, m2 = after[0]
+    elif len(after) >= 2:         # 「G7045 09:56 镇江 10:27 常州」：车次在最前
+        s1, e1, h1, m1 = after[0]
+        s2, e2, h2, m2 = after[1]
+    else:
         return None, set()
-
-    s1, e1, h1, m1 = before[-1]
-    s2, e2, h2, m2 = after[0]
 
     # --- 出发站 / 到达站 ------------------------------------------------
     from_city = ""
@@ -1457,6 +1460,13 @@ def _train_trip_event(lines: list[str], flat: str,
         ][:2]
         from_city = cities[0] if cities else ""
         to_city = cities[1] if len(cities) > 1 else ""
+
+    # 「G7045 09:56 镇江 10:27 常州」整行单行布局：站名夹在两段时刻之间，
+    # 上面按行找站名的逻辑拿不到，这里按「时刻之间的中文串」兜底
+    if not from_city:
+        from_city = (_cn_place(flat[e1:s2]) or [""])[0]
+    if not to_city:
+        to_city = (_cn_place(flat[e2:]) or [""])[0]
 
     # 日期：优先用全文里带年份的完整日期，再用票面上独立的年份纠偏
     day, _, _, _ = parse_date_in_text(flat, anchor_day)
@@ -1494,13 +1504,20 @@ def _train_trip_event(lines: list[str], flat: str,
     return ev, consumed
 
 
-def _city_after_clock(flat: str, pos: int) -> str:
-    """取时刻同一行紧跟的地名：「08:45 上海浦东T2」→ 上海浦东T2。"""
-    tail = flat[pos:].split("\n")[0]
-    m = re.match(r"\s*([\u4e00-\u9fa5]{2,10}(?:\s*T\d)?)", tail)
-    if not m:
-        return ""
-    return re.sub(r"\s+T(\d)", r"T\1", m.group(1).strip())
+def _cn_place(seg: str, limit: int = 1) -> list[str]:
+    """
+    从一段文本里按顺序捞中文地名（可带航站楼「T2」）。
+
+    「08:45 上海浦东T2」（城市紧跟时刻）与
+    「07:30 HO1188 上海浦东T2 → 09:40 厦门高崎T4」（单行布局，中间夹着航班号）
+    两种票面都能用：前者取时刻同行，后者取两段时刻之间的文本。
+    """
+    out: list[str] = []
+    for m in re.finditer(r"[\u4e00-\u9fa5]{2,10}(?:\s*T\d)?", seg):
+        out.append(re.sub(r"\s+T(\d)", r"T\1", m.group(0)))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _flight_trip_event(lines: list[str], flat: str,
@@ -1539,8 +1556,11 @@ def _flight_trip_event(lines: list[str], flat: str,
         s1, e1, h1, m1 = clocks[0]
         s2, e2, h2, m2 = clocks[1]
 
-    from_city = _city_after_clock(flat, e1)
-    to_city = _city_after_clock(flat, e2)
+    # 城市：优先取「两段时刻之间」与「到达时刻之后」的中文地名，
+    # 兼容「城市紧跟时刻」和「时刻 航班号 城市 → 时刻 城市」两种票面。
+    seg1 = flat[e1:s2] if s2 > e1 else flat[e1:e1 + 60]
+    from_city = (_cn_place(seg1) or [""])[0]
+    to_city = (_cn_place(flat[e2:]) or [""])[0]
 
     day, _, _, _ = parse_date_in_text(flat, anchor_day)
     day = _trip_year_hint(day or anchor_day, flat)
@@ -1593,6 +1613,12 @@ def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[
     for extractor in order:
         ev, consumed = extractor(lines, flat, anchor_day)
         if ev is not None:
+            # 票面上单独成行的日期 / 年份（「07-27」「2026」「11月18日 2026」）
+            # 已经被这条行程吸收，再逐行解析只会漏出「未命名日程」
+            for ln in lines:
+                if ln and parse_date_in_text(ln, anchor_day)[0] \
+                        and not _parse_clock_tokens(ln):
+                    consumed.add(ln)
             return [ev], consumed
     return [], set()
 
@@ -2095,6 +2121,186 @@ def _chat_location(flat: str) -> str:
     return loc
 
 
+# --- 会议邀请（腾讯会议 / 钉钉 / 飞书的分享卡片）---------------------------
+# 这类截图是「主题 / 时间 / 会议号 / 链接」的结构化卡片。逐行解析会把
+# 「会议时间：2026/11/05 19:30-21:00 (GMT+08:00)」整行当标题（产出
+# 「会议时间 19 00 (GMT+ )」这种乱码），主题行反而因没有时间被丢掉。
+# 这里整卡合成一条：主题做标题，会议号与入会链接放进备注。
+_MEET_HINT_RE = re.compile(
+    r"腾讯会议|钉钉会议|飞书会议|Zoom|会议号|会议\s?ID|入会链接|会议邀请|会议密钥")
+_MEET_THEME_RE = re.compile(r"(?:会议主题|会议名称|主题)\s*[:：]\s*([^\n，。；]{2,40})")
+_MEET_TIME_RE = re.compile(r"(?:会议时间|时间)\s*[:：]\s*([^\n]+)")
+_MEET_ID_RE = re.compile(r"(?:会议号|会议\s?ID|会议密码)\s*[:：]?\s*([0-9][0-9\s\-]{5,})")
+_WEEKDAY_ICS_CN = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
+
+
+def _next_weekday(day: date, rrule: str) -> date:
+    """「每周三 19:30」没写日期时，把开始日推进到最近的那个星期几。"""
+    m = re.search(r"BYDAY=([A-Z]{2})", rrule)
+    if not m:
+        return day
+    target = _WEEKDAY_ICS_CN.get(m.group(1))
+    if target is None:
+        return day
+    offset = (target - day.weekday()) % 7
+    return day + timedelta(days=offset)
+
+
+def _extract_meeting_event(text: str, anchor_day: date,
+                           default_remind: int = -1) -> list[Event]:
+    """腾讯会议 / 钉钉会议分享卡 → 一条日程；不是会议邀请就返回 []。"""
+    if not _MEET_HINT_RE.search(text):
+        return []
+    lines = [ln.strip() for ln in
+             text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    flat = "\n".join(lines)
+
+    # 时间行：必须同时有日期（或「每周三」）和钟点才算数
+    time_line = ""
+    for ln in lines:
+        m = _MEET_TIME_RE.search(ln)
+        if not m:
+            continue
+        cand = m.group(1)
+        if _parse_clock_tokens(cand) and (
+                parse_date_in_text(cand, anchor_day)[0]
+                or parse_recurrence(cand)[0]):
+            time_line = cand
+            break
+    if not time_line:
+        return []
+
+    day, _, _, _ = parse_date_in_text(time_line, anchor_day)
+    # 去掉「(GMT+08:00)」这类时区尾巴，避免 08:00 被当成第三个时刻
+    clock_src = re.sub(r"[(（]\s*(?:GMT|UTC)[^)）]*[)）]", " ", time_line)
+    tokens = _parse_clock_tokens(clock_src)
+    if not tokens:
+        return []
+
+    rrule, _label = parse_recurrence(time_line)   # 「每周三 19:30-21:00」循环会议
+    day = day or anchor_day
+    if rrule and day == anchor_day:
+        # 「每周三」没写具体日期：推进到最近的那个星期几，别挂在今天
+        day = _next_weekday(day, rrule)
+
+    start_dt = datetime.combine(day, dt_time(tokens[0][0], tokens[0][1]))
+    end_dt = None
+    if len(tokens) >= 2:
+        end_dt = datetime.combine(day, dt_time(tokens[1][0], tokens[1][1]))
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+    if end_dt is None:
+        end_dt = start_dt + timedelta(minutes=DEFAULT_EVENT_MINUTES)
+
+    tm = _MEET_THEME_RE.search(flat)
+    title = tm.group(1).strip() if tm else "线上会议"
+
+    extras: list[str] = []
+    mid = _MEET_ID_RE.search(flat)
+    if mid:
+        extras.append("会议号 " + re.sub(r"[\s\-]", "", mid.group(1))[:20])
+    link = re.search(r"https?://\S+", flat)
+    if link:
+        extras.append(link.group(0)[:80])
+
+    ev = Event(
+        title=title,
+        start=start_dt,
+        end=end_dt,
+        location="线上会议",
+        note="｜".join(extras)[:160],
+        priority=extract_priority(flat),
+        source="text",
+        remind_minutes=default_remind,
+        raw=flat[:400],
+    )
+    if rrule:
+        ev.rrule = rrule
+        ev.recur_source = "image"
+    return [ev]
+
+
+# --- 演出门票（演唱会 / 音乐节 / 话剧，大麦 / 猫眼风格的卡片）---------------
+_SHOW_HINT_RE = re.compile(
+    r"演唱会|音乐节|音乐剧|话剧|巡演|[Ll]ivehouse|票档|开演|检票口|观演|演出时间")
+_SHOW_TITLE_RE = re.compile(r"[【\[]([^】\]\n]{4,50})[】\]]")
+_SHOW_VENUE_RE = re.compile(
+    r"(?:场馆|演出场馆|地点|剧场|场馆地址)\s*[:：]\s*([^\n，。；]{2,30})")
+_SHOW_TIME_RE = re.compile(r"(?:演出时间|演出日期|时间|开演时间)\s*[:：]\s*([^\n]+)")
+
+
+def _extract_show_event(text: str, anchor_day: date,
+                        default_remind: int = -1) -> list[Event]:
+    """演出门票卡 → 一条日程；不像演出票就返回 []。"""
+    if not _SHOW_HINT_RE.search(text):
+        return []
+    lines = [ln.strip() for ln in
+             text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    flat = "\n".join(lines)
+
+    time_line = ""
+    for ln in lines:
+        m = _SHOW_TIME_RE.search(ln)
+        if not m:
+            continue
+        cand = m.group(1)
+        if (parse_date_in_text(cand, anchor_day)[0]
+                and _parse_clock_tokens(cand)):
+            time_line = cand
+            break
+    if not time_line:
+        return []
+
+    day, _, _, _ = parse_date_in_text(time_line, anchor_day)
+    day = day or anchor_day
+    tokens = _parse_clock_tokens(time_line)
+    if not tokens:
+        return []
+
+    start_dt = datetime.combine(day, dt_time(tokens[0][0], tokens[0][1]))
+    end_dt = None
+    if len(tokens) >= 2:
+        end_dt = datetime.combine(day, dt_time(tokens[1][0], tokens[1][1]))
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+    if end_dt is None:
+        end_dt = start_dt + timedelta(minutes=DEFAULT_EVENT_MINUTES)
+
+    # 标题：【...】里的演出名优先；去掉尾部「-上海站」这类巡演标记太激进，
+    # 保留（里面有「演唱会」关键词，日历上一眼能认出来）。
+    title = ""
+    tm = _SHOW_TITLE_RE.search(flat)
+    if tm:
+        title = tm.group(1).strip()
+    else:
+        nm = re.search(r"(?:演出名称|演出)\s*[:：]\s*([^\n，。；]{2,40})", flat)
+        if nm:
+            title = nm.group(1).strip()
+    title = re.sub(r"\s+", " ", title)[:40] or "演出"
+
+    vm = _SHOW_VENUE_RE.search(flat)
+    venue = vm.group(1).strip() if vm else ""
+
+    extras: list[str] = []
+    for pat in (r"票档\s*[:：]\s*([^\n]+)", r"座位\s*[:：]\s*([^\n]+)",
+                r"票价\s*[:：]\s*([^\n]+)"):
+        pm = re.search(pat, flat)
+        if pm:
+            extras.append(pm.group(0).strip()[:40])
+
+    return [Event(
+        title=title,
+        start=start_dt,
+        end=end_dt,
+        location=venue,
+        note="｜".join(extras)[:120],
+        priority=extract_priority(flat),
+        source="text",
+        remind_minutes=default_remind,
+        raw=flat[:400],
+    )]
+
+
 def _extract_chat_events(text: str, anchor_day: date,
                          default_remind: int = -1) -> list[Event]:
     """整段聊天通知 → 一条日程；不像聊天通知就返回 []。"""
@@ -2138,11 +2344,22 @@ def parse_with_rules(text: str, anchor: datetime | None = None,
     anchor_dt = anchor or datetime.now()
     anchor_day = anchor_dt.date()
 
+    # 会议邀请卡片（腾讯会议 / 钉钉）：结构最规整，最先识别，
+    # 否则群消息通道会把「会议主题」「会议号」这些行吃掉。
+    meet_events = _extract_meeting_event(text, anchor_day, default_remind)
+    if meet_events:
+        return meet_events
+
     # 群消息 / 聊天截图：整段是一段话，先按「一条通知」整体识别，
     # 避免逐行拆成多条、标题被「时间：」「地点：」污染。
     chat_events = _extract_chat_events(text, anchor_day, default_remind)
     if chat_events:
         return chat_events
+
+    # 演出门票（演唱会 / 音乐节 / 话剧）：同样是结构化卡片
+    show_events = _extract_show_event(text, anchor_day, default_remind)
+    if show_events:
+        return show_events
 
     events: list[Event] = []
     inherit_date: date | None = None   # 上一行日期小标题，供后续行继承

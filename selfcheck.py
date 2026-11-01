@@ -761,6 +761,80 @@ def test_time_blocks() -> None:
     check("报告里提供「仍然添加」补录入口",
           "add_expired" in src_all and "def _cb_add_expired" in src_all)
 
+    # --- 会议邀请（腾讯会议 / 钉钉） ------------------------------------
+    meet = app.parse_with_rules(
+        "【腾讯会议】\n会议主题：算法组周会\n"
+        "会议时间：2026/11/05 19:30-21:00 (GMT+08:00)\n会议号：123 456 789\n"
+        "点击链接入会：https://meeting.tencent.com/dm/qAbCdEfGh",
+        anchor=datetime(2026, 11, 1))
+    check("腾讯会议卡识别为 1 条",
+          len(meet) == 1, str([e.title for e in meet]))
+    check("会议标题取「会议主题」而不是时间行",
+          bool(meet) and meet[0].title == "算法组周会",
+          meet[0].title if meet else "")
+    check("会议时间含 GMT 尾巴也能取对",
+          bool(meet) and meet[0].start.strftime("%m-%d %H:%M") == "11-05 19:30"
+          and meet[0].end.strftime("%H:%M") == "21:00",
+          f"{meet[0].start:%m-%d %H:%M}" if meet else "")
+    check("会议号进了备注",
+          bool(meet) and "123456789" in meet[0].note,
+          meet[0].note if meet else "")
+
+    meet_w = app.parse_with_rules(
+        "【腾讯会议】\n会议主题：研究生组会\n会议时间：每周三 19:30-21:00\n"
+        "会议号：456 789 123", anchor=datetime(2026, 11, 2))
+    check("「每周三」循环会议：日期推进到最近的周三且带循环规则",
+          len(meet_w) == 1
+          and meet_w[0].start.strftime("%A") == "Wednesday"
+          and meet_w[0].rrule == "FREQ=WEEKLY;BYDAY=WE",
+          f"{meet_w[0].start if meet_w else None} "
+          f"{meet_w[0].rrule if meet_w else ''}")
+
+    meet_d = app.parse_with_rules(
+        "【钉钉会议】\n主题：项目日会\n时间：11月9日 09:30-09:50\n会议ID：222 333 444",
+        anchor=datetime(2026, 11, 1))
+    check("钉钉会议（无年份日期）识别正常",
+          len(meet_d) == 1 and meet_d[0].start.strftime("%m-%d") == "11-09",
+          str([(e.start, e.title) for e in meet_d]))
+
+    # --- 演出门票（演唱会 / 话剧 / 音乐节） -----------------------------
+    show = app.parse_with_rules(
+        "大麦\n【周杰伦嘉年华世界巡回演唱会-上海站】\n时间：2026.12.12 周六 19:00\n"
+        "场馆：上海体育场\n票档：看台1280元\n座位：看台二区12排8号",
+        anchor=datetime(2026, 11, 1))
+    check("演唱会门票识别为 1 条（19:00 开演）",
+          len(show) == 1 and show[0].start.strftime("%Y-%m-%d %H:%M")
+          == "2026-12-12 19:00",
+          str([(e.start, e.title) for e in show]))
+    check("演出场馆进地点、票档进备注",
+          bool(show) and "上海体育场" in show[0].location
+          and "1280" in show[0].note,
+          f"{show[0].location if show else ''} | {show[0].note if show else ''}")
+
+    show2 = app.parse_with_rules(
+        "【2026楠溪江星巢秘境音乐节】\n时间：12月26日 周六 13:00\n"
+        "地点：温州楠溪江音乐节现场", anchor=datetime(2026, 11, 1))
+    check("音乐节门票（无年份）识别正常",
+          len(show2) == 1 and show2[0].start.strftime("%Y-%m-%d %H:%M")
+          == "2026-12-26 13:00",
+          str([(e.start, e.title) for e in show2]))
+
+    # 单行车票（车次在最前 +「铁路12306」表头）
+    t1l = app.parse_with_rules(
+        "●铁路12306\nG7045 09:56 镇江 10:27 常州 2026年10月31日",
+        anchor=datetime(2026, 10, 1))
+    check("单行车票（车次在最前）识别为 1 条",
+          len(t1l) == 1 and t1l[0].end.strftime("%H:%M") == "10:27"
+          and "镇江" in t1l[0].location,
+          str([(e.start, e.end, e.title, e.location) for e in t1l]))
+
+    # 反向保护：普通通知不被演出 / 会议通道劫持
+    normal = app.parse_with_rules(
+        "11月3日 19:00 迎新晚会彩排\n地点：大学生活动中心", anchor=datetime(2026, 11, 2))
+    check("普通通知不被演出通道劫持",
+          len(normal) == 1 and "彩排" in normal[0].title,
+          str([(e.title, e.start) for e in normal]))
+
     # 反例：字段不足 2 行时不做归并（避免误伤单条日程）
     single = "10月31日 14:00 实验室安全培训\n场地：实验楼A201"
     check("字段不足 2 行时不触发归并",
