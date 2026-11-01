@@ -1771,6 +1771,14 @@ def test_layout_optimizations() -> None:
     check("桌面端 Hero 徽标仍然显示（规则写在 640px 媒体查询里）",
           src.find("@media (max-width: 640px)") < src.find(".hero-badge { display: none; }"))
 
+    # ⑤ 二维码悬停不再出现空工具条（Streamlit 的 stElementToolbar 空壳）
+    check("分享面板隐藏图片元素工具条（二维码上方的空气泡）",
+          '.st-key-share_body [data-testid="stElementToolbar"] { display: none !important; }' in src)
+
+    # ⑥ 解析报告不再显示耗时（用户不关心跑了几秒）
+    check("解析报告的提示里不再出现「耗时」",
+          "耗时 {elapsed}s" not in src and 'report["elapsed"]' not in src)
+
     # ⑤ 备份工具在位：每次改版前先留一份可回滚的快照
     from pathlib import Path
     check("备份脚本存在（tools/backup.py）",

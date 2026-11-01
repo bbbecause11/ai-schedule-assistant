@@ -103,7 +103,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.8.1"
+APP_VERSION = "2.8.2"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7592,6 +7592,11 @@ body:has([data-testid="stMainMenu"] button) .st-key-share_fab { right: 3.2rem; }
     -webkit-mask: url("__SHARE_ICON__") center / contain no-repeat;
     mask: url("__SHARE_ICON__") center / contain no-repeat;
 }
+/* 分享面板里的二维码不需要「全屏 / 下载」那条悬浮工具条：
+   Streamlit 悬停图片时会塞一个 stElementToolbar，二维码这种图它连按钮都没有，
+   只剩一个空的小圆角框，看着像无意义的空气泡。 */
+.st-key-share_body [data-testid="stElementToolbar"] { display: none !important; }
+
 /* 分享面板里的网址：等宽小字，方便手动选中复制 */
 .share-link {
     margin: .15rem 0 .55rem;
@@ -8411,7 +8416,6 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
     rule_events: list[Event] = []
     ai_events: list[Event] = []
     ai_error = ""
-    t0 = time.time()
 
     if combined:
         try:
@@ -8445,8 +8449,6 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
             log(f"AI 解析异常: {traceback.format_exc()}")
             ai_error = f"AI 解析出现意外错误（{type(exc).__name__}），已改用本地规则引擎。"
 
-    elapsed = time.time() - t0
-
     # --- 5. 融合 --------------------------------------------------------
     if ai_events and rule_events:
         final_events = merge_ai_and_rules(ai_events, rule_events)
@@ -8473,7 +8475,6 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
     # --- 6. 入库 --------------------------------------------------------
     report = _push_events(final_events, engine_label)
     report["engine"] = engine_label
-    report["elapsed"] = round(elapsed, 2)
     report["ai_error"] = ai_error
     report["warnings"] = warnings
     report["ocr_count"] = ocr_ok
@@ -9494,12 +9495,15 @@ def _escape(text: str) -> str:
 
 
 def _render_parse_report(report: dict[str, Any]) -> None:
-    """渲染一次解析的统计报告。"""
+    """渲染一次解析的统计报告。
+
+    以前这里会写「耗时 3.2s」，但用户不关心跑了几秒：
+    解析已经完成了，剩下的时间应该留给"新增几条 / 共几条"这类结果信息。
+    """
     engine = report.get("engine", "")
-    elapsed = report.get("elapsed", 0)
     _html(
         f'<div class="notice notice-ok">'
-        f'✅ 解析完成（引擎：{_escape(engine)}，耗时 {elapsed}s）'
+        f'✅ 解析完成（引擎：{_escape(engine)}）'
         f'　新增 <b>{report.get("added", 0)}</b> 条，'
         f'当前共 <b>{report.get("after_count", 0)}</b> 条。'
         f'</div>'
