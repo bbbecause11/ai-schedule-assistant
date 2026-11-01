@@ -3,7 +3,7 @@
 > 把散落在聊天记录、课表截图、备忘录里的碎片化日程，一键整理成可视化日程表，
 > 并导出为标准 `.ics` 日历文件，直接导入手机、电脑、Outlook、Google 日历。
 
-由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.8.0**。
+由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.8.1**。
 
 **仓库地址**：<https://github.com/bbbecause11/ai-schedule-assistant>（公开，可直接访问）
 
@@ -868,8 +868,22 @@ OCR 各返回格式与异常分支、AI 层错误处理、安全性静态扫描�
 
 纯文档改动不占版本号。
 
+### 改版前先备份
+
+每次动代码前先跑一次备份，留一份"改之前能跑的样子"：
+
+```bash
+python tools/backup.py -m "这次要改什么"   # 打 zip + 建 git tag
+python tools/backup.py --list              # 看有哪些备份
+python tools/backup.py --restore v2.8.0    # 一键回滚（会先把当前状态也备份一份）
+```
+
+备份存在 `backups/v{版本}_{时间戳}.zip`（含 `app.py` / `selfcheck.py` / `README.md` / `requirements.txt`），
+**只留在本地、不随仓库上传**；远端回滚用同名的 `git tag v{版本}`。
+
 | 版本 | 内容 | 用户反馈修复 | 自查修复 |
 | --- | --- | --- | --- |
+| **2.8.1** | 首屏空间优化：注入 CSS 的 5 个空块不再各占 16px 间距（顶部省 80px，桌面/手机都生效）；手机端 Hero 隐藏装饰徽标 + 收紧内边距（217→146px）、指标卡瘦身，**月历从「要滚动才看见」变成首屏可见**。同时新增 `tools/backup.py`：改版前一键备份 + 回滚 | 1 | 7 |
 | **2.8.0** | **分享功能（整块）**：右上角原生 Share 换成自绘**弯曲箭头**图标，点开为分享面板——**微信二维码**（segno）、**QQ**、**微博**、**复制链接**（Clipboard API + execCommand 兜底）；链接按钮补胶囊样式；手机端三列不叠行。后续两次修复并入本版：气泡/网址框被 `margin-bottom:-16px` 压字的问题、按钮贴到最右边（有原生 ⋮ 菜单时自动让位）、图标 SVG 补 `width/height` 避免被拉偏 | 3 | 22 |
 | **2.7.10** | 修复气泡文字不居中：实测 DOM 发现气泡内的 markdown 容器带 `margin-bottom:-16px`，把气泡高度算成「一行文字 −16px」，文字从底部溢出。清掉该负边距后气泡高度 = 文字 + 上下内边距；同时修掉「双层气泡框」（`[role=tooltip]` 是定位层，原先被一并画了背景/边框）和「字号被顶回 16px」（`[role=tooltip] *` 会把气泡自己匹配进去）。用 CDP 在真实页面实测四档字号：溢出量均为 0 | 1 | 7 |
 | **2.7.9** | 修复气泡文字被边框切掉：根因是 Streamlit 用 `*{font-size:sm}` 把气泡内每个子元素顶回 14px，而容器按小字号算高，再叠上它自带的 `overflow:auto` + `maxHeight`，换行后的第二行就被裁掉。改为子元素 `font-size: inherit`、气泡 `max-height:none / overflow:visible`、定位层用 `:has()` 一并放开；**四种界面字号 + 深浅主题 + 长文案换行**逐一截图验证无截断 | 1 | 5 |

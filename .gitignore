@@ -31,3 +31,7 @@ __pycache__/
 #   .streamlit/config.toml   —— 主题与运行参数（无密钥）
 #   .streamlit/secrets.toml.example —— 密钥填写模板（无真实密钥）
 #   packages.txt             —— 云端 apt 依赖
+
+# 版本备份（只存本地，远端回滚用 git tag）
+backups/
+*.before-restore

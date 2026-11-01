@@ -103,7 +103,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.8.0"
+APP_VERSION = "2.8.1"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -5794,6 +5794,15 @@ _CSS = """
     max-width: var(--content-max);
     padding: var(--space-6) var(--space-5) var(--space-8);
 }
+/* 只装了 <style> 的注入块不占位。
+   `st.markdown("<style>…")` 渲染出来的元素自身高度是 0，但父级 flex 的 gap
+   照样会给它留 16px —— 页面顶部连着注入 5 块样式，就白白吃掉 80px 空白，
+   手机首屏几乎全被这段空隙 + Hero 占满，看不到真正的功能。
+   必须限定 `style:only-child`：加载动画那一块的 markdown 里同时有
+   <style> 和卡片内容，误伤了会把转圈动画整个藏掉。 */
+[data-testid="stElementContainer"]:has([data-testid="stMarkdownContainer"] > style:only-child) {
+    display: none !important;
+}
 
 /* 区块标题：一条 3px 品牌色竖线 + 21px 字 */
 .section-title {
@@ -6552,8 +6561,21 @@ section[role="dialog"] {
         padding: 0 .45rem !important;
         font-size: var(--fs-xs);
     }
-    .hero h1 { font-size: 1.625rem; }
-    .hero p { font-size: var(--fs-xs); }
+    /* Hero 在手机上占掉首屏 1/3，把装饰性的徽标藏掉、内边距和字号收紧，
+       省下来的空间让「月历 / 表格」能往上提一屏 */
+    .hero {
+        padding: 1.15rem 1.15rem 1.1rem;
+        margin-bottom: var(--space-4);
+        border-radius: var(--r-lg);
+    }
+    .hero-badge { display: none; }
+    .hero h1 { font-size: 1.5rem; margin: 0 0 var(--space-2); }
+    .hero p { font-size: var(--fs-xs); line-height: 1.5; }
+    /* 指标卡：手机上两列两行，别做得跟桌面一样高 */
+    .metric-row { gap: var(--space-2); margin: var(--space-1) 0 var(--space-4); }
+    .metric-card { padding: .6rem .8rem; border-radius: var(--r-md); }
+    .metric-card .label { font-size: .68rem; margin-bottom: .12rem; }
+    .metric-card .value { font-size: 1.3rem; }
     .section-title { font-size: 1.125rem; margin: var(--space-5) 0 var(--space-3); }
     .cal-side { padding: var(--space-4); }
     .disclaimer { padding: var(--space-4); }

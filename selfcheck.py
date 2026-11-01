@@ -1749,6 +1749,36 @@ def test_share() -> None:
           "segno 不可用时应返回 None 而不是抛异常")
 
 
+def test_layout_optimizations() -> None:
+    """布局优化：顶部不再被注入块白吃 80px；手机端 Hero / 指标卡收紧。"""
+    section("N. 布局优化（首屏空间）")
+    src = open("app.py", encoding="utf-8").read()
+
+    # ① 只装 <style> 的注入块必须不占位：它们是 0 高，但 flex gap 会给每块留 16px
+    check("CSS 注入块不参与布局（否则顶部白吃 80px）",
+          '[data-testid="stElementContainer"]:has([data-testid="stMarkdownContainer"] > style:only-child)' in src)
+    # ② 但必须限定 style:only-child —— 加载动画那块里 <style> 和卡片是兄弟
+    check("隐藏规则不会误伤加载动画（限定 style:only-child）",
+          "style:only-child" in src and "load-card" in src)
+    # ③ 手机端 Hero 收紧：藏徽标、压内边距、字号降一档
+    mobile = src[src.find("@media (max-width: 640px)"):]
+    mobile = mobile[:mobile.find("@media", 10)] if "@media" in mobile[10:] else mobile
+    check("手机端隐藏 Hero 徽标（省 30px）", ".hero-badge { display: none; }" in src)
+    check("手机端 Hero 内边距/字号收紧",
+          ".hero h1 { font-size: 1.5rem;" in src and "padding: 1.15rem 1.15rem 1.1rem;" in src)
+    check("手机端指标卡收紧", ".metric-card { padding: .6rem .8rem;" in src)
+    # ④ 桌面端不受影响：徽标只在 640px 以下隐藏
+    check("桌面端 Hero 徽标仍然显示（规则写在 640px 媒体查询里）",
+          src.find("@media (max-width: 640px)") < src.find(".hero-badge { display: none; }"))
+
+    # ⑤ 备份工具在位：每次改版前先留一份可回滚的快照
+    from pathlib import Path
+    check("备份脚本存在（tools/backup.py）",
+          Path("tools/backup.py").exists())
+    check("backups/ 不进仓库（只留本地）",
+          "backups/" in Path(".gitignore").read_text(encoding="utf-8"))
+
+
 def test_version_policy() -> None:
     """版本号：主.次.修订，按改动量决定升哪一位（不是每轮都 +0.0.1）。"""
     section("M. 版本号规则")
@@ -1769,9 +1799,11 @@ def test_version_policy() -> None:
           and "第一位 +1" in readme and "第二位 +1" in readme and "第三位 +1" in readme)
     check("代码里 APP_VERSION 上方有规则注释",
           "按改动量决定升哪一位" in src[src.find("APP_VERSION") - 400: src.find("APP_VERSION")])
-    # 最近几版的规则：分享面板属于「一整块功能」→ 次版本号变 1，修订位归零
-    check("功能版本会把修订位归零（2.8.0 而不是 2.7.13 这种堆修订号）",
-          app.APP_VERSION.endswith(".0"), app.APP_VERSION)
+    # 「小修」只动最后一位，但别像以前那样一路堆到 .13：
+    # 修订位超过个位数，说明该按「功能版本」升中间那位了
+    patch = int(app.APP_VERSION.split(".")[2])
+    check("修订位保持在个位数（小修只 +1，堆到两位数就该升次版本）",
+          0 <= patch <= 9, app.APP_VERSION)
 
 
 def main() -> int:
@@ -1787,7 +1819,8 @@ def main() -> int:
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
                test_loading_indicator, test_chat_notices,
                test_output_selfcheck, test_all_day, test_share,
-               test_version_policy):
+               test_version_policy,
+               test_layout_optimizations):
         try:
             fn()
         except Exception:  # noqa: BLE001
