@@ -105,7 +105,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.10.8"
+APP_VERSION = "2.10.9"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -7278,7 +7278,11 @@ section[role="dialog"] {
         max-width: min(85vw, 21rem) !important;
         z-index: 999992 !important;
         box-sizing: border-box;
-        transform: translateX(0) !important;
+        transform: translateX(0);
+        /* 动画必须能压过静态值：这里不能写 !important（!important 声明
+           在层叠里高于动画，会把滑入滑出整个吞掉）；同时关掉 Streamlit
+           自带的 transition，避免它和 keyframes 抢同一个 transform。 */
+        transition: none !important;
         will-change: transform;
         margin: 0 !important;
         translate: none !important;
@@ -7299,22 +7303,28 @@ section[role="dialog"] {
         max-width: min(85vw, 21rem) !important;
         z-index: 999992 !important;
         box-sizing: border-box;
-        transform: translateX(-110%) !important;
+        transform: translateX(-110%);
+        transition: none !important;
         will-change: transform;
         margin: 0 !important;
         translate: none !important;
         pointer-events: none;
     }
-    /* 滑入/滑出动画由注入的 JS 在 data-collapsed 翻转时挂类触发。
-       不用 CSS transition：实测 Streamlit 翻转状态时会 remount 侧边栏节点
-       （30s 过渡实验下面板瞬间就位/消失），transition 在新节点上永不触发；
-       animation 则会在新节点上正常播放。挂类 350ms 后由 JS 移除，
-       元素回到两态规则的静态 transform —— 与动画终态一致，无跳动。 */
-    .sb-anim-open {
-        animation: sb-slide-in .3s var(--ease-out) both;
+    /* 滑入/滑出动画：绑定在**状态选择器**上，由 body 的一次性开关类
+       .sb-anim-ready 启用。这是唯一能扛住 remount 的写法：
+       · Streamlit 翻转 data-collapsed 时会重挂侧边栏节点（30s 过渡实验
+         证伪了 transition——新节点没有旧值，过渡永不触发）；
+       · 内联 animation / 挂 class 都会随旧节点一起被丢弃（React 还会
+         整体重写 className）；
+       · 绑在状态上的 animation 对「任何处于该状态的节点」都生效，
+         新节点一挂载就从头播，天然兼容 remount。
+       首载不加开关类 → 不播动画；第一次开合时由 JS 加上，此后一直有效。
+       结束后由 fill: both 停在 -110% / 0，与两态静态 transform 完全一致。 */
+    body.sb-anim-ready .stApp:has([data-testid="stSidebar"][data-collapsed="true"]) [data-testid="stSidebar"] {
+        animation: sb-slide-out .3s cubic-bezier(.22,.61,.36,1) both;
     }
-    .sb-anim-close {
-        animation: sb-slide-out .3s var(--ease-out) both;
+    body.sb-anim-ready .stApp:has([data-testid="stSidebar"][data-collapsed="false"]) [data-testid="stSidebar"] {
+        animation: sb-slide-in .3s cubic-bezier(.22,.61,.36,1) both;
     }
     @keyframes sb-slide-in {
         from { transform: translateX(-110%); }
@@ -8794,30 +8804,25 @@ _COPY_LINK_JS = (
     "})();</script>"
 )
 
-# 手机端侧边栏滑入/滑出动画的触发器。
-# 为什么需要 JS：实测 Streamlit 在收起/展开翻转 data-collapsed 时会重挂
-# 侧边栏节点，CSS transition 在新节点上永不触发（30s 过渡实验下面板瞬间
-# 就位/消失）；而 CSS animation 在新节点上会正常播放。
-# 做法：MutationObserver 盯 data-collapsed 翻转 → 挂 sb-anim-open/close 类
-# → CSS keyframes 播 0.3s 滑入/滑出 → 400ms 后摘类（回到两态规则的静态
-# transform，与动画终态一致，无跳动）。首次载入只记录状态，不播动画。
+# 手机端侧边栏滑入/滑出动画的开关。
+# 只做一件事：第一次开合（data-collapsed 翻转）时给 body 加 .sb-anim-ready，
+# 之后 CSS 里绑定在状态选择器上的 keyframes 就会生效（详见 CSS 处注释）。
+# 为什么要「延迟到第一次开合」才启用：首载即收起态，若动画一开始就挂在
+# 收起态规则上，页面加载瞬间面板会从屏幕内滑出去一次（误播）。
+# 注意只给 body 加类：React 会重写侧边栏自身的 className，但不会动 body。
 _SIDEBAR_ANIM_JS = (
     "<script>(function(){"
-    "var last=null,timer=null;"
-    "function el(){return document.querySelector('[data-testid=\"stSidebar\"]');}"
-    "function apply(){var e=el();if(!e)return;"
+    "var last=null;"
+    "function run(){"
+    "var e=document.querySelector('[data-testid=\"stSidebar\"]');if(!e)return;"
     "var c=e.getAttribute('data-collapsed')==='true';"
     "if(last===null){last=c;return;}"
     "if(c===last)return;"
     "last=c;"
-    "e.classList.remove('sb-anim-open','sb-anim-close');"
-    "void e.offsetWidth;"
-    "e.classList.add(c?'sb-anim-close':'sb-anim-open');"
-    "if(timer)clearTimeout(timer);"
-    "timer=setTimeout(function(){e.classList.remove('sb-anim-open','sb-anim-close');},400);"
+    "document.body.classList.add('sb-anim-ready');"
     "}"
-    "new MutationObserver(apply).observe(document.body,"
-    "{subtree:true,attributes:true,attributeFilter:['data-collapsed']});"
+    "new MutationObserver(run).observe(document.body,{subtree:true,childList:true,"
+    "attributes:true,attributeFilter:['data-collapsed']});"
     "})();</script>"
 )
 

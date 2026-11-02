@@ -2144,20 +2144,28 @@ def test_layout_optimizations() -> None:
           src.count("width: min(85vw, 21rem) !important;") >= 2
           and src.count("min-width: min(85vw, 21rem) !important;") >= 2
           and src.count("max-width: min(85vw, 21rem) !important;") >= 2)
-    check("滑入/滑出动画由注入 JS 挂类触发（transition 在 remount 节点上永不触发）",
-          "_SIDEBAR_ANIM_JS" in src and "sb-anim-open" in src and "sb-anim-close" in src
-          and "MutationObserver" in src and "attributeFilter:['data-collapsed']" in src
+    check("滑入/滑出动画绑定在状态选择器上、由 body 一次性开关类启用（扛 remount）",
+          "body.sb-anim-ready .stApp:has([data-testid=\"stSidebar\"][data-collapsed=\"true\"])"
+          " [data-testid=\"stSidebar\"] {\n        animation: sb-slide-out .3s" in src
+          and "body.sb-anim-ready .stApp:has([data-testid=\"stSidebar\"][data-collapsed=\"false\"])"
+          " [data-testid=\"stSidebar\"] {\n        animation: sb-slide-in .3s" in src
+          and "document.body.classList.add('sb-anim-ready')" in src)
+    check("动画开关只加在 body 上（React 不会重写 body 的 class）",
+          "_SIDEBAR_ANIM_JS" in src and "MutationObserver" in src
+          and "attributeFilter:['data-collapsed']" in src
           and "st.html(_SIDEBAR_ANIM_JS, unsafe_allow_javascript=True)" in src)
     check("动画时长正常（0.3s），无调试残留",
-          "animation: sb-slide-in .3s" in src and "animation: sb-slide-out .3s" in src
-          and "30s linear" not in src and "3s linear" not in src)
-    check("首次载入不播动画（JS 首次只记录状态）",
+          src.count("animation: sb-slide-in .3s cubic-bezier(.22,.61,.36,1) both;") == 1
+          and src.count("animation: sb-slide-out .3s cubic-bezier(.22,.61,.36,1) both;") == 1
+          and "10s linear" not in src and "30s linear" not in src
+          and "SB_init" not in src and "SB_play" not in src)
+    check("首次载入不播动画（JS 首次只记录状态，开关类延迟到第一次开合）",
           "if(last===null){last=c;return;}" in src)
     check("展开态钉死 Streamlit 原生位移（margin/translate），只留 transform 过渡",
           "margin: 0 !important;" in src and "translate: none !important;" in src)
     check("收起态面板保持在屏幕外渲染（display/width 压住 Streamlit 的 display:none）",
           '.stApp:has([data-testid="stSidebar"][data-collapsed="true"]) [data-testid="stSidebar"] {'
-          in src and "transform: translateX(-110%) !important;" in src
+          in src and "transform: translateX(-110%);" in src
           and "pointer-events: none;" in src)
     # 隐藏规则必须只在手机端媒体查询里：桌面端侧边栏是钉在左侧的，不遮按钮
     media_pos = src.rfind("@media (max-width: 640px)", 0, src.find(".st-key-fb_fab"))

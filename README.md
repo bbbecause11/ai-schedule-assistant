@@ -3,7 +3,7 @@
 > 把散落在聊天记录、课表截图、备忘录里的碎片化日程，一键整理成可视化日程表，
 > 并导出为标准 `.ics` 日历文件，直接导入手机、电脑、Outlook、Google 日历。
 
-由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.10.8**。
+由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.10.9**。
 
 **仓库地址**：<https://github.com/bbbecause11/ai-schedule-assistant>（公开，可直接访问）
 
@@ -908,6 +908,7 @@ python tools/backup.py --restore v2.8.0    # 一键回滚（会先把当前状�
 
 | 版本 | 内容 | 用户反馈修复 | 自查修复 |
 | --- | --- | --- | --- |
+| **2.10.9** | 真正修好侧边栏**收起/展开动画**（2.10.8 在线上仍无动画）：做了 10 秒慢放 + `document.title` 打点实验，实锤两个失效机制——① `transform: ... !important` 在层叠里高于动画，把 keyframes 整个吞掉；② Streamlit 翻转状态时会 **remount** 侧边栏节点，内联 animation 和挂 class 都随旧节点一起被丢弃（React 还会重写 className）。最终方案：动画绑定在**状态选择器**上（`body.sb-anim-ready .stApp:has([data-collapsed="true"]) …`），任何处于该状态的节点挂载即播，天然扛 remount；开关类只加在 body（React 不动它），首载不加所以不会误播 | 1 | 4 |
 | **2.10.8** | 手机端侧边栏**双向滑入/滑出动画**（收起原来直接消失）：两态布局全由我们接管（fixed 浮层 + width/min/max 三件套钉死，宽度恒定内容零重排），滑入滑出由注入的 JS 监听 data-collapsed 翻转挂动画类触发（0.3s keyframes 位移）—— 实测 CSS transition 在 Streamlit 重挂节点时永不触发（30s 过渡实验面板瞬间就位/消失），animation 则正常播放；首次载入只记录状态不播动画 | 1 | 3 |
 | **2.10.7** | 修复侧边栏展开**抽搐**：我们的滑入 keyframes 和 Streamlit 原生的展开过渡（margin / translate / width）同时作用在同一个元素上，两股运动叠加 —— 展开态把这些原生会动的属性全部钉死（`transition/margin/translate: none`），画面上只剩一个动画 | 1 | 1 |
 | **2.10.6** | 修复 v2.10.5 引入的**收起态侧边栏文字竖排溢出**：宽度覆盖是无条件的，和 Streamlit 收起态自己的样式打架，侧边栏被压成一条细缝 —— 布局覆盖改为**只在展开态生效**（`:has([data-collapsed="false"])`），收起态完全交还 Streamlit；弹出动画从 transition 换成 keyframes 位移（每次展开播一次，依旧零重排） | 1 | 1 |
