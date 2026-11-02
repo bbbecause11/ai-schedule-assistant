@@ -2076,6 +2076,74 @@ def test_loading_card() -> None:
           'min(float(cfg.get("timeout") or 60), 25.0)' in src)
 
 
+def test_flight_cards() -> None:
+    """航班行程卡：多段行程 / 跨日到达 / 中转联程 / 带「|」的摘要卡。"""
+    section("L6. 航班行程卡（用户提供的四张真实截图 OCR）")
+    import app
+
+    # ① 行程列表：一屏三段，日期用「07-27 + 2026」两行写，第三段没有日期（沿用上一段）
+    a = app.parse_with_rules(
+        "去点评\n07-27\n吉祥航空 HO1105\n2026\n08:45\n上海浦东T2\n10:50\n厦门高崎T4\n"
+        "去点评\n08-31\n深圳航空 ZH9503\n2025\n当地\n11:55\n深圳宝安T3\n14:25\n上海虹桥T2\n"
+        "去点评\n深圳航空 ZH228\n03:30\n新加坡樟宜T1\n07:30\n深圳宝安T3")
+    check("行程列表识别出 3 段航程", len(a) == 3, str([e.title for e in a]))
+    check("三段航班号与航线正确",
+          [e.title for e in a] == [
+              "HO1105 上海浦东T2 → 厦门高崎T4",
+              "ZH9503 深圳宝安T3 → 上海虹桥T2",
+              "ZH228 新加坡樟宜T1 → 深圳宝安T3"],
+          str([e.title for e in a]))
+    check("第一段日期取票面年份（07-27 · 2026）",
+          bool(a) and a[0].start.strftime("%Y-%m-%d %H:%M") == "2026-07-27 08:45",
+          a[0].start.strftime("%Y-%m-%d %H:%M") if a else "")
+    check("第二段时间不被第一段抢走（11:55 → 14:25）",
+          len(a) > 1 and a[1].start.strftime("%H:%M") == "11:55"
+          and a[1].end.strftime("%H:%M") == "14:25",
+          f"{a[1].start:%H:%M}-{a[1].end:%H:%M}" if len(a) > 1 else "")
+    check("第三段没有日期时沿用上一段（2025-08-31 03:30）",
+          len(a) > 2 and a[2].start.strftime("%Y-%m-%d %H:%M") == "2025-08-31 03:30",
+          a[2].start.strftime("%Y-%m-%d %H:%M") if len(a) > 2 else "")
+
+    # ② 跨日到达：02:40+1，且 `3U` 这种数字开头的航司代码也要认
+    b = app.parse_with_rules(
+        "去点评\n08-29\n四川航空3U3919\n2025\n当地\n21:35\n成都天府T1\n02:40+1新加坡樟宜T2")
+    check("跨日航班（02:40+1）到达时间落到次日",
+          bool(b) and b[0].start.strftime("%m-%d %H:%M") == "08-29 21:35"
+          and b[0].end.strftime("%m-%d %H:%M") == "08-30 02:40",
+          f"{b[0].start:%m-%d %H:%M}→{b[0].end:%m-%d %H:%M}" if b else "")
+    check("数字开头的航司代码（3U3919）能被识别",
+          bool(b) and b[0].title.startswith("3U3919 成都天府T1 → 新加坡樟宜T2"),
+          b[0].title if b else "")
+    check("跨日到达在备注里注明",
+          bool(b) and "次日到达" in b[0].note, b[0].note if b else "")
+
+    # ③ 摘要卡：「上海一厦门 / 日期 + 时刻 / 航司+号|机场|出发」
+    c = app.parse_with_rules(
+        "上海一厦门\n2026-07-27(周一)08:45 至 10:50\n吉祥航空HO1105|浦东国际机场T2|出发")
+    check("摘要卡：标题含航班号与出发机场、到达城市",
+          bool(c) and c[0].title == "HO1105 浦东国际机场T2 → 厦门",
+          c[0].title if c else "")
+    check("摘要卡：地点是「|」里的出发机场，不是航司名",
+          bool(c) and c[0].location == "浦东国际机场T2",
+          c[0].location if c else "")
+
+    # ④ 中转联程：两程各一条，程次只给到达城市
+    d = app.parse_with_rules(
+        "阿斯兰航服国际\n出票成功音\n新加坡\n第1程深圳\n"
+        "2025-08-31(周日)03:30至07:30\n深圳航空ZH228|樟宜机场T1|出发\n"
+        "深圳\n第2程上海\n2025-08-31(周日)11:55 至 14:25\n"
+        "深圳航空ZH9503|宝安国际机场T3|出发\n实付款¥1555.00")
+    check("中转联程识别出 2 段",
+          len(d) == 2, str([e.title for e in d]))
+    check("两程航班号与时间各自对应（不再错位）",
+          len(d) == 2
+          and d[0].title == "ZH228 樟宜机场T1 → 深圳"
+          and d[1].title == "ZH9503 宝安国际机场T3 → 上海"
+          and d[0].start.strftime("%H:%M") == "03:30"
+          and d[1].start.strftime("%H:%M") == "11:55",
+          str([(e.title, e.start.strftime("%H:%M")) for e in d]))
+
+
 def test_remember_cfg() -> None:
     """「记住这台设备」：AI 配置加密存 Cookie，下次打开自动回填。"""
     section("L3. 记住这台设备（加密 Cookie）")
@@ -2330,7 +2398,7 @@ def main() -> int:
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
                test_loading_indicator, test_chat_notices,
                test_output_selfcheck, test_all_day, test_share,
-               test_remember_cfg, test_remember_prefs, test_loading_card, test_feedback, test_version_policy,
+               test_remember_cfg, test_flight_cards, test_remember_prefs, test_loading_card, test_feedback, test_version_policy,
                test_layout_optimizations):
         try:
             fn()

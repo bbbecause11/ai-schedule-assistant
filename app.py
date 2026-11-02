@@ -106,7 +106,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.12.0"
+APP_VERSION = "2.12.1"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -1331,7 +1331,7 @@ def _looks_like_date_only(line: str) -> bool:
 _TRIP_TRAIN_RE = re.compile(r"(?<![A-Za-z0-9])([GDCKZT]\d{1,4})(?!\d)")
 # 航班号：两位航司代码 + 3~4 位数字（HO1105 / CZ3101 / MU5101）。
 # 订单号（EN94148162）是 2 字母 + 8 位数字，被 (?!\d) 挡掉，不会误判成航班。
-_TRIP_FLIGHT_RE = re.compile(r"(?<![A-Za-z0-9])([A-Z]{2}\d{3,4})(?!\d)")
+_TRIP_FLIGHT_RE = re.compile(r"(?<![A-Za-z0-9])([A-Z0-9]{2}\d{3,4})(?!\d)")
 # 机票截图特征词：只有出现这些词，才把「两段时刻 + 航站楼」当成一段航程
 _TRIP_FLIGHT_HINT_RE = re.compile(
     r"航空|航班|机场|登机|值机|航站楼|起飞|降落|电子客票|登机牌")
@@ -1666,78 +1666,216 @@ def _cn_place(seg: str, limit: int = 1) -> list[str]:
     return out
 
 
-def _flight_trip_event(lines: list[str], flat: str,
-                       anchor_day: date) -> tuple[Event | None, set[str]]:
-    """
-    机票行程卡 / 登机牌 → 一条事件。
+# 机票卡上的字段锚点（行程列表 / 中转联程都按这些锚点切卡）
+_FLIGHT_CLOCK_RE = re.compile(r"(?<!\d)(\d{1,2})\s*[:：]\s*(\d{2})(?!\d)(?:\s*\+\s*(\d))?")
+_FLIGHT_FULL_DATE_RE = re.compile(r"(20\d{2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})")
+_FLIGHT_MONTH_DAY_RE = re.compile(r"(?<![\d:])(\d{1,2})\s*[-/月]\s*(\d{1,2})(?![\d:])")
+_FLIGHT_YEAR_RE = re.compile(r"(?<!\d)(20\d{2})(?!\d)")
+# 「第1程深圳」：中转票的到达城市只写在程次标记里
+_FLIGHT_LEG_RE = re.compile(r"第\s*\d+\s*程\s*([\u4e00-\u9fa5]{2,10})?")
+# 机票界面上的按钮 / 状态 / 价格，识别地名时必须排除
+_FLIGHT_NOISE_RE = re.compile(
+    r"(去点评|出票成功|已出票|待出行|实付款|再来一单|退改签|报销|当地|"
+    r"出发|到达|¥\s*[\d.]+|￥\s*[\d.]+)")
+# 「上海一厦门」：航线行（OCR 常把破折号读成「一」）
+_FLIGHT_ROUTE_RE = re.compile(r"^\s*([\u4e00-\u9fa5]{2,6})\s*[一\-—~－]\s*([\u4e00-\u9fa5]{2,6})\s*$")
 
-    携程、航旅纵横的行程卡结构是：日期、航司 + 航班号、起飞时刻 + 出发机场（含航站楼）、
-    降落时刻 + 到达机场。逐行解析会把起飞、降落拆成两条「以机场为标题」的日程，
-    所以这里整段合成一条：标题带航班号与航线，地点取出发机场。
-    """
-    flight_m = None
-    for cand in _TRIP_FLIGHT_RE.finditer(flat):
-        if _flight_like(cand, flat):
-            flight_m = cand
-            break
-    if not flight_m:
-        return None, set()
 
-    clocks = [
-        (m.start(), m.end(), int(m.group(1)), int(m.group(2)))
-        for m in re.finditer(r"(?<!\d)(\d{1,2})\s*[:：]\s*(\d{2})(?!\d)", flat)
-    ]
+def _flight_airport(text: str) -> str:
+    """从一段尾巴文字里取机场名（含航站楼）：上海浦东T2 / 浦东国际机场T2。"""
+    s = _FLIGHT_NOISE_RE.sub(" ", str(text or ""))
+    s = re.sub(r"^[\s|｜·,，、;；\-–—→>]+", "", s)
+    s = re.sub(r"^[至到]\s*", "", s)
+    m = re.match(r"([\u4e00-\u9fa5]{2,10}(?:机场)?)\s*T\s*(\d)", s)
+    if m:
+        return f"{m.group(1)}T{m.group(2)}"
+    m = re.match(r"([\u4e00-\u9fa5]{2,10})", s)
+    name = m.group(1) if m else ""
+    if name in _TRIP_NOISE_WORDS:
+        return ""
+    return name
+
+
+def _flight_next_line_airport(flat: str, end: int) -> str:
+    """时刻独占一行时，机场落在**下一行**（「08:45」/「上海浦东T2」）。
+
+    只接受带航站楼或含「机场」二字的行：宁可留空，也不能把
+    「去点评」「当地」这类 UI 词当地名。
+    """
+    line_start = flat.find("\n", end)
+    if line_start < 0:
+        return ""
+    line_end = flat.find("\n", line_start + 1)
+    line = flat[line_start + 1:line_end if line_end >= 0 else len(flat)].strip()
+    if not line or len(line) > 16:
+        return ""
+    if not (re.search(r"T\d", line) or "机场" in line):
+        return ""
+    return _flight_airport(line)
+
+
+def _flight_pipe_airport(flat: str, pos: int) -> str:
+    """航班号所在行如果是「航司+号|机场T2|出发」结构，取竖线里的机场。"""
+    start = flat.rfind("\n", 0, pos) + 1
+    end = flat.find("\n", pos)
+    line = flat[start:end if end >= 0 else len(flat)]
+    if "|" not in line and "｜" not in line:
+        return ""
+    for seg in re.split(r"[|｜]", line):
+        if "机场" in seg or re.search(r"T\d", seg):
+            return _flight_airport(seg)
+    return ""
+
+
+def _flight_trip_events(lines: list[str], flat: str,
+                        anchor_day: date) -> list[Event]:
+    """
+    机票行程卡 / 中转联程 → **多条**事件（一张卡 / 一段航程一条）。
+
+    真实票面（航旅纵横行程列表、携程订单）一张截图里常有 2~4 段航程：
+        07-27 / 吉祥航空 HO1105 / 2026
+        08:45 上海浦东T2
+        10:50 厦门高崎T4
+        ...
+    旧实现只认第一段：第二个航班的时间会错配到第一个航班上、后面的航程整段丢失。
+    这里改成「先取出所有时刻，两两成对 = 一段航程」，再给每段找它自己的
+    航班号 / 日期 / 机场；日期缺失时沿用上一段的日期（列表卡里同一天的第三段
+    常常不再重复日期，「当地」「2025」这类行只是时区/年份标注）。
+    """
+    if not _TRIP_FLIGHT_HINT_RE.search(flat):
+        return []
+    codes = [(m.start(), m.end(), m.group(1))
+             for m in _TRIP_FLIGHT_RE.finditer(flat) if _flight_like(m, flat)]
+    if not codes:
+        return []
+
+    # ① 取出所有时刻，并记下同一行里紧跟在时刻后面的文字（机场）
+    clocks: list[dict[str, Any]] = []
+    for m in _FLIGHT_CLOCK_RE.finditer(flat):
+        h, mi = int(m.group(1)), int(m.group(2))
+        if not (0 <= h <= 23 and 0 <= mi <= 59):
+            continue
+        line_end = flat.find("\n", m.end())
+        line_end = len(flat) if line_end < 0 else line_end
+        tail = flat[m.end():line_end]
+        nxt = _FLIGHT_CLOCK_RE.search(tail)
+        if nxt:                       # 「08:45 至 10:50」：只留到下一个时刻之前
+            tail = tail[:nxt.start()]
+        clocks.append({"pos": m.start(), "end": m.end(), "h": h, "m": mi,
+                       "plus": int(m.group(3) or 0), "tail": tail})
     if len(clocks) < 2:
-        return None, set()
+        return []
 
-    after = [c for c in clocks if c[0] >= flight_m.end()]
-    before = [c for c in clocks if c[1] <= flight_m.start()]
-    if len(after) >= 2:                 # 「HO1105」在上，起飞/降落在下（常见）
-        s1, e1, h1, m1 = after[0]
-        s2, e2, h2, m2 = after[1]
-    elif before and after:              # 「08:45 HO1105 … 10:50」单行布局
-        s1, e1, h1, m1 = before[-1]
-        s2, e2, h2, m2 = after[0]
-    else:
-        s1, e1, h1, m1 = clocks[0]
-        s2, e2, h2, m2 = clocks[1]
+    route_hit = None                  # 「上海一厦门」这种航线行
+    for ln in lines:
+        rm = _FLIGHT_ROUTE_RE.match(ln)
+        if rm:
+            route_hit = (rm.group(1), rm.group(2))
+            break
 
-    # 城市：优先取「两段时刻之间」与「到达时刻之后」的中文地名，
-    # 兼容「城市紧跟时刻」和「时刻 航班号 城市 → 时刻 城市」两种票面。
-    seg1 = flat[e1:s2] if s2 > e1 else flat[e1:e1 + 60]
-    from_city = (_cn_place(seg1) or [""])[0]
-    to_city = (_cn_place(flat[e2:]) or [""])[0]
+    events: list[Event] = []
+    used_codes: set[int] = set()
+    prev_end = 0                      # 上一段航程的结束位置（本条卡片的搜索起点）
+    last_day: date | None = None
+    i = 0
+    while i + 1 < len(clocks):
+        dep, arr = clocks[i], clocks[i + 1]
+        i += 2
+        window = flat[prev_end:dep["pos"]]
 
-    day, _, _, _ = parse_date_in_text(flat, anchor_day)
-    day = _trip_year_hint(day or anchor_day, flat)
+        # ② 航班号：落在本段区域里、离起飞时刻最近的那个
+        best: tuple[int, int, str] | None = None
+        for idx, (cpos, _cend, ccode) in enumerate(codes):
+            if idx in used_codes:
+                continue
+            if cpos < prev_end - 40 or cpos > arr["end"] + 200:
+                continue
+            dist = abs(cpos - dep["pos"])
+            if best is None or dist < best[0]:
+                best = (dist, idx, ccode)
+        if best is None:
+            prev_end = arr["end"]
+            continue
+        used_codes.add(best[1])
+        code = best[2]
+        code_pos = codes[best[1]][0]
 
-    start_dt = datetime.combine(day, datetime.min.time()).replace(hour=h1 % 24, minute=m1)
-    end_dt = datetime.combine(day, datetime.min.time()).replace(hour=h2 % 24, minute=m2)
-    if end_dt <= start_dt:              # 红眼航班：23:40 → 次日 01:30
-        end_dt += timedelta(days=1)
+        # ③ 日期：本段窗口里先找完整日期，再找「07-27」；年份可写在任意位置
+        day: date | None = None
+        fm = _FLIGHT_FULL_DATE_RE.search(window)
+        if fm:
+            try:
+                day = date(int(fm.group(1)), int(fm.group(2)), int(fm.group(3)))
+            except ValueError:
+                day = None
+        if day is None:
+            md = _FLIGHT_MONTH_DAY_RE.search(window)
+            if md:
+                ym = _FLIGHT_YEAR_RE.search(flat[prev_end:arr["end"] + 200])
+                year = int(ym.group(1)) if ym else (last_day or anchor_day).year
+                try:
+                    day = date(year, int(md.group(1)), int(md.group(2)))
+                except ValueError:
+                    day = None
+        day = _trip_year_hint(day or last_day or anchor_day, window or flat)
+        last_day = day
 
-    code = flight_m.group(1)
-    route = " → ".join(p for p in (from_city, to_city) if p)
-    title = f"{code} {route}".strip() if route else f"航班 {code}"
+        # ④ 机场：优先取时刻后面的文字；没有就看竖线结构 / 程次标记 / 航线行
+        dep_air = _flight_airport(dep["tail"]) or _flight_next_line_airport(flat, dep["end"])
+        arr_air = _flight_airport(arr["tail"]) or _flight_next_line_airport(flat, arr["end"])
+        pipe_air = _flight_pipe_airport(flat, code_pos)
+        if not dep_air and pipe_air:
+            dep_air = pipe_air
+        if not arr_air:
+            leg = _FLIGHT_LEG_RE.search(flat[prev_end:arr["end"] + 200])
+            if leg and leg.group(1):
+                arr_air = leg.group(1)
+            elif route_hit:
+                arr_air = route_hit[1]
+        if not dep_air and route_hit:
+            dep_air = route_hit[0]
+        if not dep_air and not arr_air:
+            prev_end = arr["end"]
+            continue
 
-    ev = Event(
-        title=title,
-        start=start_dt,
-        end=end_dt,
-        location=from_city or route,
-        note="｜".join(_trip_extras(flat, seat=False))[:120],
-        priority="高",
-        vague=False,
-        source="text",
-        raw=f"{code} {h1:02d}:{m1:02d}-{h2:02d}:{m2:02d}",
-    )
+        line_start = flat.rfind("\n", 0, code_pos) + 1
+        line_end = flat.find("\n", code_pos)
+        code_line = flat[line_start:line_end if line_end >= 0 else len(flat)]
+        airline_m = re.search(r"([\u4e00-\u9fa5]{2,6}航空)", code_line)
 
-    consumed: set[str] = set()
-    for offset in (s1, s2, flight_m.start()):
-        consumed.add(lines[flat.count("\n", 0, offset)])
-    consumed.add(f"@flight:{code}")
-    consumed.update(c for c in (from_city, to_city) if c)
-    return ev, consumed
+        start_dt = datetime.combine(day, datetime.min.time()).replace(
+            hour=dep["h"], minute=dep["m"])
+        end_dt = datetime.combine(day, datetime.min.time()).replace(
+            hour=arr["h"], minute=arr["m"])
+        plus = arr["plus"]
+        if plus:
+            end_dt += timedelta(days=plus)
+        elif end_dt <= start_dt:          # 红眼航班：23:40 → 次日 01:30
+            end_dt += timedelta(days=1)
+
+        route = " → ".join(p for p in (dep_air, arr_air) if p)
+        note_parts = [f"到达 {arr_air}"] if arr_air and arr_air != dep_air else []
+        if end_dt.date() > start_dt.date():
+            note_parts.append("次日到达")
+        if airline_m:
+            note_parts.insert(0, airline_m.group(1))
+        note_parts.extend(_trip_extras(flat, seat=False))
+
+        events.append(Event(
+            title=f"{code} {route}".strip() if route else f"航班 {code}",
+            start=start_dt,
+            end=end_dt,
+            location=dep_air or (arr_air or ""),
+            note="｜".join(note_parts)[:160],
+            priority="高",
+            vague=False,
+            source="text",
+            raw=f"{code} {dep['h']:02d}:{dep['m']:02d}-"
+                f"{arr['h']:02d}:{arr['m']:02d}",
+        ))
+        prev_end = arr["end"]
+
+    return events
 
 
 def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[str]]:
@@ -1754,11 +1892,30 @@ def _extract_trip_events(text: str, anchor_day: date) -> tuple[list[Event], set[
     # 有「航空 / 机场 / 登机」字样时先按机票处理：
     # 机票里也可能出现「T2」这种航站楼编号，别被车次规则抢走。
     if _TRIP_FLIGHT_HINT_RE.search(flat):
-        order = (_flight_trip_event, _train_trip_events)
+        order = (_flight_trip_events, _train_trip_events)
     else:
-        order = (_train_trip_events, _flight_trip_event)
+        order = (_train_trip_events, _flight_trip_events)
     for extractor in order:
-        evs, consumed = extractor(lines, flat, anchor_day)
+        result = extractor(lines, flat, anchor_day)
+        if isinstance(result, tuple):
+            evs, consumed = result
+        else:                            # 机票提取器只返回事件列表（可多条）
+            evs, consumed = result or [], set()
+            if evs:
+                # 机票卡是整段识别的：把票面碎片行一并算作已消费，
+                # 否则「去点评」「当地」「2025」这些行还会被逐行解析成垃圾日程
+                codes = {e.raw.split(" ")[0] for e in evs if e.raw}
+                for ln in lines:
+                    if not ln:
+                        continue
+                    if any(c and c in ln for c in codes):
+                        consumed.add(ln)
+                    elif _FLIGHT_CLOCK_RE.search(ln) or _BARE_CLOCK_RE.match(ln):
+                        consumed.add(ln)
+                    elif _FLIGHT_NOISE_RE.search(ln) and len(ln) <= 12:
+                        consumed.add(ln)
+                    elif re.fullmatch(r"(20\d{2}|当地|\d{1,2}-\d{1,2})", ln.strip()):
+                        consumed.add(ln)
         if evs:
             if not isinstance(evs, list):   # 单事件提取器（机票）统一成列表
                 evs = [evs]
