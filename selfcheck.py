@@ -2017,6 +2017,48 @@ def test_share() -> None:
           "segno 不可用时应返回 None 而不是抛异常")
 
 
+def test_remember_cfg() -> None:
+    """「记住这台设备」：AI 配置加密存 Cookie，下次打开自动回填。"""
+    section("L3. 记住这台设备（加密 Cookie）")
+    import app
+
+    src = open("app.py", encoding="utf-8").read()
+
+    # ① 加密往返 + 防篡改（密文里不能出现明文 Key）
+    cfg = {"k": "sk-test-abcdef", "u": "https://api.deepseek.com/v1", "m": "deepseek-chat"}
+    token = app._encrypt_cfg(cfg)
+    check("配置能加密成 Cookie 可用的短字符串", bool(token) and "=" not in token)
+    check("密文不含明文 Key", "sk-test" not in token)
+    check("解密后与原文一致", app._decrypt_cfg(token) == cfg, str(app._decrypt_cfg(token))[:60])
+    check("密文被篡改后解不开（返回 None 而不是抛异常）",
+          app._decrypt_cfg(token[:-3] + "abc") is None)
+    check("空串/垃圾串不会炸", app._decrypt_cfg("") is None and app._decrypt_cfg("abc") is None)
+
+    # ② Cookie 读写链路
+    check("写入用 document.cookie 注入脚本（带有效期与 SameSite）",
+          "document.cookie=" in app._cookie_script("wb_ai_cfg", "x", 100)
+          and "max-age=100" in app._cookie_script("wb_ai_cfg", "x", 100)
+          and "SameSite=Lax" in app._cookie_script("wb_ai_cfg", "x", 100))
+    check("读取走 Streamlit 原生 st.context.cookies（无第三方组件）",
+          "st.context.cookies.get(_REMEMBER_COOKIE" in src)
+    check("首载只读一次 Cookie，之后不覆盖会话内的修改",
+          "_cfg_cookie_checked" in src)
+    check("回调只排队、主流程统一注入（回调里渲染的脚本推不到前端）",
+          'st.session_state["pending_cookie"]' in src
+          and "_flush_pending_cookie()" in src
+          and "st.session_state.pop(\"pending_cookie\"" in src)
+
+    # ③ 界面
+    check("弹窗有「记住这台设备（180 天）」开关且默认勾选",
+          "记住这台设备（180 天）" in src and '"ai_remember": True' in src)
+    check("回填后有明确提示（避免误以为密钥凭空出现）",
+          "已从本机记住的配置自动载入" in src)
+    check("「清除」同时删内存和 Cookie",
+          "(_REMEMBER_COOKIE, \"\", 0)" in src)
+    check("依赖清单写了 cryptography",
+          "cryptography" in open("requirements.txt", encoding="utf-8").read())
+
+
 def test_feedback() -> None:
     """问题反馈：右上角胶囊按钮 → 弹窗（类型/描述/截图）→ 发到开发者邮箱。"""
     section("L2. 问题反馈")
@@ -2229,7 +2271,7 @@ def main() -> int:
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
                test_loading_indicator, test_chat_notices,
                test_output_selfcheck, test_all_day, test_share,
-               test_feedback, test_version_policy,
+               test_remember_cfg, test_feedback, test_version_policy,
                test_layout_optimizations):
         try:
             fn()

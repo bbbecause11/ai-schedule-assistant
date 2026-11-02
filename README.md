@@ -3,7 +3,7 @@
 > 把散落在聊天记录、课表截图、备忘录里的碎片化日程，一键整理成可视化日程表，
 > 并导出为标准 `.ics` 日历文件，直接导入手机、电脑、Outlook、Google 日历。
 
-由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.10.9**。
+由 **DeepSeek-V4.1-Flash** 模型在 **WorkBuddy 工作台** 构建，基于 Streamlit，单文件应用，可本地一键运行。当前版本 **v2.11.0**。
 
 **仓库地址**：<https://github.com/bbbecause11/ai-schedule-assistant>（公开，可直接访问）
 
@@ -297,6 +297,29 @@ password = "授权码或应用密码"
   （截图需手动附上），不会报错白屏。
 - 邮件正文自动附带**应用版本号、提交时间、设备 UA**，方便对版本定位问题。
 - 单张截图超过 4MB 自动跳过，并在邮件正文里注明。
+
+## 🔐 记住这台设备（可选配置 `[crypto] cookie_key`）
+
+侧边栏「🔑 AI 接口」弹窗里勾选「记住这台设备（180 天）」后，API Key / 接口地址 /
+模型名会用 **Fernet 对称加密**成一段密文，存进用户自己的浏览器 Cookie：
+
+- 浏览器里拿到的是密文，看不到明文 Key
+- 有效期 180 天，换设备 / 清 Cookie 后需重填（想要跨设备请见文末「后续规划」）
+- 「清除」按钮会同时清掉内存配置和 Cookie
+- 读取用 Streamlit 原生 `st.context.cookies`（服务端直接读，无第三方组件、无闪烁）
+
+加密密钥来源（按优先级）：
+
+1. `st.secrets` 里的 `[crypto] cookie_key`（推荐显式配置）：
+
+```toml
+[crypto]
+cookie_key = "随便一串足够长的随机字符"
+```
+
+2. 没配置时自动从已有的 `[smtp] password` 派生（无需额外配置；换邮箱授权码会让
+   旧 Cookie 失效，用户重填一次即可）
+3. 两者都没有（纯本地裸跑）→ 功能静默降级为「不记住」
 
 ## 📖 使用说明
 
@@ -908,6 +931,7 @@ python tools/backup.py --restore v2.8.0    # 一键回滚（会先把当前状�
 
 | 版本 | 内容 | 用户反馈修复 | 自查修复 |
 | --- | --- | --- | --- |
+| **2.11.0** | **记住这台设备**：AI 接口配置（Key / 地址 / 模型）用 Fernet 加密后存进用户自己的浏览器 Cookie（180 天），下次打开自动回填，刷新不再需要重输；读取走 Streamlit 原生 `st.context.cookies`（无第三方组件、无闪烁），写入走一段注入脚本；加密密钥优先取 `[crypto] cookie_key`，未配置则从已有 SMTP 密码派生（零额外配置）；「清除」按钮同时删内存与 Cookie；弹窗对回填有明确提示 | 1 | 0 |
 | **2.10.9** | 真正修好侧边栏**收起/展开动画**（2.10.8 在线上仍无动画）：做了 10 秒慢放 + `document.title` 打点实验，实锤两个失效机制——① `transform: ... !important` 在层叠里高于动画，把 keyframes 整个吞掉；② Streamlit 翻转状态时会 **remount** 侧边栏节点，内联 animation 和挂 class 都随旧节点一起被丢弃（React 还会重写 className）。最终方案：动画绑定在**状态选择器**上（`body.sb-anim-ready .stApp:has([data-collapsed="true"]) …`），任何处于该状态的节点挂载即播，天然扛 remount；开关类只加在 body（React 不动它），首载不加所以不会误播 | 1 | 4 |
 | **2.10.8** | 手机端侧边栏**双向滑入/滑出动画**（收起原来直接消失）：两态布局全由我们接管（fixed 浮层 + width/min/max 三件套钉死，宽度恒定内容零重排），滑入滑出由注入的 JS 监听 data-collapsed 翻转挂动画类触发（0.3s keyframes 位移）—— 实测 CSS transition 在 Streamlit 重挂节点时永不触发（30s 过渡实验面板瞬间就位/消失），animation 则正常播放；首次载入只记录状态不播动画 | 1 | 3 |
 | **2.10.7** | 修复侧边栏展开**抽搐**：我们的滑入 keyframes 和 Streamlit 原生的展开过渡（margin / translate / width）同时作用在同一个元素上，两股运动叠加 —— 展开态把这些原生会动的属性全部钉死（`transition/margin/translate: none`），画面上只剩一个动画 | 1 | 1 |

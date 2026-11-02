@@ -24,6 +24,7 @@ AI 智能日程收纳 & 日历导入工具
 
 from __future__ import annotations
 
+import base64
 import calendar
 import csv
 from collections import deque
@@ -105,7 +106,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.10.9"
+APP_VERSION = "2.11.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -9110,12 +9111,16 @@ def init_state() -> None:
         "period_del_index": None,        # 待删除的行号
         # --- AI 接口配置（侧边栏「🤖 AI 接口」弹窗）---
         # 用户在弹窗里填的 API Key / 接口地址 / 模型名。
-        # 只存在 session_state（内存），刷新页面即失效，绝不落盘、绝不进日志。
+        # 只存在 session_state（内存）；勾了「记住这台设备」时会另存一份
+        # **加密密文**到浏览器 Cookie（见「记住这台设备」一节），
+        # 明文绝不落盘、绝不进日志。
         "ai_api_key": "",                # 用户填写的密钥（明文存于本会话内存）
         "ai_base_url": "",               # 用户填写的接口地址（留空则用默认值）
         "ai_model": "",                  # 用户填写的模型名（留空则用默认值）
         "ai_key_status": "",             # 弹窗内的连接测试结果提示
         "ai_test_pending": False,        # 「测试连接」待执行标记（见 _cb_test_ai_key）
+        "ai_remember": True,             # 「记住这台设备」开关（默认勾选）
+        "cfg_from_cookie": False,        # 本次会话的配置是否来自 Cookie 回填
         # --- 加载指示器 ---
         # _busy_text 有值 = 正在干活，主区域（tabs 之外）会显示转圈动画。
         # 指示器必须画在 tabs 外面：tab 里的元素在阻塞期间不推前端。
@@ -9125,6 +9130,17 @@ def init_state() -> None:
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+    # 首次初始化时，试着从浏览器 Cookie 恢复上次「记住」的 AI 配置。
+    # 只读一次：本次会话里用户改过配置后，不能被下一轮 rerun 里的旧 Cookie 覆盖。
+    if not st.session_state.get("_cfg_cookie_checked"):
+        st.session_state["_cfg_cookie_checked"] = True
+        saved = _load_remembered_cfg()
+        if saved and saved.get("k"):
+            st.session_state.ai_api_key = str(saved.get("k", ""))
+            st.session_state.ai_base_url = str(saved.get("u", ""))
+            st.session_state.ai_model = str(saved.get("m", ""))
+            st.session_state.cfg_from_cookie = True
 
 
 # ---------------------------------------------------------------------------
@@ -9619,6 +9635,112 @@ def _period_rows_raw() -> list[dict[str, str]]:
     return _default_period_rows()
 
 
+# ---------------------------------------------------------------------------
+# 记住这台设备：把 AI 配置加密后存进浏览器 Cookie
+# ---------------------------------------------------------------------------
+# 背景：API Key 原本只存在 session_state（内存），刷新/关页即失效，用户每次
+# 打开都要重填。这里用「加密 Cookie」把它留在**用户自己的浏览器**里：
+#   · 写入：document.cookie（服务端只写一段 5 行的注入脚本）
+#   · 读取：st.context.cookies（Streamlit 原生，服务端直接读，无 iframe、无闪烁）
+#   · 内容：Fernet 对称加密后的密文，浏览器里拿到的不是明文 Key
+#   · 密钥：优先取 st.secrets 的 [crypto] cookie_key；没配就从已有的 SMTP
+#     密码派生（同一份 secrets，用户不用多配一项）；都没有则自动降级为「不记住」
+#   · 有效期：180 天；「清除」按钮会同时清内存和 Cookie
+_REMEMBER_COOKIE = "wb_ai_cfg"
+_REMEMBER_MAX_AGE = 180 * 24 * 3600
+
+
+def _cookie_cipher_key() -> bytes | None:
+    """Cookie 加密密钥。取不到就返回 None（功能降级为不记住）。"""
+    raw = ""
+    try:
+        raw = str(st.secrets.get("crypto", {}).get("cookie_key", "")).strip()
+    except Exception:  # noqa: BLE001 - 无 secrets.toml 属预期
+        raw = ""
+    if not raw:
+        # 从 SMTP 密码派生：用户已经配了邮箱，不必再配一项；
+        # 换邮箱授权码会让旧 Cookie 失效（用户重填一次即可）
+        try:
+            smtp_pwd = str(st.secrets.get("smtp", {}).get("password", "")).strip()
+        except Exception:  # noqa: BLE001
+            smtp_pwd = ""
+        if smtp_pwd:
+            raw = "wb-remember|" + smtp_pwd
+    if not raw:
+        return None
+    return base64.urlsafe_b64encode(hashlib.sha256(raw.encode("utf-8")).digest())
+
+
+def _encrypt_cfg(cfg: dict[str, str]) -> str:
+    """把配置字典加密成一个可放进 Cookie 的短字符串；密钥缺失时返回空串。"""
+    key = _cookie_cipher_key()
+    if not key:
+        return ""
+    try:
+        from cryptography.fernet import Fernet
+        token = Fernet(key).encrypt(
+            json.dumps(cfg, ensure_ascii=False).encode("utf-8")).decode("ascii")
+        # Cookie 值里少放 '='（补回来很容易，少放更稳）
+        return token.rstrip("=")
+    except Exception:  # noqa: BLE001 - 加密失败就当没记住
+        log(f"配置加密失败: {traceback.format_exc()}")
+        return ""
+
+
+def _decrypt_cfg(token: str) -> dict[str, Any] | None:
+    """解 Cookie 里的密文；解不开（换密钥 / 被篡改 / 旧格式）一律返回 None。"""
+    key = _cookie_cipher_key()
+    if not key or not token:
+        return None
+    try:
+        from cryptography.fernet import Fernet
+        padded = token + "=" * (-len(token) % 4)
+        data = Fernet(key).decrypt(padded.encode("ascii"))
+        cfg = json.loads(data.decode("utf-8"))
+        return cfg if isinstance(cfg, dict) else None
+    except Exception:  # noqa: BLE001 - 解密失败的常见原因是密钥换过
+        return None
+
+
+def _load_remembered_cfg() -> dict[str, Any] | None:
+    """从浏览器 Cookie 读回上次记住的配置（服务端直接读，无组件闪烁）。"""
+    try:
+        token = str(st.context.cookies.get(_REMEMBER_COOKIE, "")).strip()
+    except Exception:  # noqa: BLE001 - 旧版本无 cookies 上下文
+        return None
+    return _decrypt_cfg(token) if token else None
+
+
+def _cookie_script(name: str, value: str, max_age: int) -> str:
+    """生成写/删 Cookie 的注入脚本。max_age=0 即删除。"""
+    secure = "; Secure" if _is_https_context() else ""
+    cookie = f"{name}={value}; path=/; max-age={max_age}; SameSite=Lax{secure}"
+    # json.dumps 负责把值转成安全的 JS 字符串字面量（引号/反斜杠都转义）
+    return f"<script>document.cookie={json.dumps(cookie)};</script>"
+
+
+def _is_https_context() -> bool:
+    """当前是否 HTTPS（本地 http 调试时不加 Secure，否则 Cookie 写不进去）。"""
+    try:
+        return str(st.context.url or "").lower().startswith("https://")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _flush_pending_cookie() -> None:
+    """把回调里排队的 Cookie 动作真正推给浏览器（必须画在主脚本里）。
+
+    为什么排队：st.dialog 里的 on_click 回调抢先执行、随后 st.rerun() 关窗，
+    回调里直接 st.html 注入的脚本根本没机会下发。所以回调只往
+    session_state 塞一个 pending_cookie，等主脚本重跑时在这里统一注入。
+    """
+    pending = st.session_state.pop("pending_cookie", None)
+    if not pending:
+        return
+    name, value, age = pending
+    st.html(_cookie_script(name, value, age), unsafe_allow_javascript=True)
+
+
 def _prepare_ai_dialog() -> None:
     """打开 AI 配置弹窗前，把已保存的值同步到三个输入框的 widget key。
 
@@ -9888,6 +10010,22 @@ def _cb_save_ai_key() -> None:
     st.session_state.ai_provider_pick = _guess_provider(
         st.session_state.ai_base_url)
     st.session_state.ai_key_status = "已保存并启用"
+    # 「记住这台设备」：勾了就写加密 Cookie，没勾就把之前的 Cookie 删掉。
+    # 真正的注入脚本在主脚本里（_flush_pending_cookie），这里只排队 ——
+    # 回调里渲染的元素不会推给前端。
+    if st.session_state.get("ai_remember") and st.session_state.ai_api_key:
+        token = _encrypt_cfg({
+            "k": st.session_state.ai_api_key,
+            "u": st.session_state.ai_base_url,
+            "m": st.session_state.ai_model,
+        })
+        st.session_state["pending_cookie"] = (
+            _REMEMBER_COOKIE, token, _REMEMBER_MAX_AGE) if token else (
+            _REMEMBER_COOKIE, "", 0)
+        st.session_state.cfg_from_cookie = bool(token)
+    else:
+        st.session_state["pending_cookie"] = (_REMEMBER_COOKIE, "", 0)
+        st.session_state.cfg_from_cookie = False
     st.rerun()
 
 
@@ -9924,6 +10062,9 @@ def _cb_clear_ai_key() -> None:
     st.session_state.ai_model_input = ""
     st.session_state.ai_provider_pick = PROVIDER_NONE
     st.session_state.ai_key_status = "已清除"
+    # 同时删掉浏览器里的加密 Cookie（否则下次打开又被回填回来）
+    st.session_state["pending_cookie"] = (_REMEMBER_COOKIE, "", 0)
+    st.session_state.cfg_from_cookie = False
     st.rerun()
 
 
@@ -10014,8 +10155,13 @@ def _cb_pick_provider() -> None:
 @st.dialog("🤖 AI 接口配置", width="small")
 def _show_ai_key_dialog() -> None:
     """AI 接口配置弹窗：填 API Key、接口地址、模型名，并可测试连接。"""
-    st.caption("填好后 AI 解析才会启用。密钥只存在本页内存里，"
-               "刷新页面就失效，不会写入任何文件。")
+    st.caption("填好后 AI 解析才会启用。密钥只存在本页内存；勾选下方「记住这台设备」"
+               "会加密保存在你自己的浏览器里（180 天），下次打开自动填好。")
+
+    # 本次会话的配置是从浏览器 Cookie 回填的 → 明确告诉用户，避免以为「凭空出现」
+    if st.session_state.get("cfg_from_cookie") and st.session_state.get("ai_api_key"):
+        st.caption("✅ 已从本机记住的配置自动载入（密文存在你的浏览器 Cookie 里，"
+                   "点「清除」可一并删除）")
 
     # 注意：这里**不传 value=**，也不需要接返回值。
     # Streamlit 里 widget 一旦有了自己的 session_state，value= 就会被忽略，
@@ -10033,7 +10179,7 @@ def _show_ai_key_dialog() -> None:
     st.text_input(
         "API Key", type="password", key="ai_key_input",
         placeholder="-",
-        help=_tip("API Key", "只存在本页内存，刷新需重填"),
+        help=_tip("API Key", "勾选「记住」后加密存你这台设备"),
     )
     st.text_input(
         "接口地址（Base URL）",
@@ -10043,6 +10189,10 @@ def _show_ai_key_dialog() -> None:
     st.text_input(
         "模型名", key="ai_model_input", placeholder="-",
         help=_tip("模型名", "留空用默认；可点「测试连接」验证"),
+    )
+    st.checkbox(
+        "记住这台设备（180 天）", key="ai_remember",
+        help=_tip("记住配置", "加密后存进你的浏览器，换设备需重填"),
     )
 
     status = st.session_state.get("ai_key_status") or ""
@@ -11597,6 +11747,8 @@ def main() -> None:
     _inject_css()
     # 手机端侧边栏滑入/滑出动画的触发器（监听 data-collapsed 翻转挂动画类）
     st.html(_SIDEBAR_ANIM_JS, unsafe_allow_javascript=True)
+    # 「记住这台设备」：把上一轮回调排队的 Cookie 写入/删除动作推给浏览器
+    _flush_pending_cookie()
     # 手机浏览器状态栏 / 底部工具栏跟随主题（否则深色下上下是白边）
     _inject_theme_color()
     # 右上角常驻的「问题反馈」胶囊 + 分享按钮（原生 Share 已在 CSS 里隐藏）
