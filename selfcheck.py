@@ -2016,6 +2016,47 @@ def test_share() -> None:
           "segno 不可用时应返回 None 而不是抛异常")
 
 
+def test_remember_prefs() -> None:
+    """起始周 / 作息表也记住在客户端（独立 Cookie，不与 AI 配置互相覆盖）。"""
+    section("L5. 记住起始周与作息表")
+    import app
+
+    src = open("app.py", encoding="utf-8").read()
+
+    # ① 独立 Cookie + 加密复用
+    check("起始周/作息表用独立 Cookie（不和 AI 配置互相覆盖）",
+          '_PREFS_COOKIE = "wb_prefs"' in src
+          and "_encrypt_cfg(data)" in src)
+    check("偏好快照只存必要字段（日期 ISO + 自定义作息表）",
+          '_prefs_snapshot' in src and 'data["a"] = anchor.isoformat()' in src
+          and 'data["p"] = cleaned' in src)
+
+    # ② 三个写入触发点：改起始周、点「本周设为第一周」、改作息表
+    check("改起始周会立刻写 Cookie",
+          "_cb_course_anchor" in src
+          and "_save_prefs_cookie()" in src[src.find("def _cb_course_anchor"):
+                                             src.find("def _cb_course_anchor") + 600])
+    check("改作息表会写 Cookie（默认模板不存，视为未自定义）",
+          "rows != _default_period_rows()" in src
+          and "_save_prefs_cookie()" in src[src.find("def _set_period_rows"):
+                                             src.find("def _set_period_rows") + 900])
+
+    # ③ 回填与防循环
+    check("首载从 Cookie 回填（每会话只读一次）",
+          "_prefs_cookie_checked" in src and "def _load_prefs_cookie" in src)
+    check("回填期间不回写 Cookie（防自激循环）",
+          'st.session_state.get("_prefs_loading")' in src)
+    tail = src[src.rfind("    _set_period_rows(new_rows)"):]
+    check("作息弹窗（fragment）编辑后自己 flush 一次 Cookie",
+          "_flush_pending_cookie()" in tail[:400],
+          "弹窗只重跑 fragment，主脚本的 flush 不会执行")
+
+    # ④ 全链路跑一遍：加密 -> 解密 -> 结构完好
+    prefs = {"a": "2026-09-07", "p": [{"name": "第1节", "start": "08:00", "end": "08:45"}]}
+    token = app._encrypt_cfg(prefs)
+    check("偏好能加密/解密往返", bool(token) and app._decrypt_cfg(token) == prefs)
+
+
 def test_loading_card() -> None:
     """加载卡片与「测试连接」的交互修复：不再有溢出横条、转圈不会一直挂着。"""
     section("L4. 加载卡片 / 测试连接")
@@ -2062,9 +2103,9 @@ def test_remember_cfg() -> None:
     check("首载只读一次 Cookie，之后不覆盖会话内的修改",
           "_cfg_cookie_checked" in src)
     check("回调只排队、主流程统一注入（回调里渲染的脚本推不到前端）",
-          'st.session_state["pending_cookie"]' in src
+          "_queue_cookie(_REMEMBER_COOKIE" in src
           and "_flush_pending_cookie()" in src
-          and "st.session_state.pop(\"pending_cookie\"" in src)
+          and 'st.session_state.pop("pending_cookies"' in src)
 
     # ③ 界面
     check("弹窗有「记住这台设备（180 天）」开关且默认勾选",
@@ -2289,7 +2330,7 @@ def main() -> int:
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
                test_loading_indicator, test_chat_notices,
                test_output_selfcheck, test_all_day, test_share,
-               test_remember_cfg, test_loading_card, test_feedback, test_version_policy,
+               test_remember_cfg, test_remember_prefs, test_loading_card, test_feedback, test_version_policy,
                test_layout_optimizations):
         try:
             fn()

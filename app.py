@@ -106,7 +106,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.11.1"
+APP_VERSION = "2.12.0"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -4979,9 +4979,21 @@ _CUSTOM_PERIOD_ROWS: list[dict[str, str]] | None = None
 
 
 def _set_period_rows(rows: list[dict[str, str]]) -> None:
-    """保存用户配置的作息表（UI 编辑器与测试都用它）。"""
+    """保存用户配置的作息表（UI 编辑器与测试都用它）。
+
+    除了进程内缓存，还同步到 session_state 并写进客户端 Cookie ——
+    否则刷新页面后用户辛苦调的作息表就没了（默认模板视为「未自定义」，
+    不落盘，省得和真正自定义的表混淆）。
+    """
     global _CUSTOM_PERIOD_ROWS
     _CUSTOM_PERIOD_ROWS = [dict(r) for r in rows]
+    custom = [dict(r) for r in rows] if rows != _default_period_rows() else None
+    try:
+        if st.session_state.get("period_rows") != custom:
+            st.session_state.period_rows = custom
+            _save_prefs_cookie()
+    except Exception as exc:  # noqa: BLE001 - 裸模式没有 session_state
+        log(f"作息表落盘失败: {exc}")
     try:
         st.session_state.period_rows = _CUSTOM_PERIOD_ROWS
     except Exception:  # noqa: BLE001 - 无 Streamlit 会话时跳过
@@ -9128,6 +9140,9 @@ def init_state() -> None:
             st.session_state.ai_model = str(saved.get("m", ""))
             st.session_state.cfg_from_cookie = True
 
+    # 学期起始周 / 自定义作息表：同样尝试从 Cookie 恢复（每个会话只读一次）
+    _load_prefs_cookie()
+
 
 # ---------------------------------------------------------------------------
 # 11b. 统一的「清空」入口
@@ -9555,12 +9570,15 @@ def _cb_course_anchor() -> None:
     if d is not None and hasattr(d, "weekday"):
         st.session_state.course_anchor = _this_monday(d)
     st.session_state.course_anchor_set = True
+    # 立刻记住到客户端 Cookie，下次打开不用重设
+    _save_prefs_cookie()
 
 
 def _cb_anchor_this_week() -> None:
     """快捷键：把今天所在的这一周设为第一周。"""
     st.session_state.course_anchor = _this_monday()
     st.session_state.course_anchor_set = True
+    _save_prefs_cookie()
 
 
 def _render_anchor_editor() -> None:
@@ -9593,6 +9611,7 @@ def _render_anchor_editor() -> None:
     )
     st.caption("改完起始周后，**重新上传/解析课表**即可按新日期对齐；"
                "上课时间按侧边栏「⏰ 作息时间表」换算。")
+    st.caption("起始周会记住在本机浏览器里（加密 Cookie），下次打开自动恢复。")
 
 
 def _cb_reset_periods() -> None:
@@ -9713,18 +9732,93 @@ def _is_https_context() -> bool:
         return False
 
 
+def _queue_cookie(name: str, value: str, max_age: int) -> None:
+    """排队一个 Cookie 写入/删除动作（主脚本里统一注入，见 _flush_pending_cookie）。"""
+    pending = st.session_state.get("pending_cookies")
+    if not isinstance(pending, dict):
+        pending = {}
+        st.session_state["pending_cookies"] = pending
+    pending[name] = (value, max_age)
+
+
 def _flush_pending_cookie() -> None:
     """把回调里排队的 Cookie 动作真正推给浏览器（必须画在主脚本里）。
 
     为什么排队：st.dialog 里的 on_click 回调抢先执行、随后 st.rerun() 关窗，
     回调里直接 st.html 注入的脚本根本没机会下发。所以回调只往
-    session_state 塞一个 pending_cookie，等主脚本重跑时在这里统一注入。
+    session_state 里排队，等主脚本重跑时在这里统一注入。
     """
-    pending = st.session_state.pop("pending_cookie", None)
-    if not pending:
+    pending = st.session_state.pop("pending_cookies", None) or {}
+    for name, (value, age) in pending.items():
+        st.html(_cookie_script(name, value, age), unsafe_allow_javascript=True)
+
+
+# ---- 学期起始周 / 作息表：同样存进客户端 Cookie ----
+# 和 AI 配置分开一个 Cookie（wb_prefs）：AI 配置只在「保存并启用」时写，
+# 这两个设置随改随写，混在一起会互相覆盖。
+_PREFS_COOKIE = "wb_prefs"
+
+
+def _prefs_snapshot() -> dict[str, Any]:
+    """当前需要记住的偏好：起始周（ISO 日期）+ 自定义作息表。"""
+    data: dict[str, Any] = {}
+    anchor = st.session_state.get("course_anchor")
+    if hasattr(anchor, "isoformat"):
+        data["a"] = anchor.isoformat()
+    rows = st.session_state.get("period_rows")
+    if isinstance(rows, list) and rows:
+        cleaned = _clean_period_rows(rows)
+        if cleaned:
+            data["p"] = cleaned
+    return data
+
+
+def _save_prefs_cookie() -> None:
+    """把起始周 / 作息表加密后写进客户端 Cookie。
+
+    初始从 Cookie 回填（_prefs_loading=True）期间不写回，避免无意义的重写。
+    """
+    if st.session_state.get("_prefs_loading"):
         return
-    name, value, age = pending
-    st.html(_cookie_script(name, value, age), unsafe_allow_javascript=True)
+    data = _prefs_snapshot()
+    if not data:
+        _queue_cookie(_PREFS_COOKIE, "", 0)
+        return
+    token = _encrypt_cfg(data)
+    _queue_cookie(_PREFS_COOKIE, token or "",
+                  _REMEMBER_MAX_AGE if token else 0)
+
+
+def _load_prefs_cookie() -> None:
+    """首次初始化时从 Cookie 恢复起始周 / 作息表（每个会话只做一次）。"""
+    if st.session_state.get("_prefs_cookie_checked"):
+        return
+    st.session_state["_prefs_cookie_checked"] = True
+    try:
+        token = str(st.context.cookies.get(_PREFS_COOKIE, "")).strip()
+    except Exception:  # noqa: BLE001 - 旧版本无 cookies 上下文
+        return
+    prefs = _decrypt_cfg(token) if token else None
+    if not prefs:
+        return
+    st.session_state["_prefs_loading"] = True
+    try:
+        raw_date = str(prefs.get("a") or "")
+        if raw_date:
+            try:
+                st.session_state.course_anchor = date.fromisoformat(raw_date)
+                st.session_state.course_anchor_set = True
+            except ValueError:
+                pass
+        rows = prefs.get("p")
+        if isinstance(rows, list) and rows:
+            cleaned = _clean_period_rows(rows)
+            if cleaned:
+                _set_period_rows(cleaned)
+                st.session_state.period_rows = cleaned
+                st.session_state.period_rows_count = len(cleaned)
+    finally:
+        st.session_state["_prefs_loading"] = False
 
 
 def _prepare_ai_dialog() -> None:
@@ -9800,7 +9894,8 @@ def _render_period_editor() -> None:
         st.session_state.period_rows_count = count
 
     st.caption("一行一节。改完立即生效：解析「第6-7节」会用第 6 节的开始时间到"
-               "第 7 节的结束时间。")
+               "第 7 节的结束时间。自定义的作息表会记住在本机浏览器里，"
+               "下次打开自动恢复。")
 
     # 顶部只留「恢复默认模板」——破坏性操作放远一点，避免误触。
     # 「添加一节」和「当前生效」都放在所有行下面：
@@ -9891,6 +9986,10 @@ def _render_period_editor() -> None:
             st.rerun(scope="fragment")
 
     _set_period_rows(new_rows)
+    # 弹窗是独立 fragment：编辑后只重跑弹窗、不重跑主脚本，
+    # 而 Cookie 注入点在主脚本 —— 这里必须自己刷一次，
+    # 否则「改完作息表 → 刷新页面」会丢（实际踩过）。
+    _flush_pending_cookie()
 
 
 @st.dialog("⏰ 作息时间表", width="large")
@@ -10008,12 +10107,12 @@ def _cb_save_ai_key() -> None:
             "u": st.session_state.ai_base_url,
             "m": st.session_state.ai_model,
         })
-        st.session_state["pending_cookie"] = (
-            _REMEMBER_COOKIE, token, _REMEMBER_MAX_AGE) if token else (
-            _REMEMBER_COOKIE, "", 0)
+        # 加密失败（缺密钥）时按「删除」处理，避免留一个解不开的旧 Cookie
+        _queue_cookie(_REMEMBER_COOKIE, token or "",
+                      _REMEMBER_MAX_AGE if token else 0)
         st.session_state.cfg_from_cookie = bool(token)
     else:
-        st.session_state["pending_cookie"] = (_REMEMBER_COOKIE, "", 0)
+        _queue_cookie(_REMEMBER_COOKIE, "", 0)
         st.session_state.cfg_from_cookie = False
     st.rerun()
 
@@ -10052,7 +10151,7 @@ def _cb_clear_ai_key() -> None:
     st.session_state.ai_provider_pick = PROVIDER_NONE
     st.session_state.ai_key_status = "已清除"
     # 同时删掉浏览器里的加密 Cookie（否则下次打开又被回填回来）
-    st.session_state["pending_cookie"] = (_REMEMBER_COOKIE, "", 0)
+    _queue_cookie(_REMEMBER_COOKIE, "", 0)
     st.session_state.cfg_from_cookie = False
     st.rerun()
 
