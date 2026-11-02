@@ -1708,10 +1708,9 @@ def test_loading_indicator() -> None:
     src = open("app.py", encoding="utf-8").read()
     import re
 
-    # ① 纯 CSS 动画
+    # ① 纯 CSS 动画（进度光带已移除：弹窗里会溢出容器，用户要求去掉）
     check("有加载动画的关键帧定义（必须是纯 CSS，不能靠 JS）",
-          "@keyframes load-spin" in src
-          and "@keyframes load-slide" in src)
+          "@keyframes load-spin" in src)
     check("加载动画不依赖 JS 定时器",
           "setInterval" not in src and "requestAnimationFrame" not in src,
           "Streamlit rerun 会打断 JS 定时器，动画会卡住")
@@ -2017,6 +2016,25 @@ def test_share() -> None:
           "segno 不可用时应返回 None 而不是抛异常")
 
 
+def test_loading_card() -> None:
+    """加载卡片与「测试连接」的交互修复：不再有溢出横条、转圈不会一直挂着。"""
+    section("L4. 加载卡片 / 测试连接")
+    src = open("app.py", encoding="utf-8").read()
+
+    # ① 进度光带（::after）在弹窗里会锚到弹窗容器上、飞出卡片外 —— 已整体移除
+    check("加载卡片不再有底部进度光带（弹窗内会溢出容器）",
+          "load-card::after" not in src and "load-slide" not in src)
+    check("旋转环与文案仍在（仅保留必要动效）",
+          ".load-ring {" in src and ".load-text {" in src)
+
+    # ② 测试连接结束后必须重跑弹窗：否则加载卡片永久留在界面上、结果看不到
+    check("测试请求结束后按 fragment 范围重跑弹窗",
+          "_loading(\"正在测试连接…（正在向服务商发起请求）\")\n        _test_ai_connection()"
+          in src and 'st.rerun(scope="fragment")' in src)
+    check("测试请求超时压到 ≤25 秒（不让用户盯一分钟转圈）",
+          'min(float(cfg.get("timeout") or 60), 25.0)' in src)
+
+
 def test_remember_cfg() -> None:
     """「记住这台设备」：AI 配置加密存 Cookie，下次打开自动回填。"""
     section("L3. 记住这台设备（加密 Cookie）")
@@ -2271,7 +2289,7 @@ def main() -> int:
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
                test_loading_indicator, test_chat_notices,
                test_output_selfcheck, test_all_day, test_share,
-               test_remember_cfg, test_feedback, test_version_policy,
+               test_remember_cfg, test_loading_card, test_feedback, test_version_policy,
                test_layout_optimizations):
         try:
             fn()

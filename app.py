@@ -106,7 +106,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.11.0"
+APP_VERSION = "2.11.1"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -8568,10 +8568,6 @@ _LOADER_CSS = """
 <style>
 /* ---------- 加载动画：纯 CSS，不依赖 JS ---------- */
 @keyframes load-spin { to { transform: rotate(360deg); } }
-@keyframes load-slide {
-    0% { transform: translateX(-100%); }
-    100% { transform: translateX(400%); }
-}
 @keyframes load-pulse {
     0%, 100% { opacity: .55; }
     50% { opacity: 1; }
@@ -8597,16 +8593,6 @@ _LOADER_CSS = """
     border: 1px solid var(--card-border);
     box-shadow: var(--card-shadow-lg);
     overflow: hidden;
-}
-/* 卡片底部一条来回跑的进度光带，让「还在动」这件事更明确 */
-.load-card::after {
-    content: "";
-    position: absolute;
-    left: 0; bottom: 0;
-    height: 2px;
-    width: 25%;
-    background: var(--brand-grad);
-    animation: load-slide 1.25s var(--ease-out) infinite;
 }
 .load-ring {
     flex: 0 0 auto;
@@ -8634,7 +8620,7 @@ _LOADER_CSS = """
     animation: load-pulse 1.1s var(--ease-out) infinite;
 }
 @media (prefers-reduced-motion: reduce) {
-    .load-ring, .load-text, .load-card::after, .load-pip {
+    .load-ring, .load-text, .load-pip {
         animation-duration: 2.4s;
     }
 }
@@ -9953,6 +9939,9 @@ def _test_ai_connection() -> None:
     if not cfg["available"]:
         st.session_state.ai_key_status = "请先填写 API Key"
         return
+    # 测试连接是交互动作，不能让用户盯着转圈一分钟：
+    # 把读超时压到 25 秒（正常响应都在几秒内），超时给「网络超时」的明确提示。
+    cfg = {**cfg, "timeout": min(float(cfg.get("timeout") or 60), 25.0)}
     try:
         content = _post_chat(
             cfg,
@@ -10212,6 +10201,14 @@ def _show_ai_key_dialog() -> None:
         st.session_state.ai_test_pending = False
         _loading("正在测试连接…（正在向服务商发起请求）")
         _test_ai_connection()
+        # 请求结束后**必须重跑弹窗**，否则：
+        #   ① 加载卡片会一直留在界面上（用户以为卡死了）；
+        #   ② 上面那段状态文字是请求**之前**渲染的，结果根本看不到。
+        # 用 fragment 范围重跑：只重画弹窗本身，不整页刷新、不关窗。
+        try:
+            st.rerun(scope="fragment")
+        except TypeError:          # 旧版 Streamlit 没有 scope 参数
+            st.rerun()
 
     cols = st.columns([1, 1, 1])
     with cols[0]:
