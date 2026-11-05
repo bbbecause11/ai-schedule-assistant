@@ -106,7 +106,7 @@ APP_SUBTITLE = "碎片化日程 → 结构化日程表 → 一键导入手机 / 
 #   大版本（整体重做 / 架构级变化）→ 第一位 +1，后两位归零（2.8.0 → 3.0.0）
 #   功能版本（新增一整块可见功能）  → 第二位 +1，第三位归零（2.8.0 → 2.9.0）
 #   小修（修 bug / 调样式 / 改文案）→ 第三位 +1（2.8.0 → 2.8.1）
-APP_VERSION = "2.12.1"
+APP_VERSION = "2.12.2"
 
 # 页脚署名
 APP_MODEL = "DeepSeek-V4.1-Flash"
@@ -5061,15 +5061,15 @@ def _split_course_cell(text: str) -> dict[str, Any]:
     return info
 
 
-# 默认作息表：第 1 节 08:00 起，每节 45 分钟，课间 5 分钟。
-# 各校略有差异（有的 8:20 上课、有的每节 40 分钟），所以课表导入的日程
-# 一律标记为「待核对」，并在备注里写明「按默认作息推算」。
+# 默认作息表：上午 4 节、下午 4 节、晚上 3 节，共 11 节（每节 40~50 分钟）。
+# 各校略有差异，所以课表导入的日程一律标记为「待核对」，
+# 并在备注里写明「按默认作息推算」；用户可在侧边栏改成本校作息。
 COURSE_PERIOD_TIMES: dict[int, tuple[int, int, int, int]] = {
-    1: (8, 0, 8, 45), 2: (8, 50, 9, 35), 3: (9, 55, 10, 40),
-    4: (10, 45, 11, 30), 5: (11, 35, 12, 20),
-    6: (14, 0, 14, 45), 7: (14, 50, 15, 35), 8: (15, 55, 16, 40),
-    9: (16, 45, 17, 30),
-    10: (19, 0, 19, 45), 11: (19, 50, 20, 35), 12: (20, 40, 21, 25),
+    1: (8, 0, 8, 40), 2: (8, 50, 9, 40), 3: (10, 0, 10, 45),
+    4: (10, 55, 11, 40),
+    5: (13, 30, 14, 15), 6: (14, 25, 15, 10), 7: (15, 30, 16, 15),
+    8: (16, 25, 17, 10),
+    9: (18, 30, 19, 15), 10: (19, 25, 20, 10), 11: (20, 20, 21, 5),
 }
 
 
@@ -9837,9 +9837,9 @@ def _render_anchor_editor() -> None:
 def _cb_reset_periods() -> None:
     """恢复默认作息模板。"""
     _set_period_rows(_default_period_rows())
-    # 行数也回到默认（12 节），否则「添加一节」加的行会留着
+    # 行数也回到默认（11 节），否则「添加一节」加的行会留着
     st.session_state.period_rows_count = len(_default_period_rows())
-    st.session_state.pending_toast = "已恢复默认作息模板（12 节）"
+    st.session_state.pending_toast = "已恢复默认作息模板（11 节）"
 
 
 def _period_rows_raw() -> list[dict[str, str]]:
@@ -10151,7 +10151,7 @@ def _render_period_editor() -> None:
     # 「共 N 节」也跟过去，形成「加一节 → 看生效节数 → 再加一节」的闭环。
     with st.columns([1, 3])[0]:
         st.button("↺ 恢复默认模板", key="period_reset", on_click=_cb_reset_periods,
-                  help=_tip("恢复默认模板", "恢复内置的 12 节作息模板"))
+                  help=_tip("恢复默认模板", "恢复内置的 11 节作息模板"))
 
     # 表头（窄屏隐藏 —— 竖排布局每行自带标签）
     hdr = st.columns([2, 2, 2, 1])
@@ -10715,7 +10715,7 @@ def render_sidebar() -> None:
         if st.button("⏰ 作息时间表", key="period_toggle", width="stretch"):
             _show_period_dialog()
         rows = _period_rows()
-        first = rows[0] if rows else {"name": "第1节", "start": "08:00", "end": "08:45"}
+        first = rows[0] if rows else {"name": "第1节", "start": "08:00", "end": "08:40"}
         st.caption(f"共 {len(rows)} 节 · {first['name']} {first['start']} 起 · "
                    "点开编辑你学校的作息")
 
@@ -11000,7 +11000,7 @@ def _render_parse_report(report: dict[str, Any]) -> None:
     if report.get("timetable_cells") and not st.session_state.get("course_anchor_set"):
         _html(
             '<div class="notice notice-info">📅 识别为课表并按行列还原。'
-            '上课时间按默认作息表推算（第 1 节 08:00、每节 45 分钟），'
+            '上课时间按默认作息表推算（第 1 节 08:00 起，各节 40~50 分钟），'
             '周次日期按<b>本周为第 1 周</b>换算——'
             '如果不对，到左侧<b>「📅 学期起始周」</b>选开学第一周里的任意一天'
             '（自动对齐那一周的周一），重新解析即可对齐。</div>'

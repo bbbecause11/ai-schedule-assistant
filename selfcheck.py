@@ -84,8 +84,8 @@ def test_time_parsing() -> None:
 
     # 课表第几节
     evs = app.parse_with_rules("每周二 第3-4节 数据结构 计算机楼C401")
-    ok = bool(evs) and evs[0].start.strftime("%H:%M") == "09:55"
-    check("「第3-4节」按默认作息表换算为 09:55",
+    ok = bool(evs) and evs[0].start.strftime("%H:%M") == "10:00"
+    check("「第3-4节」按默认作息表换算为 10:00",
           ok, f"{evs[0].start:%H:%M}-{evs[0].end:%H:%M}" if evs else "")
 
     # 跨天
@@ -621,8 +621,8 @@ def test_timetable() -> None:
         ev = events[0]
         check("上课日期落在第 2 周的周一",
               ev.start.date() == date(2026, 9, 14), str(ev.start))
-        check("第 1-2 节对应 08:00-09:35",
-              (ev.start.strftime("%H:%M"), ev.end.strftime("%H:%M")) == ("08:00", "09:35"),
+        check("第 1-2 节对应 08:00-09:40",
+              (ev.start.strftime("%H:%M"), ev.end.strftime("%H:%M")) == ("08:00", "09:40"),
               f"{ev.start:%H:%M}-{ev.end:%H:%M}")
         check("周次写进备注", "第 2-6、9-18 周" in ev.note, ev.note)
         check("循环规则按总周数生成", "COUNT=15" in ev.rrule, ev.rrule)
@@ -1043,11 +1043,11 @@ def test_course_cell() -> None:
 def test_period_table() -> None:
     section("O. 自定义作息表（节次 → 绝对时间）")
 
-    # ---- 1. 默认模板：第6-7节 = 14:00-15:35 ---------------------------
+    # ---- 1. 默认模板：第6-7节 = 14:25-16:15 ---------------------------
     app._set_period_rows([])
     span = app._period_span(6, 7)
-    check("默认表第6-7节 = 14:00-15:35",
-          span[:2] == ((14, 0), (15, 35)) and span[2] is True, str(span))
+    check("默认表第6-7节 = 14:25-16:15",
+          span[:2] == ((14, 25), (16, 15)) and span[2] is True, str(span))
     check("默认表没有第 13 节 → 不瞎猜", app._period_lookup(13) is None)
 
     # ---- 2. 自定义表：6-7节 = 14:50-16:25 ----------------------------
