@@ -9785,6 +9785,13 @@ def _render_anchor_editor() -> None:
             st.session_state.course_anchor_set = True
             _save_prefs_cookie()
     anchor = _anchor_date()
+    # TODO(debug): 临时诊断，确认线上 Cookie 是否真的写入
+    try:
+        _ck = str(st.context.cookies.get(_PREFS_COOKIE, ""))
+    except Exception:  # noqa: BLE001
+        _ck = "ERR"
+    st.caption(f"DEBUG cookie_len={len(_ck)} cipher={'Y' if _cookie_cipher_key() else 'N'} "
+               f"set={st.session_state.get('course_anchor_set')} v={anchor}")
     sun = anchor + timedelta(days=6)
     st.markdown(f"**第 1 周：{anchor.month} 月 {anchor.day} 日 ~ "
                 f"{sun.month} 月 {sun.day} 日**")
