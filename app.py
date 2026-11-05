@@ -9978,6 +9978,7 @@ def _flush_pending_cookie() -> None:
 # 这两个设置随改随写，混在一起会互相覆盖。
 _PREFS_COOKIE = "wb_prefs"
 _ANCHOR_QP = "anchor"      # URL 里的起始周兜底参数（?anchor=2026-09-07）
+_ANCHOR_COOKIE = "wb_anchor"   # 起始周的明文 Cookie（只是日期，无需加密）
 
 
 def _prefs_snapshot() -> dict[str, Any]:
@@ -10005,10 +10006,16 @@ def _save_prefs_cookie() -> None:
     data = _prefs_snapshot()
     if not data:
         _queue_cookie(_PREFS_COOKIE, "", 0)
+        _queue_cookie(_ANCHOR_COOKIE, "", 0)
         return
     token = _encrypt_cfg(data)
     _queue_cookie(_PREFS_COOKIE, token or "",
                   _REMEMBER_MAX_AGE if token else 0)
+    # 起始周再单独写一份**明文** Cookie：它只是一个日期，不需要加密；
+    # 加密密钥缺失（比如云端没配 [crypto]/[smtp]）时，靠这份也不会丢。
+    if st.session_state.get("course_anchor_set"):
+        _queue_cookie(_ANCHOR_COOKIE, _anchor_date().isoformat(),
+                      _REMEMBER_MAX_AGE)
 
 
 def _load_prefs_cookie() -> None:
@@ -10022,10 +10029,23 @@ def _load_prefs_cookie() -> None:
         return
     prefs = _decrypt_cfg(token) if token else None
     if not prefs:
-        # Cookie 不可用（隐私模式 / 无加密密钥）时，退到 URL 参数
-        url_anchor = _anchor_from_url()
-        if url_anchor is not None:
-            st.session_state.course_anchor_value = url_anchor
+        # 加密 Cookie 不可用（隐私模式 / 云端没配密钥）：
+        # 先试明文起始周 Cookie，再退到 URL 参数
+        plain = ""
+        try:
+            plain = str(st.context.cookies.get(_ANCHOR_COOKIE, "") or "").strip()
+        except Exception:  # noqa: BLE001
+            plain = ""
+        fallback = None
+        if plain:
+            try:
+                fallback = _this_monday(date.fromisoformat(plain))
+            except ValueError:
+                fallback = None
+        if fallback is None:
+            fallback = _anchor_from_url()
+        if fallback is not None:
+            st.session_state.course_anchor_value = fallback
             st.session_state.course_anchor_set = True
         return
     st.session_state["_prefs_loading"] = True
