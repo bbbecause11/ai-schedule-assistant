@@ -2028,14 +2028,14 @@ def test_remember_prefs() -> None:
           '_PREFS_COOKIE = "wb_prefs"' in src
           and "_encrypt_cfg(data)" in src)
     check("偏好快照只存必要字段（日期 ISO + 自定义作息表）",
-          '_prefs_snapshot' in src and 'data["a"] = anchor.isoformat()' in src
+          '_prefs_snapshot' in src and 'data["a"] = _anchor_date().isoformat()' in src
           and 'data["p"] = cleaned' in src)
 
     # ② 三个写入触发点：改起始周、点「本周设为第一周」、改作息表
     check("改起始周会立刻写 Cookie",
-          "_cb_course_anchor" in src
-          and "_save_prefs_cookie()" in src[src.find("def _cb_course_anchor"):
-                                             src.find("def _cb_course_anchor") + 600])
+          "_save_prefs_cookie()" in
+          src[src.find("def _render_anchor_editor"):
+              src.find("def _cb_reset_periods")])
     check("改作息表会写 Cookie（默认模板不存，视为未自定义）",
           "rows != _default_period_rows()" in src
           and "_save_prefs_cookie()" in src[src.find("def _set_period_rows"):
@@ -2055,6 +2055,55 @@ def test_remember_prefs() -> None:
     prefs = {"a": "2026-09-07", "p": [{"name": "第1节", "start": "08:00", "end": "08:45"}]}
     token = app._encrypt_cfg(prefs)
     check("偏好能加密/解密往返", bool(token) and app._decrypt_cfg(token) == prefs)
+
+
+def test_anchor_persist() -> None:
+    """学期起始周不能被控件生命周期带走（面板收起 → widget state 被清理）。"""
+    section("L5b. 学期起始周持久化")
+    import app
+
+    src = open("app.py", encoding="utf-8").read()
+
+    # ① 权威值走独立 key，读取统一入口
+    check("起始周有独立权威值（course_anchor_value）",
+          '"course_anchor_value": None' in src)
+    check("提供统一读取入口 _anchor_date()（优先权威值）",
+          "def _anchor_date()" in src
+          and 'for key in ("course_anchor_value", "course_anchor")' in src)
+    check("课表换算改用 _anchor_date()（不再直接读控件 key）",
+          "tt_cells, _anchor_date())" in src
+          and 'st.session_state.get("course_anchor") or _this_monday()' not in src)
+
+    # ② 三个写入口都要同步权威值：改日期、设本周、Cookie 回填
+    check("日期控件每次展开换新 key（防止旧值被前端回放）",
+          'key = f"course_anchor_{int(st.session_state.get(\'anchor_epoch\', 0))}"' in src)
+    check("展开面板时 epoch +1",
+          "st.session_state.anchor_epoch" in
+          src[src.find("def _cb_toggle_anchor"):
+              src.find("def _cb_anchor_this_week")])
+    check("改日期后写权威值并落 Cookie（不再走 on_change）",
+          "st.session_state.course_anchor_value = chosen" in
+          src[src.find("def _render_anchor_editor"):
+              src.find("def _cb_reset_periods")]
+          and "on_change=_cb_course_anchor" not in src)
+    check("「把本周设为第一周」同步权威值",
+          "st.session_state.course_anchor_value = d" in
+          src[src.find("def _cb_anchor_this_week"):
+              src.find("def _render_anchor_editor")])
+    check("Cookie 回填同时写权威值",
+          "st.session_state.course_anchor_value = d" in
+          src[src.find("def _load_prefs_cookie"):
+              src.find("def _prepare_ai_dialog")])
+
+    # ③ 面板重新展开时必须用权威值回填控件
+    check("控件默认值取 _anchor_date()（展开即恢复）",
+          "value=_anchor_date()," in src)
+
+    # ④ Cookie 只在用户真正设置过时才写 a，避免把默认值固化
+    check("未设置过起始周时不写 Cookie 的 a 字段",
+          'if st.session_state.get("course_anchor_set"):' in
+          src[src.find("def _prefs_snapshot"):
+              src.find("def _save_prefs_cookie")])
 
 
 def test_loading_card() -> None:
@@ -2398,7 +2447,7 @@ def main() -> int:
                test_placeholder_style, test_period_editor, test_ai_key_dialog,
                test_loading_indicator, test_chat_notices,
                test_output_selfcheck, test_all_day, test_share,
-               test_remember_cfg, test_flight_cards, test_remember_prefs, test_loading_card, test_feedback, test_version_policy,
+               test_remember_cfg, test_flight_cards, test_remember_prefs, test_anchor_persist, test_loading_card, test_feedback, test_version_policy,
                test_layout_optimizations):
         try:
             fn()

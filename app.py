@@ -5262,6 +5262,24 @@ def _this_monday(today: "date | None" = None) -> "date":
     return day - timedelta(days=day.weekday())
 
 
+def _anchor_date() -> "date":
+    """学期起始周（权威值，永远对齐到周一）。
+
+    为什么不直接读 `course_anchor`：那是 date_input 的 widget key，
+    而 Streamlit 会在每轮脚本结束时清理「本轮没有渲染」的控件状态
+    （session_state._remove_stale_widgets）。侧边栏的「📅 学期起始周」
+    是折叠面板，一收起就整块不渲染 → `course_anchor` 被丢掉 →
+    下次展开退回 `value=` 的默认值（本周一），课表整学期的日期随之错位。
+    所以权威值单独存在普通 session key `course_anchor_value` 里，
+    widget 只当它的一个视图；读的时候优先权威值，兼容旧会话。
+    """
+    for key in ("course_anchor_value", "course_anchor"):
+        v = st.session_state.get(key)
+        if hasattr(v, "weekday"):
+            return _this_monday(v)
+    return _this_monday()
+
+
 def _weeks_label(weeks: list[tuple[int, int]]) -> str:
     """[(2,6),(9,18)] → 「2-6、9-18」。"""
     return "、".join(f"{a}-{b}" if a != b else str(a) for a, b in weeks)
@@ -9258,6 +9276,11 @@ def init_state() -> None:
         # course_anchor 由侧边栏「📅 学期起始周」的 date_input 自己维护
         # （widget key，回调里会把任意一天对齐到所在周的周一），
         # 这里只记录「用户是否手动指定过」，决定导入后是否提示日期为推算值。
+        # ⚠️ course_anchor 是 widget key，面板收起时会被 Streamlit 回收，
+        # 所以真正的值另存一份 course_anchor_value（普通 key，不会被清理）；
+        # 读取一律走 _anchor_date()。
+        "course_anchor_value": None,
+        "anchor_epoch": 0,               # 日期控件 key 的版本号，每次展开 +1
         "course_anchor_set": False,
         "period_rows": None,             # None = 未自定义，用默认作息模板
         "anchor_open": False,            # 侧边栏学期起始周是否展开
@@ -9554,7 +9577,7 @@ def run_parse(text: str, image_files: list[Any], use_ai: bool) -> None:
     if tt_cells:
         try:
             rule_events = rule_events + timetable_to_events(
-                tt_cells, st.session_state.get("course_anchor") or _this_monday())
+                tt_cells, _anchor_date())
         except Exception:  # noqa: BLE001
             log(f"课表解析异常: {traceback.format_exc()}")
             warnings.append("课表结构已识别，但转换成日程时出错，已回退为文本解析。")
@@ -9714,27 +9737,27 @@ def _cb_toggle_remind() -> None:
 
 
 def _cb_toggle_anchor() -> None:
-    """侧边栏学期起始周入口的开合回调。"""
-    st.session_state.anchor_open = not bool(st.session_state.get("anchor_open"))
+    """侧边栏学期起始周入口的开合回调。
 
-
-def _cb_course_anchor() -> None:
+    展开时把 epoch +1：日期控件每次展开都换一个新 key，
+    这样重新挂载时前端不会把上一次的旧值「重放」回控件
+    （复用同一 key 时实测会发生，旧值还会触发 on_change 把正确值覆盖掉）。
     """
-    起始周选件变更：用户选的是开学第一周里的**任意一天**，
-    这里对齐到那一周的周一存回，后续按「第 1 周 = 该周周一」推算。
-    """
-    d = st.session_state.get("course_anchor")
-    if d is not None and hasattr(d, "weekday"):
-        st.session_state.course_anchor = _this_monday(d)
-    st.session_state.course_anchor_set = True
-    # 立刻记住到客户端 Cookie，下次打开不用重设
-    _save_prefs_cookie()
+    opening = not bool(st.session_state.get("anchor_open"))
+    st.session_state.anchor_open = opening
+    if opening:
+        st.session_state.anchor_epoch = int(
+            st.session_state.get("anchor_epoch", 0)) + 1
 
 
 def _cb_anchor_this_week() -> None:
     """快捷键：把今天所在的这一周设为第一周。"""
-    st.session_state.course_anchor = _this_monday()
+    d = _this_monday()
+    st.session_state.course_anchor_value = d
     st.session_state.course_anchor_set = True
+    # 换 key 让输入框立刻显示新值，而不是等下一次挂载
+    st.session_state.anchor_epoch = int(
+        st.session_state.get("anchor_epoch", 0)) + 1
     _save_prefs_cookie()
 
 
@@ -9744,15 +9767,24 @@ def _render_anchor_editor() -> None:
                "一直重复到第 19 周。在下面选开学第一周里的**任意一天**"
                "（例如 8 月 31 日 ~ 9 月 6 日里的任何一天），会自动对齐到"
                "那一周的周一。")
-    st.date_input(
+    # widget 每次展开都换新 key（见 _cb_toggle_anchor）：
+    #  · key 里带 epoch，重新挂载就是全新控件，前端没有旧值可回放；
+    #  · 值始终由 value=_anchor_date() 注入，权威值不会被控件覆盖。
+    key = f"course_anchor_{int(st.session_state.get('anchor_epoch', 0))}"
+    picked = st.date_input(
         "开学第一周（选其中任意一天）",
-        value=_this_monday(),
-        key="course_anchor",
-        on_change=_cb_course_anchor,
+        value=_anchor_date(),
+        key=key,
         format="YYYY/MM/DD",
     )
-    anchor = _this_monday(st.session_state.get("course_anchor")
-                          or datetime.now().date())
+    # 只认「和权威值不同」的选择，并统一对齐到周一
+    if hasattr(picked, "weekday"):
+        chosen = _this_monday(picked)
+        if chosen != _anchor_date():
+            st.session_state.course_anchor_value = chosen
+            st.session_state.course_anchor_set = True
+            _save_prefs_cookie()
+    anchor = _anchor_date()
     sun = anchor + timedelta(days=6)
     st.markdown(f"**第 1 周：{anchor.month} 月 {anchor.day} 日 ~ "
                 f"{sun.month} 月 {sun.day} 日**")
@@ -9919,9 +9951,10 @@ _PREFS_COOKIE = "wb_prefs"
 def _prefs_snapshot() -> dict[str, Any]:
     """当前需要记住的偏好：起始周（ISO 日期）+ 自定义作息表。"""
     data: dict[str, Any] = {}
-    anchor = st.session_state.get("course_anchor")
-    if hasattr(anchor, "isoformat"):
-        data["a"] = anchor.isoformat()
+    # 只在用户真正设置过起始周时才写：否则会把「默认的本周一」当成
+    # 用户的选择存下来，下次打开反而把日期写死成旧的一周。
+    if st.session_state.get("course_anchor_set"):
+        data["a"] = _anchor_date().isoformat()
     rows = st.session_state.get("period_rows")
     if isinstance(rows, list) and rows:
         cleaned = _clean_period_rows(rows)
@@ -9963,7 +9996,8 @@ def _load_prefs_cookie() -> None:
         raw_date = str(prefs.get("a") or "")
         if raw_date:
             try:
-                st.session_state.course_anchor = date.fromisoformat(raw_date)
+                d = date.fromisoformat(raw_date)
+                st.session_state.course_anchor_value = d
                 st.session_state.course_anchor_set = True
             except ValueError:
                 pass
@@ -10550,8 +10584,7 @@ def render_settings_panel() -> None:
 
     # ---------- 课表识别 ----------
     st.markdown("#### 📅 课表识别")
-    anchor = _this_monday(st.session_state.get("course_anchor")
-                          or datetime.now().date())
+    anchor = _anchor_date()
     st.caption(f"学期起始周在侧边栏「📅 学期起始周」里设置（当前第 1 周："
                f"{anchor.month} 月 {anchor.day} 日起）。")
     st.caption("课表截图里的周次按起始周换算；上课时间按侧边栏"
@@ -10613,8 +10646,7 @@ def render_sidebar() -> None:
             with st.container(border=True):
                 _render_anchor_editor()
         else:
-            anchor = _this_monday(st.session_state.get("course_anchor")
-                                  or datetime.now().date())
+            anchor = _anchor_date()
             wk = (_this_monday(datetime.now().date()) - anchor).days // 7 + 1
             st.caption(f"第 1 周 {anchor.month}/{anchor.day} 起 · "
                        + (f"本周是第 {wk} 周" if wk >= 1 else "学期未开始")
@@ -11391,8 +11423,7 @@ def _render_calendar() -> None:
                     _html(f'<div class="cal-wd">{"一二三四五六日"[idx]}</div>')
 
             # 学期起始周：设置后在日历上标注每周是教学第几周
-            anchor = _this_monday(st.session_state.get("course_anchor")
-                                  or datetime.now().date())
+            anchor = _anchor_date()
             month_days = [d for wk in _calendar_matrix(year, month)
                           for d in wk if d is not None]
             if month_days:
@@ -12017,6 +12048,11 @@ def main() -> None:
     )
 
     render_sidebar()
+
+    # 侧边栏里的控件会在渲染过程中直接改设置（例如起始周的日期选择器），
+    # 排队的 Cookie 必须在这里再刷一次 —— 上面的 flush 在侧边栏之前，
+    # 否则这次写入要等下一轮 rerun 才发得出去。
+    _flush_pending_cookie()
 
     # 上一步操作留下的提示（st.toast 无法跨 rerun 存活，需中转）。
     # 放在 tabs 之前，这样无论在哪个页签操作都能立刻看到。
