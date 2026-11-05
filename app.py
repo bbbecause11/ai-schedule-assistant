@@ -5277,7 +5277,42 @@ def _anchor_date() -> "date":
         v = st.session_state.get(key)
         if hasattr(v, "weekday"):
             return _this_monday(v)
+    from_url = _anchor_from_url()
+    if from_url is not None:
+        return from_url
     return _this_monday()
+
+
+def _anchor_from_url() -> "date | None":
+    """从 URL 参数（?anchor=YYYY-MM-DD）读起始周。
+
+    这是最后一层兜底：Cookie 依赖浏览器与注入脚本、加密密钥，
+    有些环境（隐私模式、云端沙箱）会失效；URL 参数完全由服务端维护，
+    刷新、重连、换会话都还在。
+    """
+    try:
+        raw = str(st.query_params.get(_ANCHOR_QP, "") or "").strip()
+    except Exception:  # noqa: BLE001
+        return None
+    if not raw:
+        return None
+    try:
+        return _this_monday(date.fromisoformat(raw))
+    except ValueError:
+        return None
+
+
+def _remember_anchor(d: "date") -> None:
+    """写入起始周：会话权威值 + URL 参数 + 客户端 Cookie，三处一起更新。"""
+    d = _this_monday(d)
+    st.session_state.course_anchor_value = d
+    st.session_state.course_anchor_set = True
+    try:
+        if str(st.query_params.get(_ANCHOR_QP, "") or "") != d.isoformat():
+            st.query_params[_ANCHOR_QP] = d.isoformat()
+    except Exception:  # noqa: BLE001 - 老版本无 query_params
+        pass
+    _save_prefs_cookie()
 
 
 def _weeks_label(weeks: list[tuple[int, int]]) -> str:
@@ -9753,12 +9788,10 @@ def _cb_toggle_anchor() -> None:
 def _cb_anchor_this_week() -> None:
     """快捷键：把今天所在的这一周设为第一周。"""
     d = _this_monday()
-    st.session_state.course_anchor_value = d
-    st.session_state.course_anchor_set = True
     # 换 key 让输入框立刻显示新值，而不是等下一次挂载
     st.session_state.anchor_epoch = int(
         st.session_state.get("anchor_epoch", 0)) + 1
-    _save_prefs_cookie()
+    _remember_anchor(d)
 
 
 def _render_anchor_editor() -> None:
@@ -9781,17 +9814,8 @@ def _render_anchor_editor() -> None:
     if hasattr(picked, "weekday"):
         chosen = _this_monday(picked)
         if chosen != _anchor_date():
-            st.session_state.course_anchor_value = chosen
-            st.session_state.course_anchor_set = True
-            _save_prefs_cookie()
+            _remember_anchor(chosen)
     anchor = _anchor_date()
-    # TODO(debug): 临时诊断，确认线上 Cookie 是否真的写入
-    try:
-        _ck = str(st.context.cookies.get(_PREFS_COOKIE, ""))
-    except Exception:  # noqa: BLE001
-        _ck = "ERR"
-    st.caption(f"DEBUG cookie_len={len(_ck)} cipher={'Y' if _cookie_cipher_key() else 'N'} "
-               f"set={st.session_state.get('course_anchor_set')} v={anchor}")
     sun = anchor + timedelta(days=6)
     st.markdown(f"**第 1 周：{anchor.month} 月 {anchor.day} 日 ~ "
                 f"{sun.month} 月 {sun.day} 日**")
@@ -9953,6 +9977,7 @@ def _flush_pending_cookie() -> None:
 # 和 AI 配置分开一个 Cookie（wb_prefs）：AI 配置只在「保存并启用」时写，
 # 这两个设置随改随写，混在一起会互相覆盖。
 _PREFS_COOKIE = "wb_prefs"
+_ANCHOR_QP = "anchor"      # URL 里的起始周兜底参数（?anchor=2026-09-07）
 
 
 def _prefs_snapshot() -> dict[str, Any]:
@@ -9997,6 +10022,11 @@ def _load_prefs_cookie() -> None:
         return
     prefs = _decrypt_cfg(token) if token else None
     if not prefs:
+        # Cookie 不可用（隐私模式 / 无加密密钥）时，退到 URL 参数
+        url_anchor = _anchor_from_url()
+        if url_anchor is not None:
+            st.session_state.course_anchor_value = url_anchor
+            st.session_state.course_anchor_set = True
         return
     st.session_state["_prefs_loading"] = True
     try:

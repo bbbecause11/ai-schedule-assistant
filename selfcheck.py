@@ -2032,10 +2032,13 @@ def test_remember_prefs() -> None:
           and 'data["p"] = cleaned' in src)
 
     # ② 三个写入触发点：改起始周、点「本周设为第一周」、改作息表
-    check("改起始周会立刻写 Cookie",
-          "_save_prefs_cookie()" in
+    check("改起始周会立刻落盘（Cookie + URL 参数）",
+          "_remember_anchor(chosen)" in
           src[src.find("def _render_anchor_editor"):
-              src.find("def _cb_reset_periods")])
+              src.find("def _cb_reset_periods")]
+          and "_save_prefs_cookie()" in
+          src[src.find("def _remember_anchor"):
+              src.find("def _cb_anchor_this_week")])
     check("改作息表会写 Cookie（默认模板不存，视为未自定义）",
           "rows != _default_period_rows()" in src
           and "_save_prefs_cookie()" in src[src.find("def _set_period_rows"):
@@ -2081,13 +2084,17 @@ def test_anchor_persist() -> None:
           "st.session_state.anchor_epoch" in
           src[src.find("def _cb_toggle_anchor"):
               src.find("def _cb_anchor_this_week")])
-    check("改日期后写权威值并落 Cookie（不再走 on_change）",
-          "st.session_state.course_anchor_value = chosen" in
+    check("改日期后写权威值并落盘（不再走 on_change）",
+          "_remember_anchor(chosen)" in
           src[src.find("def _render_anchor_editor"):
               src.find("def _cb_reset_periods")]
           and "on_change=_cb_course_anchor" not in src)
+    check("起始周镜像到 URL 参数（不依赖 JS / 加密密钥）",
+          '_ANCHOR_QP = "anchor"' in src
+          and "st.query_params[_ANCHOR_QP] = d.isoformat()" in src
+          and "from_url = _anchor_from_url()" in src)
     check("「把本周设为第一周」同步权威值",
-          "st.session_state.course_anchor_value = d" in
+          "_remember_anchor(d)" in
           src[src.find("def _cb_anchor_this_week"):
               src.find("def _render_anchor_editor")])
     check("Cookie 回填同时写权威值",
