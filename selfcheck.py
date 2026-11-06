@@ -2329,6 +2329,39 @@ def test_feedback() -> None:
     check("正文带应用版本号",
           f"应用版本：v{app.APP_VERSION}" in m.get_body().get_content())
 
+    # ⑥ 连接方式推断
+    #    线上踩过：secrets 里写了 port = 465 但没写 use_tls，旧代码
+    #    `bool(cfg.get("use_tls", True))` 默认 True，于是对 465 端口发 STARTTLS，
+    #    握手失败 → 用户只看到「发送失败」。现在按端口推断，并留备用通道。
+    check("465 端口即使没写 use_tls 也走 SSL",
+          app._smtp_attempts({"port": 465})[0] == ("ssl", 465))
+    check("587 端口走 STARTTLS",
+          app._smtp_attempts({"port": 587, "use_tls": True})[0] == ("starttls", 587))
+    check("首选失败后有备用通道（465 → 587）",
+          len(app._smtp_attempts({"port": 465})) == 2
+          and app._smtp_attempts({"port": 465})[1] == ("starttls", 587))
+    check("配置摘要里的账号打码，不把邮箱明文摆到界面",
+          "***@" in app._smtp_cfg_summary({"host": "smtp.163.com", "user": "abc@163.com"}))
+
+    # ⑦ 失败信息必须具体：能看出是哪台主机、哪个端口、什么异常
+    ok2, msg2 = app._send_feedback("测试", "描述", [],
+                                   cfg={"host": "127.0.0.1", "port": 9,
+                                        "user": "a@b.c", "password": "x"})
+    check("发送失败时回传具体原因（主机 / 端口 / 异常类型）",
+          ok2 is False and "127.0.0.1" in msg2 and "9" in msg2, msg2[:90])
+
+    # ⑧ 弹窗自身的可读性：状态、报错、关窗
+    check("弹窗里常显 SMTP 配置状态",
+          "_smtp_cfg_summary(cfg)" in src and "自动发送：" in src)
+    check("自动发送失败时把真实原因显示出来（不是笼统提示）",
+          'st.error(f"自动发送没成功：{msg}")' in src)
+    check("发送成功后整页 rerun 关窗（fragment 里 return 关不掉）",
+          'st.rerun(scope="app")' in src)
+    check("告警框按语义配色（浅底白字看不见的老问题）",
+          '[data-testid="stAlertContainer"]' in src
+          and 'stAlertContentWarning' in src
+          and "stAlertContentError" in src)
+
 
 def test_layout_optimizations() -> None:
     """布局优化：顶部不再被注入块白吃 80px；手机端 Hero / 指标卡收紧。"""
