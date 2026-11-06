@@ -34,6 +34,7 @@ import json
 import os
 import re
 import smtplib
+import ssl
 import time
 import traceback
 import uuid
@@ -7190,6 +7191,63 @@ section[role="dialog"] {
     color: var(--ink) !important;
 }
 
+/* ---------- st.warning / st.info / st.success / st.error 的配色修复 ----------
+   Streamlit 的告警底色来自 config.toml（base = "light"），永远是浅黄 / 浅蓝；
+   而弹窗里 `p` 被统一刷成了 --ink（深色主题是近白色），
+   结果就是「浅底 + 近白字」，整段提示几乎看不见。
+   这里按语义把底色、边框、文字一起重铺，明暗两套主题各自成立。
+
+   结构（Streamlit 1.66）：
+     DIV[data-testid=stAlertContainer][role=alert|status]
+       └ DIV[data-testid=stAlertContent<Warning|Info|Success|Error>]
+   容器带 $kind 但不出现在 DOM 属性里，只能靠子元素的 testid 判断类型，
+   所以用 :has() 区分；不支持 :has() 的浏览器退化成「中性底 + 可读文字」。 */
+[data-testid="stAlertContainer"] {
+    background: var(--chip-info-bg) !important;
+    border: 1px solid var(--chip-info-bd) !important;
+    border-left: 3px solid var(--chip-info-fg) !important;
+    border-radius: var(--r-md) !important;
+    color: var(--chip-info-fg) !important;
+    box-shadow: none !important;
+}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]) {
+    background: var(--chip-warn-bg) !important;
+    border-color: var(--chip-warn-bd) !important;
+    border-left-color: var(--chip-warn-fg) !important;
+    color: var(--chip-warn-fg) !important;
+}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]) {
+    background: var(--chip-bad-bg) !important;
+    border-color: var(--chip-bad-bd) !important;
+    border-left-color: var(--chip-bad-fg) !important;
+    color: var(--chip-bad-fg) !important;
+}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) {
+    background: var(--chip-ok-bg) !important;
+    border-color: var(--chip-ok-bd) !important;
+    border-left-color: var(--chip-ok-fg) !important;
+    color: var(--chip-ok-fg) !important;
+}
+/* 文字一律继承容器色：这条选择器的特异性高于弹窗里的 `p { color: --ink }`，
+   不依赖样式先后顺序。 */
+[data-testid="stAlertContainer"] [data-testid^="stAlertContent"],
+[data-testid="stAlertContainer"] [data-testid^="stAlertContent"] *,
+[data-testid="stAlertContainer"] [data-testid="stAlertTitle"] {
+    color: inherit !important;
+    -webkit-text-fill-color: inherit !important;
+    background: transparent !important;
+}
+/* 图标跟着文字色走，否则深色底上是个灰叉 */
+[data-testid="stAlertContainer"] [data-testid="stAlertDynamicIcon"],
+[data-testid="stAlertContainer"] [data-testid="stAlertDynamicIcon"] svg {
+    color: inherit !important;
+    fill: currentColor !important;
+}
+[data-testid="stAlertContainer"] a {
+    color: inherit !important;
+    text-decoration: underline;
+}
+
 /* 弹窗内的输入框：毛玻璃底下要能看清字，
    底色略提亮一档，避免半透明玻璃把输入框衬得发虚 */
 [data-testid="stDialog"] .stTextInput input,
@@ -9186,18 +9244,53 @@ def _build_feedback_message(
     return msg, skipped
 
 
+def _smtp_cfg_summary(cfg: dict[str, Any]) -> str:
+    """给界面看的一行配置摘要（不泄露授权码）。"""
+    host = str(cfg.get("host", "")).strip()
+    user = str(cfg.get("user", "")).strip()
+    if not host:
+        return "未配置（开发者还没在 Secrets 里加 [smtp]）"
+    port = str(cfg.get("port", "")).strip() or "默认"
+    if "@" in user:
+        name, _, domain = user.partition("@")
+        masked = (name[:2] + "***@" + domain) if len(name) > 2 else ("***@" + domain)
+    else:
+        masked = user or "（缺 user）"
+    return f"{host}:{port} · {masked}"
+
+
+def _smtp_attempts(cfg: dict[str, Any]) -> list[tuple[str, int]]:
+    """按配置推断连接方式，并准备一条备用通道。
+
+    163 / QQ 这类服务商端口固定：465 走 SSL，587 走 STARTTLS。
+    云端有时会封掉其中一种，所以首选失败后自动换另一种再试一次。
+    """
+    port = int(cfg.get("port") or 465)
+    use_tls = cfg.get("use_tls", None)
+    if use_tls is None:
+        mode = "ssl" if port == 465 else "starttls"
+    else:
+        mode = "starttls" if bool(use_tls) else "ssl"
+    first = (mode, port)
+    alt = ("starttls", 587) if mode == "ssl" else ("ssl", 465)
+    return [first] if alt[1] == port else [first, alt]
+
+
 def _send_feedback(ftype: str, desc: str, shots: list[Any],
                    cfg: dict[str, Any] | None = None) -> tuple[bool, str]:
     """
     发送反馈邮件。SMTP 配置（host/user/password）来自 st.secrets：
 
     [smtp]
-    host = "smtp-mail.outlook.com"   # 也可换成 QQ / 163 / Gmail 的 SMTP
-    port = 587
+    host = "smtp.163.com"            # 163 / QQ / Gmail 都行
+    port = 465
+    use_tls = false                  # 465 = SSL(false)；587 = STARTTLS(true)
     user = "发件邮箱"
-    password = "授权码"
+    password = "客户端授权码"          # 不是登录密码
+    to = "收件邮箱"                   # 可省略，默认 _FEEDBACK_TO
 
-    没配置时返回失败，弹窗会退回 mailto 方式。
+    返回 (是否成功, 说明)。失败时说明里带**具体的失败原因**，
+    不再是一句笼统的「网络或账号问题」—— 云端排障全靠这句话。
     cfg 参数供测试注入，不传则读 secrets。
     """
     if cfg is None:
@@ -9205,26 +9298,57 @@ def _send_feedback(ftype: str, desc: str, shots: list[Any],
     host = str(cfg.get("host", "")).strip()
     user = str(cfg.get("user", "")).strip()
     password = str(cfg.get("password", "")).strip()
-    if not (host and user and password):
-        return False, "未配置 SMTP（st.secrets 的 [smtp] 段）"
+    missing = [n for n, v in (("host", host), ("user", user),
+                              ("password", password)) if not v]
+    if missing:
+        return False, "未配置 SMTP（缺 " + "、".join(missing) + "）"
     try:
         msg, _ = _build_feedback_message(cfg, ftype, desc, shots)
-        port = int(cfg.get("port", 587))
-        use_tls = bool(cfg.get("use_tls", True))
-        if use_tls:
-            with smtplib.SMTP(host, port, timeout=20) as srv:
-                srv.ehlo()
-                srv.starttls()
-                srv.login(user, password)
-                srv.send_message(msg)
-        else:
-            with smtplib.SMTP_SSL(host, port, timeout=20) as srv:
-                srv.login(user, password)
-                srv.send_message(msg)
-        return True, "已发送"
-    except Exception:  # noqa: BLE001 - 发信失败要给用户看得懂的提示
-        log(f"反馈邮件发送失败: {traceback.format_exc()}")
-        return False, "发送失败（网络或账号授权问题）"
+    except Exception:  # noqa: BLE001 - 附件组装失败也要给出可读原因
+        log(f"反馈邮件组装失败: {traceback.format_exc()}")
+        return False, "邮件内容组装失败（截图可能过大或格式异常）"
+
+    errors: list[str] = []
+    for mode, port in _smtp_attempts(cfg):
+        label = f"{host}:{port}（{'SSL' if mode == 'ssl' else 'STARTTLS'}）"
+        try:
+            ctx = ssl.create_default_context()
+            if mode == "ssl":
+                with smtplib.SMTP_SSL(host, port, timeout=15, context=ctx) as srv:
+                    srv.login(user, password)
+                    srv.send_message(msg)
+            else:
+                with smtplib.SMTP(host, port, timeout=15) as srv:
+                    srv.ehlo()
+                    srv.starttls(context=ctx)
+                    srv.ehlo()
+                    srv.login(user, password)
+                    srv.send_message(msg)
+            log(f"反馈邮件已发送（{label}）")
+            return True, f"已发送（{label}）"
+        except smtplib.SMTPAuthenticationError as exc:
+            # 认证失败换端口也没用，直接把服务商原话抛给用户
+            detail = ""
+            try:
+                detail = exc.smtp_error.decode("utf-8", "ignore") if isinstance(
+                    exc.smtp_error, bytes) else str(exc.smtp_error)
+            except Exception:  # noqa: BLE001
+                detail = str(exc)
+            errors.append(f"{label} 认证失败 {exc.smtp_code}：{detail[:120]}"
+                          f"（163/QQ 要用「客户端授权码」，不是登录密码）")
+            log(f"反馈邮件认证失败 {label}: {exc}")
+            break
+        except (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected,
+                smtplib.SMTPHeloError, OSError) as exc:
+            errors.append(f"{label} 连不上：{type(exc).__name__}"
+                          f"{('：' + str(exc)[:80]) if str(exc) else ''}")
+            log(f"反馈邮件连接失败 {label}: {traceback.format_exc()}")
+            continue
+        except Exception as exc:  # noqa: BLE001 - 发信失败要给用户看得懂的提示
+            errors.append(f"{label} {type(exc).__name__}：{str(exc)[:100]}")
+            log(f"反馈邮件发送失败 {label}: {traceback.format_exc()}")
+            break
+    return False, "；".join(errors) or "未知错误"
 
 
 @st.dialog("📮 问题反馈", width="small")
@@ -9244,23 +9368,35 @@ def _show_feedback_dialog() -> None:
             accept_multiple_files=True, key="fb_shots",
         )
         shots = (shots or [])[:_FEEDBACK_MAX_SHOTS]
+        cfg = _smtp_config()
+        st.caption(f"自动发送：{_smtp_cfg_summary(cfg)}")
         if st.button("发送反馈", type="primary", width="stretch", key="fb_send"):
             if not desc.strip():
                 st.warning("先写两句描述吧，光选类型我没法定位问题。")
                 return
-            ok, msg = _send_feedback(ftype, desc, shots)
+            ok, msg = _send_feedback(ftype, desc, shots, cfg)
             if ok:
                 st.session_state.pending_toast = "反馈已发送，谢谢你！🙏"
-                return                                  # 返回即关闭弹窗
+                # 弹窗是 fragment，直接 return 不会关窗也不会弹 toast；
+                # 整页 rerun 才会收起弹窗，让主页面的 pending_toast 生效
+                st.rerun(scope="app")
             # SMTP 没配或发失败：退回 mailto，让访客用自己的邮件应用发
             if msg.startswith("未配置"):
-                st.warning(
-                    "这个站点还没有配置自动发信通道（开发者需要在 Streamlit Cloud "
-                    "的 Secrets 里加入 [smtp] 段，见 README「问题反馈邮箱配置」）。"
-                    "先用你的邮件应用发送，截图请手动附上：")
+                st.warning("这个站点还没有配置自动发信通道，先用你的邮件应用发送，"
+                           "截图请手动附上：")
+                with st.expander("开发者：三条命令开启自动发送"):
+                    st.code('[smtp]\n'
+                            'host = "smtp.163.com"      # 或 smtp.qq.com / smtp.gmail.com\n'
+                            'port = 465\n'
+                            'use_tls = false            # 465 用 false；587 用 true\n'
+                            'user = "发件邮箱@163.com"\n'
+                            'password = "客户端授权码"   # 不是登录密码\n'
+                            'to = "bbbecause11@outlook.com"',
+                            language="toml")
+                    st.caption("填到 Streamlit Cloud → Settings → Secrets，保存后自动重启。")
             else:
-                st.warning("自动发送没成功（网络或发件账号问题），"
-                           "改用你的邮件应用发送，截图请手动附上：")
+                st.error(f"自动发送没成功：{msg}")
+                st.caption("下面两种方式都能把反馈送到，截图请手动附上：")
             st.link_button("📧 打开邮件应用发送",
                            _feedback_mailto(ftype, desc), width="stretch")
             st.caption(f"收件邮箱：{_FEEDBACK_TO}（也可复制下面的内容发过去）")
